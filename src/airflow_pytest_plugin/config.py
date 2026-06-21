@@ -12,14 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Resolve the report root -- the same way on producer and reader.
-
-Precedence, highest first:
-1. an explicit argument in code (handled by the caller);
-2. ``AIRFLOW_PYTEST_REPORTS_ROOT`` (env);
-3. ``[pytest_reports] reports_root`` (Airflow config);
-4. the default ``/opt/airflow/pytest-reports``.
-"""
+"""Resolve the report root (env, then Airflow config, then default)."""
 
 from __future__ import annotations
 

@@ -27,7 +27,7 @@ from airflow_pytest_plugin.models import ReportRef
 def junit_xml(
     *, passed: int = 1, failed: int = 0, errors: int = 0, skipped: int = 0
 ) -> str:
-    """Build a tiny but valid pytest-style JUnit XML document."""
+    """Build a tiny valid pytest-style JUnit XML document."""
     cases = []
     i = 0
     for _ in range(passed):
@@ -102,6 +102,37 @@ def write_report(
             "success": (failed + errors) == 0,
             "failed_node_ids": [],
         },
+    }
+    with open(os.path.join(out_dir, META_FILENAME), "w", encoding="utf-8") as fh:
+        json.dump(meta, fh)
+    return out_dir
+
+
+def write_report_xml(
+    root: str,
+    ref: ReportRef,
+    xml: str,
+    *,
+    created_at: str = "2026-06-21T10:00:00+00:00",
+    summary: dict | None = None,
+) -> str:
+    """Materialise a report with a caller-supplied JUnit XML body."""
+    layout = ReportLayout()
+    out_dir = layout.dir_for(root, ref)
+    os.makedirs(out_dir, exist_ok=True)
+    with open(layout.report_path(root, ref), "w", encoding="utf-8") as fh:
+        fh.write(xml)
+    meta = {
+        "schema_version": 1,
+        "dag_id": ref.dag_id,
+        "run_id": ref.run_id,
+        "task_id": ref.task_id,
+        "try_number": ref.try_number,
+        "map_index": ref.map_index,
+        "logical_date": None,
+        "created_at": created_at,
+        "report_file": "junit.xml",
+        "summary": summary or {},
     }
     with open(os.path.join(out_dir, META_FILENAME), "w", encoding="utf-8") as fh:
         json.dump(meta, fh)

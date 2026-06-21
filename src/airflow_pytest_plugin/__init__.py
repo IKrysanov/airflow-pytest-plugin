@@ -12,19 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""View airflow-pytest-operator results in the Airflow 3 web UI.
-
-A producer-side parser archives each JUnit report plus a ``meta.json`` sidecar;
-a reader-side source and a FastAPI plugin serve a viewer over them.
-
-Public API:
-    ArchivingJUnitResultParser -- producer-side parser (use as ``parser=``)
-    ReportSource / FileSystemReportSource -- reader interface + default source
-    ReportRef / ReportSummary / ReportDetail / CaseView -- view models
-    ReportLayout       -- the shared on-disk layout
-    get_reports_root   -- resolve the report root (env/conf/default)
-    create_app         -- build the FastAPI app (lazy; needs FastAPI)
-"""
+"""View airflow-pytest-operator results in the Airflow 3 web UI."""
 
 from __future__ import annotations
 
@@ -38,9 +26,7 @@ from .sources import FileSystemReportSource, ReportSource
 from .version import __version__ as __version__
 
 if TYPE_CHECKING:
-    # Exposed lazily via __getattr__ so importing the package never eagerly
-    # imports FastAPI (the producer-side parser must import cleanly on a worker
-    # that has no web stack).
+    # Exposed lazily via __getattr__ so importing the package never imports FastAPI.
     from .web import create_app as create_app
 
 __all__ = [

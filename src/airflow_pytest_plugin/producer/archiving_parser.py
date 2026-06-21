@@ -12,20 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Producer-side parser: archive each JUnit report under the reports layout.
-
-Subclasses the operator's ``JUnitResultParser`` and overrides two seams:
-``report_request`` points pytest at
-``{root}/{dag_id}/{run_id}/{task_id}/t{try}[/m{map}]/junit.xml`` (a
-parser-supplied directory the runner never deletes -- so ``cleanup="never"`` is
-not needed), and ``parse`` writes a ``meta.json`` sidecar that makes the report
-self-describing for the reader. Coordinates come from ``get_current_context()``
-(the parser runs inside the task's ``execute()``); off-task calls fall back to a
-synthetic ref. Airflow is imported only lazily, via the compat shim.
-
-    PytestOperator(task_id="tests", test_path="tests/",
-                   parser=ArchivingJUnitResultParser())
-"""
+"""Producer-side parser: archive each JUnit report under the reports layout."""
 
 from __future__ import annotations
 
@@ -50,15 +37,7 @@ META_SCHEMA_VERSION = 1
 
 
 class ArchivingJUnitResultParser(JUnitResultParser):  # type: ignore[misc]
-    """JUnit parser that lays reports out for the reports UI.
-
-    :param report_root: directory under which reports are archived. Defaults to
-        :func:`~airflow_pytest_plugin.config.get_reports_root` (env var /
-        Airflow config / built-in default) so producer and reader agree without
-        extra wiring.
-    :param layout: the :class:`~airflow_pytest_plugin.layout.ReportLayout` that
-        maps a report to a directory. Injectable for tests / custom schemes.
-    """
+    """JUnit parser that lays reports out for the reports UI."""
 
     def __init__(
         self,
@@ -69,9 +48,8 @@ class ArchivingJUnitResultParser(JUnitResultParser):  # type: ignore[misc]
         super().__init__()  # base report_dir stays None; we compute per-run
         self._report_root = os.path.abspath(report_root or get_reports_root())
         self._layout = layout or ReportLayout()
-        # The ref resolved in report_request, reused by parse() to name the
-        # sidecar. One parser instance serves one task (sequential reruns
-        # reuse the same context), so a single slot is sufficient.
+        # Ref resolved in report_request, reused by parse() to name the sidecar.
+        # One parser instance serves one task, so a single slot suffices.
         self._pending_ref: ReportRef | None = None
         self._pending_context: dict[str, Any] | None = None
 
@@ -80,11 +58,9 @@ class ArchivingJUnitResultParser(JUnitResultParser):  # type: ignore[misc]
         return self._report_root
 
     def report_request(self, report_dir: str) -> ReportRequest:
-        # Resolve the Airflow coordinates now (we are inside execute()), pick the
-        # archive directory, and hand it to the base parser by pointing its
-        # ``report_dir`` at our location. Reusing ``super().report_request``
-        # keeps the JUnit CLI flags (``--junitxml`` + ``junit_logging=all``)
-        # defined in exactly one place (the operator's parser).
+        # Resolve coordinates now (inside execute()) and point the base parser's
+        # report_dir at our archive location; reusing super() keeps the JUnit flags
+        # defined in one place.
         context = get_current_context()
         ref = self._resolve_ref(context)
         self._pending_ref = ref
@@ -102,9 +78,7 @@ class ArchivingJUnitResultParser(JUnitResultParser):  # type: ignore[misc]
 
     def parse(self, report_path: str, *, exit_code: int = 0) -> TestRunResult:
         result = super().parse(report_path, exit_code=exit_code)
-        # Best-effort sidecar: a failure to write meta.json must never mask the
-        # real test outcome, so we log and move on. The JUnit XML is already on
-        # disk; only the index entry would be missing.
+        # Best-effort sidecar: a write failure must never mask the test outcome.
         try:
             self._write_meta(report_path, result)
         except Exception:
@@ -116,11 +90,7 @@ class ArchivingJUnitResultParser(JUnitResultParser):  # type: ignore[misc]
     # -- internals -------------------------------------------------------
 
     def _resolve_ref(self, context: dict[str, Any] | None) -> ReportRef:
-        """Build a :class:`ReportRef` from the live Airflow context.
-
-        Falls back to a synthetic, collision-free ref when no context is active
-        so the parser is still usable off-task (tests, manual runs).
-        """
+        """Build a :class:`ReportRef` from context, or a synthetic ref off-task."""
         if not context:
             return ReportRef(
                 dag_id="_unknown",
@@ -160,10 +130,11 @@ class ArchivingJUnitResultParser(JUnitResultParser):  # type: ignore[misc]
 
     def _write_meta(self, report_path: str, result: TestRunResult) -> None:
         ref = self._pending_ref
+        context = self._pending_context
         if ref is None:
-            # parse() called without a prior report_request (defensive). Try to
-            # resolve a ref again; skip the sidecar if there is still no context.
-            ref = self._resolve_ref(get_current_context())
+            # parse() without a prior report_request: resolve from a fresh context.
+            context = get_current_context()
+            ref = self._resolve_ref(context)
         out_dir = os.path.dirname(os.path.abspath(report_path))
         meta = {
             "schema_version": META_SCHEMA_VERSION,
@@ -172,7 +143,7 @@ class ArchivingJUnitResultParser(JUnitResultParser):  # type: ignore[misc]
             "task_id": ref.task_id,
             "try_number": ref.try_number,
             "map_index": ref.map_index,
-            "logical_date": _logical_date(self._pending_context),
+            "logical_date": _logical_date(context),
             "created_at": datetime.now(timezone.utc).isoformat(),
             "report_file": REPORT_FILENAME,
             "summary": result.to_xcom(),

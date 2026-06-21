@@ -35,6 +35,34 @@ It has two halves that share one on-disk layout:
 | **Producer** | the worker | `ArchivingJUnitResultParser`, a drop-in `parser=` for `PytestOperator` |
 | **Reader** | the API server | a FastAPI app + single-page viewer, registered as an Airflow plugin |
 
+## Contents
+
+- [Screenshots](#screenshots)
+- [Install](#install)
+- [Quickstart](#quickstart)
+- [Do I need `cleanup="never"`?](#do-i-need-cleanupnever)
+- [How it works](#how-it-works)
+- [HTTP API](#http-api)
+- [Access control (RBAC)](#access-control-rbac)
+- [Configuration](#configuration)
+- [Architecture (SOLID)](#architecture-solid)
+- [Development](#development)
+- [License](#license)
+
+## Screenshots
+
+**Overview** — the run list with the historical chart (per-status legend
+toggles, run numbers, and a carousel beyond 30 runs), KPI cards, and Airflow-
+matched colours and font:
+
+![Pytest Reports — overview](https://raw.githubusercontent.com/IKrysanov/airflow-pytest-plugin/main/docs/screenshots/overview.png)
+
+**A single run** — a clickable success donut (pass-rate in the centre; click a
+slice to filter by status), the counts, and every test's captured output on
+expand:
+
+![Pytest Reports — a single run](https://raw.githubusercontent.com/IKrysanov/airflow-pytest-plugin/main/docs/screenshots/detail.png)
+
 ---
 
 ## Install
@@ -136,8 +164,41 @@ runtime. Endpoints (relative to the mount):
 | `GET /` | the single-page viewer (HTML) |
 | `GET /api/reports?dag_id=&run_id=` | summaries, newest first |
 | `GET /api/reports/{report_id}` | one report with per-case rows |
+| `DELETE /api/reports/{report_id}` | delete a report (RBAC-gated) |
 | `GET /api/health` | `{"status": "ok"}` |
 | `GET /api/docs` | OpenAPI docs |
+
+The reads (`GET`) and the delete are gated by Airflow RBAC — see below.
+
+## Access control (RBAC)
+
+Access is enforced the way Airflow 3 enforces it: every check goes through
+Airflow's **auth manager** (`is_authorized_dag(...)`) — the same call Airflow's
+own DAG-run endpoints make — keyed by the report's `dag_id` and the
+authenticated user. Two permissions are checked:
+
+| Action | Airflow 3.x check | Airflow 2.x (FAB) equivalent |
+| --- | --- | --- |
+| **See / open a report** | `is_authorized_dag(method="GET", access_entity=RUN)` | `can_read` on the DAG |
+| **Delete a report** | `is_authorized_dag(method="POST", access_entity=RUN)` (may trigger the DAG) | trigger / `can_create` on the DAG |
+
+The report list is filtered to the DAGs you may read, opening a report you can't
+read returns `403`, and deleting one requires permission to **trigger** its DAG.
+Every check **fails closed**: if the auth manager can't be consulted, access is
+denied.
+
+**Airflow 2 → 3 mapping.** Airflow 2's FAB used `(action, resource)` pairs —
+`can_read` / `can_edit` / `can_delete` / `can_create` on a resource such as
+`DAG:<id>`. Airflow 3 replaced these with the auth manager's `method`: `GET` ↔
+read, `POST` ↔ create, `PUT` ↔ edit, `DELETE` ↔ delete, `MENU` ↔ menu access.
+This plugin maps **read → `GET`** and **delete → `POST`** (trigger), so it
+inherits your existing per-DAG roles with no extra configuration.
+
+**Plugin visibility.** The nav entry is an Airflow `external_views` item, which
+has no per-permission gate, so the menu link is visible to every signed-in user;
+access is enforced on the **content** (a user who may read no DAG sees an empty
+list and `403` on direct links). The standalone dev server (no Airflow auth)
+allows everything.
 
 ## Configuration
 

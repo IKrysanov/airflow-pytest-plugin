@@ -34,6 +34,12 @@ def test_dir_for_mapped_task_adds_map_segment():
     assert layout.dir_for("/root", ref).endswith(os.path.join("t1", "m5"))
 
 
+def test_meta_path_points_at_sidecar():
+    layout = ReportLayout()
+    ref = ReportRef("dag", "run1", "task", 1)
+    assert layout.meta_path("/root", ref).endswith(os.path.join("t1", "meta.json"))
+
+
 def test_unsafe_run_id_is_sanitised_but_deterministic():
     layout = ReportLayout()
     ref = ReportRef("dag", "scheduled__2024-01-01T00:00:00+00:00", "task", 1)

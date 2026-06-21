@@ -12,20 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Single source of truth for the package version (read from package metadata)."""
-
 from __future__ import annotations
 
-from importlib.metadata import PackageNotFoundError, version
+import pytest
 
-_DIST_NAME = "airflow-pytest-plugin"
-
-
-def _resolve_version() -> str:
-    try:
-        return version(_DIST_NAME)
-    except PackageNotFoundError:  # uninstalled source tree
-        return "0.0.0+unknown"
+import airflow_pytest_plugin as pkg
 
 
-__version__ = _resolve_version()
+def test_create_app_is_lazily_exported():
+    # __getattr__ imports web.create_app lazily, keeping FastAPI off the parser import path.
+    pytest.importorskip("fastapi")
+    assert callable(pkg.create_app)
+
+
+def test_unknown_attribute_raises():
+    with pytest.raises(AttributeError):
+        pkg.does_not_exist  # noqa: B018

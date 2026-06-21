@@ -17,13 +17,21 @@
 from __future__ import annotations
 
 from .airflow import (
+    airflow_auth_available,
     get_airflow_plugin_base,
     get_conf_value,
     get_current_context,
+    get_user_dependency,
+    is_authorized_to_read,
+    is_authorized_to_trigger,
 )
 
 __all__ = [
     "get_current_context",
     "get_airflow_plugin_base",
     "get_conf_value",
+    "airflow_auth_available",
+    "get_user_dependency",
+    "is_authorized_to_read",
+    "is_authorized_to_trigger",
 ]

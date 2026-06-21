@@ -12,18 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""The FastAPI application.
-
-Maps HTTP routes onto an injected :class:`ReportSource` and serves the viewer --
-no filesystem, layout, or XML knowledge of its own (Dependency Inversion).
-Mountable under any prefix; the page derives its API base from the URL at
-runtime, so no base path is baked in.
-"""
+"""The FastAPI application: maps HTTP routes onto an injected ``ReportSource``."""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
+from ..compat import (
+    airflow_auth_available,
+    get_user_dependency,
+    is_authorized_to_read,
+    is_authorized_to_trigger,
+)
 from ..models import ReportRef
 from ..sources import FileSystemReportSource, ReportSource
 from .templates import index_html
@@ -31,11 +32,19 @@ from .templates import index_html
 if TYPE_CHECKING:
     from fastapi import FastAPI
 
-# The nav glyph (a flask / colba). Airflow's external_views ``icon`` is a URL,
-# so the app serves the SVG itself -- one per theme, since a URL-loaded SVG
-# can't inherit ``currentColor``. Blue tuned for contrast on each nav bg.
-_ICON_LIGHT = "#1e40af"
-_ICON_DARK = "#93b8f4"
+#: An authorizer: ``(dag_id, user) -> bool``. ``user`` is ``None`` standalone.
+Authorizer = Callable[[str, Any], bool]
+
+
+def _no_user() -> None:
+    """Standalone-mode user dependency: there is no Airflow user."""
+    return None
+
+
+# Airflow renders external_views ``icon`` as a plain ``<img>`` (no currentColor),
+# so bake the colour into the SVG -- one per theme.
+_ICON_LIGHT = "#52525b"
+_ICON_DARK = "#a1a1aa"
 
 
 def _flask_svg(stroke: str) -> str:
@@ -49,16 +58,37 @@ def _flask_svg(stroke: str) -> str:
     )
 
 
-def create_app(source: ReportSource | None = None) -> FastAPI:
+def create_app(
+    source: ReportSource | None = None,
+    authorizer: Authorizer | None = None,
+    read_authorizer: Authorizer | None = None,
+    user_dependency: Callable[[], Any] | None = None,
+) -> FastAPI:
     """Build the FastAPI app for ``source`` (defaults to the filesystem source).
 
-    Imported lazily so the rest of the package -- in particular the
-    producer-side parser on a worker -- never needs FastAPI installed.
+    ``read_authorizer`` gates which reports a user may see/open, ``authorizer``
+    who may delete; both default to Airflow DAG permissions when its auth is
+    available, else allow-all. ``user_dependency`` overrides current-user resolution.
     """
-    from fastapi import FastAPI, HTTPException
+    from fastapi import Depends, FastAPI, HTTPException
     from fastapi.responses import HTMLResponse, JSONResponse, Response
 
     src = source or FileSystemReportSource()
+
+    def _allow_all(dag_id: str, user: Any) -> bool:
+        return True
+
+    auth_on = airflow_auth_available()
+    read_auth: Authorizer = read_authorizer or (
+        is_authorized_to_read if auth_on else _allow_all
+    )
+    delete_auth: Authorizer = authorizer or (
+        is_authorized_to_trigger if auth_on else _allow_all
+    )
+    # Depends keeps the user out of the annotations, so future-annotations can't
+    # break dependency resolution.
+    user_dep = user_dependency or (get_user_dependency() if auth_on else _no_user)
+
     app = FastAPI(
         title="Airflow Pytest Reports",
         docs_url="/api/docs",
@@ -73,20 +103,47 @@ def create_app(source: ReportSource | None = None) -> FastAPI:
     def list_reports(
         dag_id: str | None = None,
         run_id: str | None = None,
+        user: Any = Depends(user_dep),  # noqa: B008 - FastAPI dependency idiom
     ) -> JSONResponse:
         summaries = src.list_summaries(dag_id=dag_id, run_id=run_id)
-        return JSONResponse({"reports": [s.to_dict() for s in summaries]})
+        visible = [s for s in summaries if read_auth(s.ref.dag_id, user)]
+        return JSONResponse({"reports": [s.to_dict() for s in visible]})
 
     @app.get("/api/reports/{report_id}")
-    def get_report(report_id: str) -> JSONResponse:
+    def get_report(
+        report_id: str,
+        user: Any = Depends(user_dep),  # noqa: B008 - FastAPI dependency idiom
+    ) -> JSONResponse:
         try:
             ref = ReportRef.from_token(report_id)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if not read_auth(ref.dag_id, user):
+            raise HTTPException(
+                status_code=403, detail="not authorized to read this report"
+            )
         detail = src.get_detail(ref)
         if detail is None:
             raise HTTPException(status_code=404, detail="report not found")
         return JSONResponse(detail.to_dict())
+
+    @app.delete("/api/reports/{report_id}")
+    def delete_report(
+        report_id: str,
+        user: Any = Depends(user_dep),  # noqa: B008 - FastAPI dependency idiom
+    ) -> JSONResponse:
+        try:
+            ref = ReportRef.from_token(report_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if not delete_auth(ref.dag_id, user):
+            raise HTTPException(
+                status_code=403,
+                detail="deleting a report requires permission to trigger its DAG",
+            )
+        if not src.delete(ref):
+            raise HTTPException(status_code=404, detail="report not found")
+        return JSONResponse({"deleted": True})
 
     @app.get("/icon.svg")
     def icon() -> Response:

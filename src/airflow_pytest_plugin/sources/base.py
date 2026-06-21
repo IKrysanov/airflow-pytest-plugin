@@ -12,12 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""The report-source interface.
-
-The web app depends only on this abstraction (Dependency Inversion), so a new
-backend (e.g. an ``XComReportSource`` over the metadata DB) is a new class, not
-an edit of the web app (Open/Closed).
-"""
+"""The report-source interface the web app depends on."""
 
 from __future__ import annotations
 
@@ -27,7 +22,7 @@ from ..models import ReportDetail, ReportRef, ReportSummary
 
 
 class ReportSource(ABC):
-    """Read-only access to archived pytest reports."""
+    """Access to archived pytest reports."""
 
     @abstractmethod
     def list_summaries(
@@ -36,14 +31,15 @@ class ReportSource(ABC):
         dag_id: str | None = None,
         run_id: str | None = None,
     ) -> list[ReportSummary]:
-        """Return summaries, newest first, optionally filtered.
-
-        ``dag_id`` / ``run_id`` narrow the listing by case-insensitive substring
-        match (``in``); ``None`` or empty means "any".
-        """
+        """Return summaries, newest first; ``dag_id``/``run_id`` filter by substring."""
         raise NotImplementedError
 
     @abstractmethod
     def get_detail(self, ref: ReportRef) -> ReportDetail | None:
         """Return the full detail for one report, or ``None`` if it is gone."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def delete(self, ref: ReportRef) -> bool:
+        """Permanently remove the report for ``ref``; ``True`` if one was removed."""
         raise NotImplementedError
