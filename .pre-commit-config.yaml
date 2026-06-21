@@ -1,0 +1,51 @@
+# Pre-commit hooks that mirror CI, so lint/type/test failures surface locally.
+# Uses the project's own tools (language: system) -- install the dev extra and
+# activate the venv first:
+#
+#     pip install -e ".[dev]"
+#     pip install pre-commit       # or: pipx install pre-commit
+#     pre-commit install           # wires pre-commit AND pre-push stages
+#
+# Fast static checks run on commit; mypy and the test suite run on push.
+default_install_hook_types: [pre-commit, pre-push]
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff (lint, autofix)
+        entry: ruff check --fix --force-exclude
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
+      - id: ruff-format
+        name: ruff (format)
+        entry: ruff format --force-exclude
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
+
+      - id: mypy
+        name: mypy (src, strict)
+        entry: mypy src
+        language: system
+        pass_filenames: false
+        files: ^(src/.*\.py|pyproject\.toml)$
+        stages: [pre-push]
+      - id: pytest
+        name: pytest
+        entry: pytest -q
+        language: system
+        pass_filenames: false
+        types: [python]
+        stages: [pre-push]

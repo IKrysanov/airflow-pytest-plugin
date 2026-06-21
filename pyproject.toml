@@ -1,0 +1,127 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "airflow-pytest-plugin"
+version = "0.1.0"
+description = "View airflow-pytest-operator results in the Airflow 3 web UI."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Ilya Krysanov" }]
+keywords = ["airflow", "pytest", "plugin", "testing", "reports", "ui"]
+
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Framework :: Apache Airflow",
+    "Framework :: Apache Airflow :: Provider",
+    "Framework :: Pytest",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Testing",
+]
+
+# The plugin reuses airflow-pytest-operator's JUnit parser and result models
+# (the producer-side parser subclasses ``JUnitResultParser``; the reader-side
+# source parses with it). That is the only hard dependency: like the operator,
+# Airflow itself is intentionally NOT pinned -- the package is installed *into*
+# an existing Airflow 3 environment. FastAPI ships with Airflow 3's API server,
+# so it is an optional extra here rather than a hard dependency: the
+# producer-side parser needs neither FastAPI nor Airflow imported eagerly.
+dependencies = [
+    "airflow-pytest-operator>=0.5",
+]
+
+[project.optional-dependencies]
+# Pick the extra matching your deployment to get a compatible Airflow.
+airflow3 = ["apache-airflow>=3.0,<4.0"]
+# The web/reader side. Airflow 3's API server already provides FastAPI, so this
+# is only needed to import/serve the app outside an Airflow process (e.g. the
+# bundled dev server ``python -m airflow_pytest_plugin.web``).
+web = ["fastapi>=0.110", "uvicorn>=0.23"]
+# Hardened XML parsing for untrusted JUnit reports (forwarded to the operator's
+# parser, which prefers defusedxml when present).
+secure-xml = ["defusedxml>=0.7"]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "fastapi>=0.110",
+    "httpx>=0.27",          # FastAPI TestClient transport
+    "defusedxml>=0.7",
+    "mypy>=1.8",
+    "ruff>=0.4",
+]
+
+[project.urls]
+Homepage = "https://github.com/IKrysanov/airflow-pytest-plugin"
+Repository = "https://github.com/IKrysanov/airflow-pytest-plugin"
+Issues = "https://github.com/IKrysanov/airflow-pytest-plugin/issues"
+
+# Airflow discovers pip-installed plugins via this entry-point group. The class
+# is import-light at module load (it lazily builds the FastAPI app and degrades
+# to no UI if FastAPI is unavailable), so loading it on a worker is harmless.
+[project.entry-points."airflow.plugins"]
+pytest_reports = "airflow_pytest_plugin.plugin:PytestReportsPlugin"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/airflow_pytest_plugin"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src", "tests", "examples", "README.md", "LICENSE"]
+
+# Coverage is opt-in: `pytest --cov=airflow_pytest_plugin`. CI adds
+# `--cov-report=xml` on one interpreter for Codecov; see .github/workflows/ci.yml.
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.coverage.run]
+branch = true
+source = ["airflow_pytest_plugin"]
+# The standalone dev server is exercised by hand, not in CI.
+omit = ["*/web/__main__.py"]
+
+[tool.coverage.report]
+precision = 1
+show_missing = true
+fail_under = 85
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+]
+
+[tool.ruff]
+line-length = 88
+src = ["src", "tests"]
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP", "C4", "N"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["N802", "N803", "N806"]
+
+[tool.mypy]
+python_version = "3.10"
+files = ["src"]
+strict = true
+ignore_missing_imports = true
+warn_unused_ignores = true
+no_implicit_reexport = false
+
+[tool.pyright]
+include = ["src"]
+pythonVersion = "3.10"
+reportMissingImports = "none"
+reportMissingModuleSource = "none"
