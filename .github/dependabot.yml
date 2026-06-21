@@ -18,6 +18,12 @@ updates:
         patterns:
           - "*"
 
+  # Python deps. The pip ecosystem at "/" recursively covers pyproject.toml AND
+  # the hash-pinned locks under requirements/ -- a separate /requirements entry
+  # would only create duplicate PRs for the same file. Updates are grouped into
+  # one PR (less noise, and co-dependent packages move together). After a bump,
+  # refresh the universal multi-platform hashes with the `uv pip compile` command
+  # in each lock file's header (Dependabot resolves for a single target only).
   - package-ecosystem: "pip"
     directory: "/"
     schedule:
@@ -26,18 +32,14 @@ updates:
     open-pull-requests-limit: 5
     commit-message:
       prefix: "deps"
-
-  # Hash-pinned CI lock files under /requirements (dev.txt, build.txt),
-  # installed with `pip install --require-hashes` so OpenSSF Scorecard's
-  # Pinned-Dependencies check sees CI deps pinned by hash. Dependabot bumps the
-  # pinned versions + hashes. After a bump, refresh the universal multi-platform
-  # hash set with the `uv pip compile` command in each file's header (Dependabot
-  # resolves for a single target only).
-  - package-ecosystem: "pip"
-    directory: "/requirements"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-    open-pull-requests-limit: 5
-    commit-message:
-      prefix: "deps"
+    groups:
+      python:
+        patterns:
+          - "*"
+    ignore:
+      # pydantic pins pydantic-core with an EXACT (==) version, so neither can be
+      # bumped on its own in a flat, fully-pinned lock -- Dependabot can't
+      # re-resolve the pair and produces an uninstallable lock either way. Let
+      # `uv pip compile` move them together when you regenerate the lock.
+      - dependency-name: "pydantic"
+      - dependency-name: "pydantic-core"
