@@ -34,6 +34,13 @@ jobs:
         with:
           languages: python
           queries: security-and-quality
+          # SAST targets shipped code only. tests/ and examples/ carry their own
+          # idioms (asserts with side-effects, a regex that scans our own HTML in
+          # a syntax-check test) that are not production vulnerabilities and
+          # shouldn't gate PRs -- scope the analysis to the package.
+          config: |
+            paths:
+              - src
       - name: Perform CodeQL analysis
         uses: github/codeql-action/analyze@8aad20d150bbac5944a9f9d289da16a4b0d87c1e  # v4.36.2
         with:
