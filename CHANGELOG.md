@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.2.0] - 2026-06-...
+## [0.2.0] - 2026-06-22
 
 A much richer Airflow 3 viewer: history chart, success donut, captured output for
 every test, RBAC-gated deletion, EN/RU localisation, deep-links, and a look that
