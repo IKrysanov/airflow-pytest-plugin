@@ -32,7 +32,7 @@ It has two halves that share one on-disk layout:
 
 | Side | Where it runs | What it is |
 | --- | --- | --- |
-| **Producer** | the worker | `ArchivingJUnitResultParser`, a drop-in `parser=` for `PytestOperator` |
+| **Producer** | the worker | `ArchivingResultParser`, a drop-in `parser=` for `PytestOperator` |
 | **Reader** | the API server | a FastAPI app + single-page viewer, registered as an Airflow plugin |
 
 ## Contents
@@ -81,12 +81,12 @@ enough there too; the `[web]` extra only adds the standalone dev server.
 
 ```python
 from airflow_pytest_operator import PytestOperator
-from airflow_pytest_plugin import ArchivingJUnitResultParser
+from airflow_pytest_plugin import ArchivingResultParser
 
 PytestOperator(
     task_id="run_tests",
     test_path="tests/",
-    parser=ArchivingJUnitResultParser(),   # was JUnitResultParser()
+    parser=ArchivingResultParser(),   # was JUnitResultParser()
 )
 ```
 
@@ -124,7 +124,7 @@ python -m airflow_pytest_plugin.web --root ./pytest-reports --port 8000
 
 **No.** In the operator, the *parser* owns the report location, and a
 **parser-supplied directory is never deleted by the runner under any cleanup
-policy**. `ArchivingJUnitResultParser` supplies its own directory, so reports
+policy**. `ArchivingResultParser` supplies its own directory, so reports
 always survive regardless of the runner's `cleanup` setting. `cleanup="never"`
 only matters when you let the runner use throwaway temp dirs — which is exactly
 the fragile path (random names, no `dag/run/task` association, not visible to
@@ -136,7 +136,7 @@ other workers) this plugin replaces.
 worker                              shared volume                 API server
 ──────                              ─────────────                 ──────────
 PytestOperator                      {root}/{dag}/{run}/           FastAPI app
-  └─ ArchivingJUnitResultParser ──▶   {task}/t{try}/        ◀──── FileSystemReportSource
+  └─ ArchivingResultParser ──▶   {task}/t{try}/        ◀──── FileSystemReportSource
        report_request() → path          ├─ junit.xml              └─ lists meta.json,
        parse()          → meta.json     └─ meta.json                 parses junit.xml
 ```
@@ -165,6 +165,7 @@ runtime. Endpoints (relative to the mount):
 | `GET /api/reports?dag_id=&run_id=` | summaries, newest first |
 | `GET /api/reports/{report_id}` | one report with per-case rows |
 | `DELETE /api/reports/{report_id}` | delete a report (RBAC-gated) |
+| `GET /api/reports/{report_id}/allure.zip` | raw Allure results as a zip (if any) |
 | `GET /api/health` | `{"status": "ok"}` |
 | `GET /api/docs` | OpenAPI docs |
 
@@ -200,6 +201,22 @@ access is enforced on the **content** (a user who may read no DAG sees an empty
 list and `403` on direct links). The standalone dev server (no Airflow auth)
 allows everything.
 
+## Allure / TestOps export
+
+Opt in per task and install [`allure-pytest`](https://pypi.org/project/allure-pytest/)
+on the worker:
+
+```python
+parser=ArchivingResultParser(allure=True)
+```
+
+The parser then adds `--alluredir` (pytest errors with *unrecognized arguments*
+if `allure-pytest` is missing), so the **raw Allure results** are archived next to
+the report, with an `executor.json` linking the launch back to the Airflow run.
+Download them from a report's detail view, or `GET
+/api/reports/{id}/allure.zip` — then upload to [Allure TestOps](https://qameta.io/)
+(`allurectl upload …`). The JUnit viewer is unaffected; both artifacts coexist.
+
 ## Configuration
 
 | Setting | Default | Purpose |
@@ -215,7 +232,7 @@ Mirrors the operator's layering — each piece has one reason to change:
 | Module | Responsibility |
 | --- | --- |
 | `layout.ReportLayout` | the single `ReportRef → directory` mapping, shared by both sides |
-| `producer.ArchivingJUnitResultParser` | write JUnit XML + `meta.json` (extends the operator's parser) |
+| `producer.ArchivingResultParser` | write JUnit XML + `meta.json` (extends the operator's parser) |
 | `sources.ReportSource` / `FileSystemReportSource` | read/index reports behind an interface (Dependency Inversion) |
 | `web.create_app` | map HTTP onto a `ReportSource` — knows nothing about the filesystem |
 | `plugin.PytestReportsPlugin` | register the app with Airflow |

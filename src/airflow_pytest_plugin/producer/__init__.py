@@ -12,10 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Producer side: archive JUnit reports into the queryable layout."""
+"""Producer side: archive each run (JUnit + optional Allure) into the layout."""
 
 from __future__ import annotations
 
-from .archiving_parser import ArchivingJUnitResultParser
+from .archiving_parser import ArchivingResultParser
 
-__all__ = ["ArchivingJUnitResultParser"]
+__all__ = ["ArchivingResultParser"]

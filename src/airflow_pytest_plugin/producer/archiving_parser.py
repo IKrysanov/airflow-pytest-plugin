@@ -12,22 +12,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Producer-side parser: archive each JUnit report under the reports layout."""
+"""Producer-side parser: archive each run under the reports layout (JUnit, plus
+optional raw Allure results for TestOps)."""
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import os
 import uuid
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import quote
 
 from airflow_pytest_operator import JUnitResultParser, ReportRequest, TestRunResult
 
-from ..compat import get_current_context
+from ..compat import get_conf_value, get_current_context
 from ..config import get_reports_root
-from ..layout import META_FILENAME, REPORT_FILENAME, ReportLayout
+from ..layout import ALLURE_DIRNAME, META_FILENAME, REPORT_FILENAME, ReportLayout
 from ..models import ReportRef
 
 _log = logging.getLogger(__name__)
@@ -36,18 +39,24 @@ _log = logging.getLogger(__name__)
 META_SCHEMA_VERSION = 1
 
 
-class ArchivingJUnitResultParser(JUnitResultParser):  # type: ignore[misc]
-    """JUnit parser that lays reports out for the reports UI."""
+class ArchivingResultParser(JUnitResultParser):  # type: ignore[misc]
+    """Archives each run under the reports layout: the operator's JUnit result
+    plus (with ``allure=True``) the raw Allure results for TestOps export."""
 
     def __init__(
         self,
         *,
         report_root: str | None = None,
         layout: ReportLayout | None = None,
+        allure: bool = False,
     ) -> None:
         super().__init__()  # base report_dir stays None; we compute per-run
         self._report_root = os.path.abspath(report_root or get_reports_root())
         self._layout = layout or ReportLayout()
+        # When True, also point pytest at ``--alluredir`` (needs allure-pytest in
+        # the worker, else pytest errors on the unknown arg) so raw Allure results
+        # are archived alongside junit.xml for Allure TestOps export.
+        self._allure = allure
         # Ref resolved in report_request, reused by parse() to name the sidecar.
         # One parser instance serves one task, so a single slot suffices.
         self._pending_ref: ReportRef | None = None
@@ -74,7 +83,13 @@ class ArchivingJUnitResultParser(JUnitResultParser):  # type: ignore[misc]
             ref.try_number,
             self._report_dir,
         )
-        return super().report_request(report_dir)
+        req = super().report_request(report_dir)
+        if self._allure and req.report_path:
+            allure_dir = os.path.join(os.path.dirname(req.report_path), ALLURE_DIRNAME)
+            req = dataclasses.replace(
+                req, pytest_args=(*req.pytest_args, f"--alluredir={allure_dir}")
+            )
+        return req
 
     def parse(self, report_path: str, *, exit_code: int = 0) -> TestRunResult:
         result = super().parse(report_path, exit_code=exit_code)
@@ -146,6 +161,7 @@ class ArchivingJUnitResultParser(JUnitResultParser):  # type: ignore[misc]
             "logical_date": _logical_date(context),
             "created_at": datetime.now(timezone.utc).isoformat(),
             "report_file": REPORT_FILENAME,
+            "allure": self._archive_allure(out_dir, ref),
             "summary": result.to_xcom(),
         }
         # Atomic write: a reader scanning concurrently never sees a half file.
@@ -153,6 +169,48 @@ class ArchivingJUnitResultParser(JUnitResultParser):  # type: ignore[misc]
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(meta, fh, ensure_ascii=False, indent=2)
         os.replace(tmp, os.path.join(out_dir, META_FILENAME))
+
+    def _archive_allure(self, out_dir: str, ref: ReportRef) -> bool:
+        """True if Allure results were produced here; drop an executor.json so the
+        TestOps launch links back to this Airflow run. Best-effort."""
+        allure_dir = os.path.join(out_dir, ALLURE_DIRNAME)
+        try:
+            if not self._allure or not os.listdir(allure_dir):
+                return False
+        except OSError:  # no allure-results dir
+            return False
+        try:
+            with open(
+                os.path.join(allure_dir, "executor.json"), "w", encoding="utf-8"
+            ) as fh:
+                json.dump(_executor_json(ref), fh, ensure_ascii=False, indent=2)
+        except OSError:
+            _log.warning("Could not write Allure executor.json", exc_info=True)
+        return True
+
+
+def _executor_json(ref: ReportRef) -> dict[str, Any]:
+    """Allure executor.json: shows the Airflow run as the build, linking the
+    TestOps launch back to the task instance when the base URL is configured."""
+    data: dict[str, Any] = {
+        "name": "Airflow",
+        "type": "airflow",
+        "reportName": "Pytest Reports",
+        "buildName": f"{ref.dag_id} · {ref.task_id} · {ref.run_id} (try {ref.try_number})",
+    }
+    base = (
+        get_conf_value("api", "base_url")
+        or get_conf_value("webserver", "base_url")
+        or ""
+    ).rstrip("/")
+    if base:
+        data["url"] = base
+        data["buildUrl"] = (
+            f"{base}/dags/{quote(ref.dag_id, safe='')}"
+            f"/runs/{quote(ref.run_id, safe='')}"
+            f"/tasks/{quote(ref.task_id, safe='')}"
+        )
+    return data
 
 
 def _first_str(*values: Any, default: str) -> str:

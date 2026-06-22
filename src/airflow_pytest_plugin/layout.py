@@ -25,6 +25,8 @@ from .models import ReportRef
 REPORT_FILENAME = "junit.xml"
 #: The sidecar identity+summary file. Its presence marks a stored report.
 META_FILENAME = "meta.json"
+#: Subdir of a report holding raw Allure results (for Allure TestOps export).
+ALLURE_DIRNAME = "allure-results"
 
 # Map filesystem-unsafe chars to ``_``. Intentionally lossy; exact identity lives
 # in meta.json / the ReportRef token, never recovered from the path.

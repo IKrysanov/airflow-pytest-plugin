@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING
 from .config import get_reports_root
 from .layout import ReportLayout
 from .models import CaseView, ReportDetail, ReportRef, ReportSummary
-from .producer import ArchivingJUnitResultParser
+from .producer import ArchivingResultParser
 from .sources import FileSystemReportSource, ReportSource
 from .version import __version__ as __version__
 
@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     from .web import create_app as create_app
 
 __all__ = [
-    "ArchivingJUnitResultParser",
+    "ArchivingResultParser",
     "ReportSource",
     "FileSystemReportSource",
     "ReportRef",

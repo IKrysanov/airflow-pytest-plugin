@@ -39,3 +39,13 @@ def test_token_is_url_safe():
 def test_from_token_rejects_garbage():
     with pytest.raises(ValueError):
         ReportRef.from_token("!!!not-base64!!!")
+
+
+def test_summary_to_dict_includes_has_allure():
+    from airflow_pytest_plugin.models import ReportRef, ReportSummary
+
+    ref = ReportRef("d", "r", "t", 1)
+    base = ReportSummary(ref, 1, 1, 0, 0, 0, 0.1, True)
+    assert base.to_dict()["has_allure"] is False
+    with_allure = ReportSummary(ref, 1, 1, 0, 0, 0, 0.1, True, has_allure=True)
+    assert with_allure.to_dict()["has_allure"] is True

@@ -20,7 +20,7 @@ import os
 from airflow_pytest_plugin.layout import META_FILENAME, ReportLayout
 from airflow_pytest_plugin.models import ReportRef
 from airflow_pytest_plugin.sources import FileSystemReportSource
-from conftest import write_report, write_report_xml
+from conftest import write_allure, write_report, write_report_xml
 
 
 def test_missing_root_lists_nothing(reports_root):
@@ -292,3 +292,45 @@ def test_from_token_accepts_unmapped_sentinel():
     assert ReportRef.from_token(ref.token).map_index == -1
     mapped = ReportRef("d", "r", "t", 1, map_index=0)
     assert ReportRef.from_token(mapped.token).map_index == 0
+
+
+def test_allure_archive_zips_results(reports_root):
+    import io
+    import zipfile
+
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref)
+    write_allure(
+        reports_root, ref, files={"a-result.json": '{"x":1}', "b-container.json": "{}"}
+    )
+    data = FileSystemReportSource(report_root=reports_root).allure_archive(ref)
+    assert data is not None
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        assert set(zf.namelist()) == {"a-result.json", "b-container.json"}
+
+
+def test_allure_archive_none_when_absent(reports_root):
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref)  # no allure-results
+    assert FileSystemReportSource(report_root=reports_root).allure_archive(ref) is None
+
+
+def test_allure_archive_refuses_traversal(tmp_path):
+    root = tmp_path / "reports"
+    root.mkdir()
+    src = FileSystemReportSource(report_root=str(root))
+    assert src.allure_archive(ReportRef("..", ".", ".", 1)) is None
+
+
+def test_summary_has_allure_from_meta(reports_root):
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref)
+    assert (
+        FileSystemReportSource(report_root=reports_root).list_summaries()[0].has_allure
+        is False
+    )
+    write_allure(reports_root, ref)
+    assert (
+        FileSystemReportSource(report_root=reports_root).list_summaries()[0].has_allure
+        is True
+    )

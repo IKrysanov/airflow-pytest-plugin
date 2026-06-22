@@ -23,7 +23,7 @@ import pytest
 from airflow_pytest_plugin.compat import airflow_auth_available
 from airflow_pytest_plugin.models import ReportRef
 from airflow_pytest_plugin.sources import FileSystemReportSource
-from conftest import write_report
+from conftest import write_allure, write_report
 
 fastapi = pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
@@ -89,7 +89,12 @@ def test_index_has_feature_markers(client):
         "chart-bars",
         "af-link",
         "bindTip",
-        "CHART_WINDOW",
+        "downloadAllure",
+        "CHART_VISIBLE",
+        "bars-strip",
+        "enableChartDrag",
+        "assignSeq",
+        "closeOnBackdrop",
         "PAGE_SIZE",
         "forbidden",
     ):
@@ -214,3 +219,46 @@ def test_read_and_delete_authz_are_independent(reports_root):
     assert c.get(f"/api/reports/{token}").status_code == 200
     assert c.delete(f"/api/reports/{token}").status_code == 403
     assert len(c.get("/api/reports").json()["reports"]) == 1
+
+
+def test_allure_zip_endpoint(reports_root):
+    import io
+    import zipfile
+
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref, passed=1)
+    write_allure(reports_root, ref)
+    c = TestClient(make_app(reports_root))
+    token = c.get("/api/reports").json()["reports"][0]["id"]
+    r = c.get(f"/api/reports/{token}/allure.zip")
+    assert r.status_code == 200
+    assert "application/zip" in r.headers["content-type"]
+    with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
+        assert "abc-result.json" in zf.namelist()
+
+
+def test_allure_zip_404_when_absent(reports_root):
+    write_report(reports_root, ReportRef("dag", "run", "task", 1), passed=1)
+    c = TestClient(make_app(reports_root))
+    token = c.get("/api/reports").json()["reports"][0]["id"]
+    assert c.get(f"/api/reports/{token}/allure.zip").status_code == 404
+
+
+def test_allure_zip_403_when_read_denied(reports_root):
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref, passed=1)
+    write_allure(reports_root, ref)
+    c = TestClient(make_app(reports_root, read_authorizer=lambda dag_id, user: False))
+    assert c.get(f"/api/reports/{ref.token}/allure.zip").status_code == 403
+
+
+def test_allure_zip_bad_token_is_400(client):
+    assert client.get("/api/reports/%21%21bad/allure.zip").status_code == 400
+
+
+def test_list_exposes_has_allure(reports_root):
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref, passed=1)
+    write_allure(reports_root, ref)
+    c = TestClient(make_app(reports_root))
+    assert c.get("/api/reports").json()["reports"][0]["has_allure"] is True

@@ -145,6 +145,30 @@ def create_app(
             raise HTTPException(status_code=404, detail="report not found")
         return JSONResponse({"deleted": True})
 
+    @app.get("/api/reports/{report_id}/allure.zip")
+    def allure_zip(
+        report_id: str,
+        user: Any = Depends(user_dep),  # noqa: B008 - FastAPI dependency idiom
+    ) -> Response:
+        try:
+            ref = ReportRef.from_token(report_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if not read_auth(ref.dag_id, user):
+            raise HTTPException(
+                status_code=403, detail="not authorized to read this report"
+            )
+        data = src.allure_archive(ref)
+        if data is None:
+            raise HTTPException(status_code=404, detail="no Allure results")
+        return Response(
+            data,
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": 'attachment; filename="allure-results.zip"'
+            },
+        )
+
     @app.get("/icon.svg")
     def icon() -> Response:
         return Response(_flask_svg(_ICON_LIGHT), media_type="image/svg+xml")

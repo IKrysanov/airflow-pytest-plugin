@@ -45,12 +45,23 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     --tip-bg: #fafafa; --tip-fg: #18181b; --tip-border: #d4d4d8;
   }
   * { box-sizing: border-box; }
+  /* Force the hidden attribute to win over display:grid/flex (e.g. .kpis). */
+  [hidden] { display: none !important; }
   body {
     margin: 0; background: var(--bg); color: var(--fg);
     font: 14px/1.5 Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
       Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
     -webkit-font-smoothing: antialiased;
   }
+  /* Dark theme: darken scrollbar track + thumb like Airflow. */
+  html[data-theme="dark"] { scrollbar-color: var(--surface-2) var(--bg); }
+  html[data-theme="dark"] ::-webkit-scrollbar { width: 12px; height: 12px; }
+  html[data-theme="dark"] ::-webkit-scrollbar-track { background: var(--bg); }
+  html[data-theme="dark"] ::-webkit-scrollbar-thumb {
+    background: var(--surface-2); border-radius: 7px; border: 3px solid var(--bg);
+  }
+  html[data-theme="dark"] ::-webkit-scrollbar-thumb:hover { background: var(--border); }
+  html[data-theme="dark"] ::-webkit-scrollbar-corner { background: var(--bg); }
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   .num { font-variant-numeric: tabular-nums; }
   .muted { color: var(--muted); }
@@ -60,16 +71,22 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   }
   .header-inner {
     max-width: 1600px; margin: 0 auto; padding: 14px 20px;
-    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 12px; flex-wrap: wrap;
   }
   .brand { font-weight: 600; font-size: 18px; letter-spacing: -.01em;
-    white-space: nowrap; color: var(--fg); }
-  .controls { display: flex; align-items: center; gap: 10px; }
+    white-space: nowrap; color: var(--fg); flex: 0 0 auto; }
+  /* min-width:0 lets the group actually shrink (Safari otherwise pins flex items
+     to their intrinsic width and overflows); wrap is the final safety valve. */
+  .controls { display: flex; align-items: center; gap: 10px;
+    flex: 1 1 auto; min-width: 0; flex-wrap: wrap; justify-content: flex-end; }
   input, button { font: inherit; color: var(--fg); }
   .field {
     height: 36px; background: var(--surface-2); border: 1px solid var(--border);
-    border-radius: 8px; padding: 0 11px; flex: 0 1 170px; min-width: 110px;
+    border-radius: 8px; padding: 0 11px;
+    flex: 1 1 150px; min-width: 0; max-width: 200px;
   }
+  #refresh { flex: 0 0 auto; }
   .field:focus { outline: 2px solid var(--ring); outline-offset: 1px; border-color: var(--primary); }
   .btn {
     height: 36px; background: var(--surface-2); border: 1px solid var(--border);
@@ -105,16 +122,23 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .legend button:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
   .legend button.off { opacity: .4; text-decoration: line-through; }
   .legend i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
-  /* Each bar is ONE element with a hard-stop gradient (not stacked divs) so boundaries stay crisp, no seams. */
-  .chart-bars { display: flex; align-items: flex-end; gap: 3px; height: 122px; padding: 0 2px; }
-  .bar-col { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column;
-    align-items: center; }
-  .bar-area { width: 100%; height: 100px; display: flex; align-items: flex-end; justify-content: center; }
-  .bar { width: 64%; max-width: 22px; min-width: 5px; height: 100%;
-    border-radius: 4px; background: var(--surface-2); transition: filter .12s; cursor: pointer; }
+  /* Bars are absolutely placed at integer x/width (one gradient element each), so
+     edges land on whole pixels -> crisp, no anti-aliased colour halo.
+     The bars live in a fixed-width strip inside a horizontal scroll viewport:
+     drag (mouse) or swipe/trackpad (native) or the arrows pan it smoothly. The
+     scrollbar is hidden -- the arrows + grab cursor are the affordance. */
+  .chart-bars { position: relative; height: 122px; overflow-x: auto; overflow-y: hidden;
+    cursor: grab; touch-action: pan-x; overscroll-behavior-x: contain; scrollbar-width: none;
+    user-select: none; -webkit-user-select: none; }
+  .chart-bars::-webkit-scrollbar { display: none; }
+  .chart-bars.dragging { cursor: grabbing; }
+  .chart-bars.dragging .bar { cursor: grabbing; }
+  .bars-strip { position: relative; height: 100%; }
+  .bar { position: absolute; bottom: 22px; height: 100px; border-radius: 2px;
+    background: var(--surface-2); transition: filter .12s; cursor: pointer; }
   .bar:hover { filter: brightness(1.08); }
-  .bnum { font-size: 10px; color: var(--muted); margin-top: 6px;
-    font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; max-width: 100%; }
+  .bnum { position: absolute; bottom: 0; width: 36px; text-align: center; font-size: 10px;
+    color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
   /* Hover tooltip: inverts the page theme. */
   #tip {
     position: fixed; z-index: 100; display: none; pointer-events: none;
@@ -169,6 +193,39 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   #confirm .cbody b { color: var(--fg); overflow-wrap: anywhere; }
   #confirm .cactions { display: flex; justify-content: flex-end; gap: 10px; }
 
+  /* Floating bulk-action toolbar, centred at the bottom of the viewport. */
+  .bulk-bar { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+    z-index: 90; display: flex; align-items: center; gap: 10px; font-size: 13px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    padding: 8px 10px; box-shadow: 0 12px 32px #00000059; }
+  .bulk-count { display: inline-flex; align-items: center; padding: 7px 14px; color: var(--fg);
+    border: 1px dashed var(--border); border-radius: 8px; }
+  .bulk-sep { width: 1px; align-self: stretch; background: var(--border); margin: 3px 2px; }
+  .bulk-del { display: inline-flex; align-items: center; gap: 7px; background: none;
+    border: 1px solid var(--fail); color: var(--fail); border-radius: 8px; padding: 7px 13px;
+    cursor: pointer; font: inherit; font-weight: 500; transition: background .12s; }
+  .bulk-del:hover { background: var(--fail-bg); }
+  .bulk-close { background: none; border: 0; color: var(--muted); cursor: pointer;
+    padding: 7px; border-radius: 8px; display: inline-flex; transition: background .12s, color .12s; }
+  .bulk-close:hover { background: var(--surface-2); color: var(--fg); }
+  .bulk-del:focus-visible, .bulk-close:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
+  /* Checkboxes styled like Airflow's (Chakra): rounded square, brand-blue + white tick when on. */
+  .sel-cell { width: 1%; white-space: nowrap; padding-right: 0; }
+  .sel-cell input[type="checkbox"] {
+    appearance: none; -webkit-appearance: none; margin: 0; width: 16px; height: 16px;
+    cursor: pointer; vertical-align: middle; background: var(--surface);
+    border: 1px solid var(--border); border-radius: 4px;
+    display: inline-grid; place-content: center; transition: background .12s, border-color .12s; }
+  .sel-cell input[type="checkbox"]:hover { border-color: var(--primary); }
+  .sel-cell input[type="checkbox"]:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
+  .sel-cell input[type="checkbox"]:checked,
+  .sel-cell input[type="checkbox"]:indeterminate {
+    background: var(--primary); border-color: var(--primary); }
+  .sel-cell input[type="checkbox"]:checked::after {
+    content: ""; width: 4px; height: 8px; border: solid #fff; border-width: 0 2px 2px 0;
+    transform: rotate(45deg) translate(-0.5px, -1px); }
+  .sel-cell input[type="checkbox"]:indeterminate::after {
+    content: ""; width: 8px; height: 2px; background: #fff; border-radius: 1px; }
   .table-wrap { overflow-x: auto; }
   table { width: 100%; border-collapse: collapse; }
   th, td { text-align: left; padding: 10px 12px; white-space: nowrap; }
@@ -212,6 +269,9 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .dlg-head { display: flex; align-items: center; gap: 10px; padding: 16px 20px;
     border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--surface); }
   .dlg-head h2 { margin: 0; font-size: 15px; font-weight: 650; overflow-wrap: anywhere; }
+  .d-seq { color: var(--muted); font-weight: 600; font-size: 14px;
+    font-variant-numeric: tabular-nums; flex: 0 0 auto; }
+  .d-seq:empty { display: none; }
   .dlg-body { padding: 18px 20px 22px; max-height: 72vh; overflow: auto; }
   .pills { display: flex; flex-wrap: wrap; gap: 7px; margin: 16px 0 12px; }
   .pill { border: 1px solid var(--border); background: var(--surface-2); color: var(--fg);
@@ -220,7 +280,11 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .pill:hover { border-color: var(--primary); }
   .pill[aria-pressed="true"] { background: var(--primary); border-color: var(--primary); color: var(--on-primary); }
   .pill:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
-  .case-node { display: inline-block; max-width: 60ch; overflow-wrap: anywhere; }
+  /* Let a long test id keep the cell on one line; the table-wrap scrolls
+     horizontally to its full width so it never overlaps the Time column. */
+  .case-node { display: inline-block; white-space: nowrap; }
+  .case-table { overflow-x: auto; }
+  .case-table table { width: max-content; min-width: 100%; }
   .case.clickable[aria-expanded="true"] { background: var(--surface-2); }
   .chev { display: inline-flex; color: var(--muted); transition: transform .15s; }
   .case[aria-expanded="true"] .chev { transform: rotate(90deg); }
@@ -232,8 +296,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
 
   @media (max-width: 680px) {
     .header-inner { flex-direction: column; align-items: stretch; gap: 10px; padding: 10px 12px; }
-    .controls { width: 100%; }
-    .controls .field { flex: 1 1 0; min-width: 0; }
+    .controls { width: 100%; flex-wrap: nowrap; }
+    .controls .field { flex: 1 1 0; min-width: 0; max-width: none; }
     #refresh { flex: 0 0 auto; }
     main { padding: 12px 12px 32px; }
     th, td { padding: 8px 9px; }
@@ -306,6 +370,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
 
 <dialog id="detail" aria-labelledby="d-title">
   <div class="dlg-head">
+    <span id="d-seq" class="d-seq"></span>
     <h2 id="d-title">Report</h2>
     <span class="grow" style="flex:1"></span>
     <span id="d-copied" class="copied" hidden data-i18n="copied">Copied</span>
@@ -343,6 +408,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   </div>
 </dialog>
 
+<div id="bulk-bar" class="bulk-bar" hidden></div>
+
 <script>
 (function () {
   // API base derived from the current path so it works under any mount prefix / iframe.
@@ -355,7 +422,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       filterDagAl: "Filter by dag_id", filterRunAl: "Filter by run_id",
       history: "Recent runs", copyLink: "Copy link", copied: "Copied",
       closeReport: "Close report",
-      cStatus: "Status", cDag: "DAG", cTask: "Task", cRun: "Run", cTry: "Try",
+      cId: "ID", cStatus: "Status", cDag: "DAG", cTask: "Task", cRun: "Run", cTry: "Try",
       cTotal: "Total", cPass: "Pass", cFail: "Fail", cErr: "Err", cSkip: "Skip",
       cDuration: "Duration", cWhen: "When",
       kRuns: "Runs", kPassingRuns: "Passing runs", kTests: "Tests", kFailures: "Failures",
@@ -363,16 +430,20 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       sPass: "PASS", sFail: "FAIL", sError: "ERROR", success: "success",
       passed: "passed", failed: "failed", error: "error", skipped: "skipped", all: "all",
       hOutcome: "Outcome", hTest: "Test", hTime: "Time",
-      afDag: "DAG", afRun: "Run", afTask: "Task",
+      afDag: "DAG", afRun: "Run", afTask: "Task", downloadAllure: "Allure results",
       loading: "Loading…", noOutput: "No output captured.",
       noMatch: "No reports match the current filter.",
-      noReports: "No reports found yet. Run a PytestOperator task with ArchivingJUnitResultParser to populate this view.",
+      noReports: "No reports found yet. Run a PytestOperator task with ArchivingResultParser to populate this view.",
       noCases: "No matching cases.", tryWord: "try",
       loadFail: "Failed to load reports: ", reportFail: "Failed to load report: ",
       deleteReport: "Delete report", deleteTitle: "Delete report?",
+      deleteTitleN: "Delete {n} reports?",
       deleteConfirm: "This permanently removes the report and its files everywhere.",
       cancel: "Cancel", delete: "Delete", deleting: "Deleting…",
       deleteFail: "Failed to delete: ",
+      deleteFailedN: "{n} could not be deleted (no permission).",
+      nSelected: "{n} selected", deleteSelected: "Delete", clearSel: "Clear",
+      selectRow: "Select row", selectAll: "Select all",
       forbidden: "You don't have permission to delete this report (it requires permission to trigger the DAG).",
       older: "Older runs", newer: "Newer runs",
       prevPage: "Previous page", nextPage: "Next page", page: "Page",
@@ -383,7 +454,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       filterDagAl: "Фильтр по dag_id", filterRunAl: "Фильтр по run_id",
       history: "Последние прогоны", copyLink: "Копировать ссылку", copied: "Скопировано",
       closeReport: "Закрыть отчёт",
-      cStatus: "Статус", cDag: "DAG", cTask: "Задача", cRun: "Запуск", cTry: "Попытка",
+      cId: "ID", cStatus: "Статус", cDag: "DAG", cTask: "Задача", cRun: "Запуск", cTry: "Попытка",
       cTotal: "Всего", cPass: "Усп", cFail: "Пров", cErr: "Ошиб", cSkip: "Проп",
       cDuration: "Время", cWhen: "Когда",
       kRuns: "Прогонов", kPassingRuns: "Успешных прогонов", kTests: "Тестов", kFailures: "Падений",
@@ -391,16 +462,20 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       sPass: "OK", sFail: "СБОЙ", sError: "ОШИБКА", success: "успех",
       passed: "пройден", failed: "провален", error: "ошибка", skipped: "пропущен", all: "все",
       hOutcome: "Итог", hTest: "Тест", hTime: "Время",
-      afDag: "DAG", afRun: "Запуск", afTask: "Задача",
+      afDag: "DAG", afRun: "Запуск", afTask: "Задача", downloadAllure: "Allure-отчёт",
       loading: "Загрузка…", noOutput: "Вывод не захвачен.",
       noMatch: "Нет отчётов под текущий фильтр.",
-      noReports: "Отчётов пока нет. Запусти задачу PytestOperator с ArchivingJUnitResultParser, чтобы они появились здесь.",
+      noReports: "Отчётов пока нет. Запусти задачу PytestOperator с ArchivingResultParser, чтобы они появились здесь.",
       noCases: "Нет подходящих тестов.", tryWord: "попытка",
       loadFail: "Не удалось загрузить отчёты: ", reportFail: "Не удалось загрузить отчёт: ",
       deleteReport: "Удалить отчёт", deleteTitle: "Удалить отчёт?",
+      deleteTitleN: "Удалить отчётов: {n}?",
       deleteConfirm: "Отчёт и его файлы будут удалены безвозвратно — везде.",
       cancel: "Отмена", delete: "Удалить", deleting: "Удаление…",
       deleteFail: "Не удалось удалить: ",
+      deleteFailedN: "Не удалось удалить: {n} (нет прав).",
+      nSelected: "Выбрано: {n}", deleteSelected: "Удалить", clearSel: "Снять",
+      selectRow: "Выбрать строку", selectAll: "Выбрать все",
       forbidden: "Нет прав на удаление этого отчёта (нужно право запускать DAG).",
       older: "Старее", newer: "Новее",
       prevPage: "Предыдущая страница", nextPage: "Следующая страница", page: "Страница",
@@ -519,6 +594,37 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     if (loc !== LOCALE) { LOCALE = loc; applyI18n(); renderAll(); }
   }
   applyTheme(); applyI18n();
+  // The nav icon Airflow shows for us is a plain <img> with a baked stroke colour,
+  // so (unlike Airflow's own currentColor icons) it can't turn white when the item
+  // is selected -- on the light theme the picked flask blends into the highlight
+  // and vanishes. While THIS page is open, our nav item IS the selected one, so
+  // whiten our icon in the parent for the duration and restore it on the way out.
+  // Targeting our own icon URL avoids guessing Airflow's active-item selector.
+  // Same-origin only; best-effort.
+  (function activeNavIcon() {
+    try {
+      var top = window.top;
+      if (top === window.self || !top.document
+          || top.location.origin !== window.location.origin) return;
+      var mount = window.location.pathname.replace(/\/+$/, "");
+      var ID = "apx-nav-style";
+      var add = function () {
+        if (top.document.getElementById(ID)) return;
+        var s = top.document.createElement("style");
+        s.id = ID;
+        s.textContent = 'img[src*="' + mount + '/icon"]'
+          + "{filter:brightness(0) invert(1)!important;}";
+        (top.document.head || top.document.documentElement).appendChild(s);
+      };
+      var remove = function () {
+        var s = top.document.getElementById(ID);
+        if (s && s.parentNode) s.parentNode.removeChild(s);
+      };
+      add();
+      // Removed when Airflow unmounts our iframe on navigating away.
+      window.addEventListener("pagehide", remove);
+    } catch (e) { /* cross-origin parent: skip */ }
+  })();
   (function watchParent() {
     var pdoc = parentDoc();
     if (pdoc && window.MutationObserver) {
@@ -556,12 +662,15 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     ["error", "errors", "var(--error)"],
   ];
   var chartSel = { passed: true, skipped: true, failed: true, error: true };
-  var CHART_WINDOW = 30;  // runs per chart window
+  var CHART_VISIBLE = 30; // bars visible at once; beyond that the strip scrolls (carousel)
   var PAGE_SIZE = 100;    // list rows per page
-  var chartWin = 0;       // 0 = most recent window
+  var chartScroll = null; // null => snap to newest; else a remembered scrollLeft (px)
+  var chartDragged = false;
   var listPage = 0;
+  var selectedIds = new Set();   // report ids ticked for bulk delete
 
   var COLS = [
+    { key: "seq", label: "cId", num: true },
     { key: "status", label: "cStatus", get: function (r) { return r.success ? 2 : (r.errors ? 0 : 1); } },
     { key: "dag_id", label: "cDag", cls: "mono" },
     { key: "task_id", label: "cTask", cls: "mono" },
@@ -577,7 +686,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   ];
 
   function renderKpis() {
-    if (!reports.length) { kpisEl.hidden = true; return; }
+    if (!reports.length) { kpisEl.hidden = true; kpisEl.innerHTML = ""; return; }
     var runs = reports.length;
     var ok = reports.filter(function (r) { return r.success; }).length;
     var tests = reports.reduce(function (a, r) { return a + r.total; }, 0);
@@ -611,22 +720,69 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     });
   }
 
-  function setChartWin(w) { chartWin = w; renderChart(); }
+  // Own rAF easing instead of scrollBy({behavior:"smooth"}) -- the latter is
+  // unsupported in older Safari (and headless), so animate it ourselves.
+  function chartScrollBy(el, delta) {
+    var max = el.scrollWidth - el.clientWidth;
+    var start = el.scrollLeft, target = Math.max(0, Math.min(max, start + delta));
+    if (target === start) return;
+    var dur = 280, t0 = null, token = (el._anim = (el._anim || 0) + 1);
+    function step(ts) {
+      if (el._anim !== token) return;          // a newer scroll/drag superseded us
+      if (t0 == null) t0 = ts;
+      var p = Math.min(1, (ts - t0) / dur);
+      var e = p < 0.5 ? 2 * p * p : 1 - Math.pow(-2 * p + 2, 2) / 2;  // easeInOutQuad
+      el.scrollLeft = start + (target - start) * e;
+      if (p < 1) requestAnimationFrame(step);
+    }
+    requestAnimationFrame(step);
+  }
 
-  function renderChartNav(total, pages, start, end) {
+  // Arrows page the strip by ~one viewport; native scroll/drag handle the rest.
+  function renderChartNav(barsEl, scrollable) {
     var nav = document.getElementById("chart-nav");
-    if (total <= CHART_WINDOW) { nav.innerHTML = ""; return; }
-    var newest = chartWin <= 0, oldest = chartWin >= pages - 1;
+    if (!scrollable) { nav.innerHTML = ""; return; }
     nav.innerHTML =
-      '<button type="button" class="nav-btn" id="ch-older"' + (oldest ? " disabled" : "")
-        + ' aria-label="' + esc(t("older")) + '">‹</button>'
-      + '<span class="num">' + (start + 1) + "–" + end + " / " + total + "</span>"
-      + '<button type="button" class="nav-btn" id="ch-newer"' + (newest ? " disabled" : "")
-        + ' aria-label="' + esc(t("newer")) + '">›</button>';
-    var ol = document.getElementById("ch-older");
-    var ne = document.getElementById("ch-newer");
-    if (ol && !oldest) ol.addEventListener("click", function () { setChartWin(chartWin + 1); });
-    if (ne && !newest) ne.addEventListener("click", function () { setChartWin(chartWin - 1); });
+      '<button type="button" class="nav-btn" id="ch-older" aria-label="' + esc(t("older")) + '">‹</button>'
+      + '<button type="button" class="nav-btn" id="ch-newer" aria-label="' + esc(t("newer")) + '">›</button>';
+    function page(dir) { chartScrollBy(barsEl, dir * Math.round(barsEl.clientWidth * 0.8)); }
+    document.getElementById("ch-older").addEventListener("click", function () { page(-1); });
+    document.getElementById("ch-newer").addEventListener("click", function () { page(1); });
+    updateChartArrows(barsEl);
+  }
+  function updateChartArrows(barsEl) {
+    var ol = document.getElementById("ch-older"), ne = document.getElementById("ch-newer");
+    if (!ol || !ne) return;
+    var max = barsEl.scrollWidth - barsEl.clientWidth;
+    ol.disabled = barsEl.scrollLeft <= 1;          // older = left; disabled at the oldest end
+    ne.disabled = barsEl.scrollLeft >= max - 1;    // newer = right; disabled at the newest end
+  }
+
+  // Mouse drag-to-pan. Touch/trackpad use the element's native horizontal scroll.
+  // No pointer capture -- it retargets the synthetic click off the bar (so the
+  // bar's click handler never fires). The move/up listeners live on document
+  // (wired once) so a drag survives the cursor leaving the strip.
+  var chartDrag = null;
+  function enableChartDrag(el) {
+    el.addEventListener("pointerdown", function (e) {
+      if (e.pointerType === "touch") return;
+      el._anim = (el._anim || 0) + 1;          // cancel any in-flight arrow animation
+      chartDrag = { el: el, x: e.clientX, left: el.scrollLeft, moved: 0 };
+      el.classList.add("dragging");
+    });
+  }
+  function chartDragMove(e) {
+    if (!chartDrag) return;
+    var dx = e.clientX - chartDrag.x;
+    if (Math.abs(dx) > chartDrag.moved) chartDrag.moved = Math.abs(dx);
+    chartDrag.el.scrollLeft = chartDrag.left - dx;
+  }
+  function chartDragEnd() {
+    if (!chartDrag) return;
+    chartDrag.el.classList.remove("dragging");
+    chartDragged = chartDrag.moved > 5;          // a real drag suppresses the bar click
+    setTimeout(function () { chartDragged = false; }, 0);
+    chartDrag = null;
   }
 
   var tipEl = null;
@@ -690,22 +846,33 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     var data = reports.slice().sort(function (a, b) {
       return String(a.created_at || "") < String(b.created_at || "") ? -1 : 1;
     });
-    var total = data.length;
-    if (total < 2) { card.hidden = true; document.getElementById("chart-nav").innerHTML = ""; return; }
+    if (data.length < 2) { card.hidden = true; document.getElementById("chart-nav").innerHTML = ""; return; }
     card.hidden = false;
 
-    // Carousel window of CHART_WINDOW runs; chartWin 0 = most recent.
-    var pages = Math.ceil(total / CHART_WINDOW);
-    chartWin = Math.max(0, Math.min(chartWin, pages - 1));
-    var end = total - chartWin * CHART_WINDOW;
-    var start = Math.max(0, end - CHART_WINDOW);
-    var win = data.slice(start, end);
-    renderChartNav(total, pages, start, end);
+    var win = data;            // every run; the strip scrolls once past CHART_VISIBLE
+    var count = win.length;
 
-    // Every bar is the same height; segments show each run's proportion. A toggled-off
-    // status keeps its band as the track colour (never a rescale).
-    var cols = win.map(function (r, i) {
-      // One hard-stop gradient stacked base-up in ORDER => no seams.
+    // Bars are absolutely positioned at INTEGER left/width inside a fixed-width
+    // strip: a flex-centred bar lands on a fractional pixel, so its bright edge
+    // anti-aliases into the background (a red "halo"). Integer geometry = crisp.
+    var chart = document.getElementById("chart");
+    chart.innerHTML = '<div class="chart-bars" role="img" aria-label="' + esc(t("history"))
+      + '"><div class="bars-strip"></div></div>';
+    var barsEl = chart.querySelector(".chart-bars");
+    var strip = chart.querySelector(".bars-strip");
+    // Fixed per-run slot: bars fill the width when they fit, else the strip grows
+    // past the viewport and scrolls smoothly (one continuous carousel, no pages).
+    var vw = barsEl.clientWidth || 600;
+    // Up to CHART_VISIBLE bars fill the viewport; beyond that the strip overflows
+    // and you scroll/drag through it (a carousel with the same per-bar sizing).
+    var slot = vw / Math.min(count, CHART_VISIBLE);
+    var stripW = Math.round(slot * count);
+    strip.style.width = stripW + "px";
+    var bw = Math.max(6, Math.min(22, Math.round(slot * 0.62)));
+    var labelEvery = Math.max(1, Math.ceil(34 / slot));  // keep #labels from overlapping
+    var html = win.map(function (r, i) {
+      // One hard-stop gradient stacked base-up in ORDER => no seams; a toggled-off
+      // status keeps its band as the track colour (never a rescale).
       var rtotal = r.total || 0;
       var bands = [], acc = 0;
       ORDER.forEach(function (o) {
@@ -714,30 +881,38 @@ _INDEX_HTML = r"""<!DOCTYPE html>
         bands.push({ o: o, from: acc, to: acc + (v / rtotal) * 100 });
         acc += (v / rtotal) * 100;
       });
-      // Snap the top band to exactly 100% so float drift leaves no sliver.
-      if (bands.length) bands[bands.length - 1].to = 100;
+      if (bands.length) bands[bands.length - 1].to = 100;  // snap top to 100%
       var stops = bands.map(function (s) {
         var col = chartSel[s.o[0]] ? s.o[2] : "var(--surface-2)";
         return col + " " + s.from.toFixed(3) + "% " + s.to.toFixed(3) + "%";
       });
-      var bg = stops.length
-        ? "background:linear-gradient(to top," + stops.join(",") + ")"
+      var bg = stops.length ? "background:linear-gradient(to top," + stops.join(",") + ");" : "";
+      var center = slot * (i + 0.5);
+      var left = Math.round(center - bw / 2);
+      var bar = '<div class="bar" data-id="' + esc(r.id) + '" style="left:' + left
+        + "px;width:" + bw + "px;" + bg + '"></div>';
+      // Number every run when there is room; thin them out when dense, newest first.
+      var num = ((count - 1 - i) % labelEvery === 0)
+        ? '<div class="bnum" style="left:' + Math.round(center - 18) + 'px">#' + r.seq + "</div>"
         : "";
-      return '<div class="bar-col" data-id="' + esc(r.id) + '">'
-        + '<div class="bar-area"><div class="bar" style="' + bg + '"></div></div>'
-        + '<div class="bnum">#' + (start + i + 1) + "</div></div>";
+      return bar + num;
     }).join("");
-    var chart = document.getElementById("chart");
-    chart.innerHTML = '<div class="chart-bars" role="img" aria-label="'
-      + esc(t("history")) + '">' + cols + "</div>";
-    chart.querySelectorAll(".bar-col").forEach(function (col, i) {
-      // Target the bar figure only, not the empty column around it.
-      var bar = col.querySelector(".bar");
-      if (!bar) return;
-      var id = col.getAttribute("data-id");
-      bar.addEventListener("click", function () { openDetail(id); });
-      bindTip(bar, function () { return barTip(win[i], start + i + 1); });
+    strip.innerHTML = html;
+    strip.querySelectorAll(".bar").forEach(function (bar, i) {
+      var r = win[i], id = bar.getAttribute("data-id");
+      bar.addEventListener("click", function () { if (!chartDragged) openDetail(id); });
+      bindTip(bar, function () { return barTip(r, r.seq); });
     });
+
+    // Start at the newest (right) unless a scroll position is being preserved
+    // (e.g. across a legend toggle). Wire arrows, drag, and scroll memory.
+    barsEl.scrollLeft = (chartScroll == null) ? barsEl.scrollWidth
+      : Math.min(chartScroll, barsEl.scrollWidth);
+    renderChartNav(barsEl, stripW > vw + 1);
+    barsEl.addEventListener("scroll", function () {
+      chartScroll = barsEl.scrollLeft; updateChartArrows(barsEl);
+    });
+    enableChartDrag(barsEl);
   }
 
   function sortReports() {
@@ -766,7 +941,9 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       var del = '<td class="right"><button class="row-del" type="button" data-del="'
         + esc(r.id) + '" data-label="' + esc(r.dag_id + " · " + r.task_id) + '" aria-label="'
         + esc(t("deleteReport")) + '" title="' + esc(t("deleteReport")) + '">' + TRASH + "</button></td>";
-      return '<tr class="clickable" tabindex="0" data-id="' + esc(r.id) + '">' + cells + del + "</tr>";
+      var sel = '<td class="sel-cell"><input type="checkbox" class="sel" data-id="' + esc(r.id)
+        + '"' + (selectedIds.has(r.id) ? " checked" : "") + ' aria-label="' + esc(t("selectRow")) + '"></td>';
+      return '<tr class="clickable" tabindex="0" data-id="' + esc(r.id) + '">' + sel + cells + del + "</tr>";
     }).join("");
   }
 
@@ -779,6 +956,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     if (!reports.length) {
       listEl.innerHTML = '<div class="state">'
         + esc(allReports.length ? t("noMatch") : t("noReports")) + "</div>";
+      updateBulkBar();  // no rows -> drop any stale bulk bar
       return;
     }
     sortReports();
@@ -798,7 +976,9 @@ _INDEX_HTML = r"""<!DOCTYPE html>
         + '<button type="button" class="nav-btn" id="pg-next"'
           + (listPage >= pages - 1 ? " disabled" : "") + ' aria-label="' + esc(t("nextPage")) + '">›</button></div>'
       : "";
-    listEl.innerHTML = '<div class="table-wrap"><table><thead><tr>' + head
+    var selAllTh = '<th class="sel-cell"><input type="checkbox" id="sel-all" aria-label="'
+      + esc(t("selectAll")) + '"></th>';
+    listEl.innerHTML = '<div class="table-wrap"><table><thead><tr>' + selAllTh + head
       + "<th></th></tr></thead><tbody>" + renderRows(pageRows) + "</tbody></table></div>" + pager;
 
     listEl.querySelectorAll("th.sortable").forEach(function (th) {
@@ -815,7 +995,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     listEl.querySelectorAll(".row-del").forEach(function (b) {
       b.addEventListener("click", function (e) {
         e.stopPropagation();  // don't open the detail when deleting
-        openConfirm(b.getAttribute("data-del"), b.getAttribute("data-label"));
+        openConfirm([b.getAttribute("data-del")], b.getAttribute("data-label"));
       });
     });
     listEl.querySelectorAll("tr.clickable").forEach(function (tr) {
@@ -824,6 +1004,56 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       tr.addEventListener("keydown", function (e) {
         if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); }
       });
+    });
+    listEl.querySelectorAll(".sel").forEach(function (cb) {
+      cb.addEventListener("click", function (e) { e.stopPropagation(); });
+      cb.addEventListener("change", function () {
+        var id = cb.getAttribute("data-id");
+        if (cb.checked) selectedIds.add(id); else selectedIds.delete(id);
+        syncSelAll(); updateBulkBar();
+      });
+    });
+    var selAll = document.getElementById("sel-all");
+    if (selAll) selAll.addEventListener("change", function () {
+      listEl.querySelectorAll(".sel").forEach(function (cb) {
+        cb.checked = selAll.checked;
+        var id = cb.getAttribute("data-id");
+        if (selAll.checked) selectedIds.add(id); else selectedIds.delete(id);
+      });
+      selAll.indeterminate = false;
+      updateBulkBar();
+    });
+    syncSelAll(); updateBulkBar();
+  }
+
+  function syncSelAll() {
+    var selAll = document.getElementById("sel-all");
+    if (!selAll) return;
+    var boxes = listEl.querySelectorAll(".sel"), n = 0;
+    boxes.forEach(function (cb) { if (cb.checked) n++; });
+    selAll.checked = boxes.length > 0 && n === boxes.length;
+    selAll.indeterminate = n > 0 && n < boxes.length;
+  }
+
+  function updateBulkBar() {
+    var bar = document.getElementById("bulk-bar"), n = selectedIds.size;
+    if (!n) { bar.hidden = true; bar.innerHTML = ""; return; }
+    bar.hidden = false;
+    bar.innerHTML = '<span class="bulk-count">' + esc(t("nSelected").replace("{n}", n)) + "</span>"
+      + '<span class="bulk-sep"></span>'
+      + '<button type="button" class="bulk-del" id="bulk-del">' + TRASH + " "
+      + esc(t("deleteSelected")) + "</button>"
+      + '<button type="button" class="bulk-close" id="bulk-clear" aria-label="' + esc(t("clearSel"))
+      + '"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"'
+      + ' stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg></button>';
+    document.getElementById("bulk-clear").addEventListener("click", function () {
+      selectedIds.clear();
+      listEl.querySelectorAll(".sel").forEach(function (cb) { cb.checked = false; });
+      syncSelAll(); updateBulkBar();
+    });
+    document.getElementById("bulk-del").addEventListener("click", function () {
+      var ids = []; selectedIds.forEach(function (id) { ids.push(id); });
+      openConfirm(ids, "");
     });
   }
 
@@ -861,14 +1091,22 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   function matchesIn(haystack, needle) {
     return !needle || String(haystack).toLowerCase().indexOf(needle.toLowerCase()) !== -1;
   }
+  // Stable chronological run number (oldest = 1) for the list # column and the
+  // chart bar labels -- so bar #5 and row #5 are the same run.
+  function assignSeq() {
+    reports.slice().sort(function (a, b) {
+      return String(a.created_at || "") < String(b.created_at || "") ? -1 : 1;
+    }).forEach(function (r, i) { r.seq = i + 1; });
+  }
   function applyFilter(keepPage) {
     var dag = document.getElementById("f-dag").value.trim();
     var run = document.getElementById("f-run").value.trim();
     reports = allReports.filter(function (r) {
       return matchesIn(r.dag_id, dag) && matchesIn(r.run_id, run);
     });
-    // Filter resets to the newest window / first page; a delete keeps the user's place.
-    if (!keepPage) { chartWin = 0; listPage = 0; }
+    assignSeq();
+    // Filter resets to the newest runs / first page; a delete keeps the user's place.
+    if (!keepPage) { chartScroll = null; listPage = 0; }
     renderKpis(); renderChart(); renderList();
   }
   function populateSuggestions() {
@@ -930,8 +1168,16 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       return '<a class="af-link" href="' + esc(href) + '" target="_top" rel="noopener">'
         + ext + esc(label) + "</a>";
     }
-    return '<div class="af-links">'
-      + link(dag, t("afDag")) + link(run, t("afRun")) + link(ti, t("afTask")) + "</div>";
+    var out = '<div class="af-links">'
+      + link(dag, t("afDag")) + link(run, t("afRun")) + link(ti, t("afTask"));
+    if (m.has_allure) {
+      var dl = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"'
+        + ' stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+        + '<path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>';
+      out += '<button type="button" class="af-link" data-allure="' + esc(m.id) + '">'
+        + dl + esc(t("downloadAllure")) + "</button>";
+    }
+    return out + "</div>";
   }
 
   function openInAirflow(href) {
@@ -950,11 +1196,30 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     window.location.href = href;
   }
 
+  // Download the report's Allure results zip. Airflow's iframe sandbox blocks
+  // downloads (no allow-downloads), so trigger the click from the parent doc
+  // (same-origin, not sandboxed); standalone uses our own document.
+  function downloadAllure(id) {
+    var url = API + "reports/" + encodeURIComponent(id) + "/allure.zip";
+    try {
+      var w = sameOriginTop();
+      var doc = w ? w.document : document;
+      var a = doc.createElement("a");
+      a.href = url; a.download = "allure-results.zip";
+      doc.body.appendChild(a); a.click(); doc.body.removeChild(a);
+    } catch (e) {
+      window.location.href = url;
+    }
+  }
+
   function renderDetail() {
     var m = detail;
     var counts = { all: m.cases.length, passed: 0, failed: 0, error: 0, skipped: 0 };
     m.cases.forEach(function (c) { if (counts[c.outcome] != null) counts[c.outcome]++; });
     dTitle.textContent = m.dag_id + " · " + m.task_id + " · " + t("tryWord") + " " + m.try_number;
+    // Run number (#N), matching the chart bar and the list ID column.
+    var rec = reports.filter(function (x) { return x.id === currentId; })[0];
+    document.getElementById("d-seq").textContent = rec && rec.seq ? "#" + rec.seq : "";
 
     var kpis = [
       [t("kPassed"), m.passed, "c-pass"], [t("kFailed"), m.failed, "c-fail"],
@@ -987,7 +1252,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       + '<div class="kpis">' + kpis + "</div></div>"
       + airflowLinks(m)
       + '<div class="pills">' + pills + "</div>"
-      + '<div class="card table-wrap"><table><thead><tr>'
+      + '<div class="card table-wrap case-table"><table><thead><tr>'
       + "<th>" + esc(t("hOutcome")) + "</th><th>" + esc(t("hTest"))
       + '</th><th class="right">' + esc(t("hTime")) + "</th><th></th>"
       + "</tr></thead><tbody>" + body + "</tbody></table></div>";
@@ -998,11 +1263,14 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     // Airflow's iframe sandbox drops target="_top"/window.open (no top-navigation), but not
     // the History API on the same-origin parent -- so drive React Router instead. The real
     // <a href> stays so cmd/right-click still offers "open in new tab".
-    dBody.querySelectorAll(".af-link").forEach(function (a) {
+    dBody.querySelectorAll(".af-link[href]").forEach(function (a) {
       a.addEventListener("click", function (ev) {
         ev.preventDefault();
         openInAirflow(a.getAttribute("href"));
       });
+    });
+    dBody.querySelectorAll("[data-allure]").forEach(function (b) {
+      b.addEventListener("click", function () { downloadAllure(b.getAttribute("data-allure")); });
     });
     dBody.querySelectorAll(".dseg").forEach(function (seg) {
       seg.addEventListener("click", function () {
@@ -1079,6 +1347,19 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     if (lastFocus && lastFocus.focus) lastFocus.focus();
   }
 
+  // Close on a backdrop click (like Airflow's modals); ESC closes natively via the
+  // "cancel" event. Guarded on mousedown so a text drag that ends outside the box
+  // doesn't dismiss it.
+  function closeOnBackdrop(d, closeFn) {
+    var startedOutside = false;
+    var outside = function (e) {
+      var r = d.getBoundingClientRect();
+      return e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom;
+    };
+    d.addEventListener("mousedown", function (e) { startedOutside = e.target === d && outside(e); });
+    d.addEventListener("click", function (e) { if (startedOutside && outside(e)) closeFn(); });
+  }
+
   // Copy a deep-link to this report.
   function copyLink() {
     if (!currentId) return;
@@ -1107,54 +1388,72 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   document.getElementById("d-close").addEventListener("click", closeDetail);
   document.getElementById("d-copy").addEventListener("click", copyLink);
   document.getElementById("d-delete").addEventListener("click", function () {
-    if (currentId) openConfirm(currentId, dTitle.textContent);
+    if (currentId) openConfirm([currentId], dTitle.textContent);
   });
   dlg.addEventListener("cancel", function () { detail = null; currentId = null; setReportParam(null); });
   dlg.addEventListener("close", function () { if (lastFocus && lastFocus.focus) lastFocus.focus(); });
+  closeOnBackdrop(dlg, closeDetail);
 
   var confirmDlg = document.getElementById("confirm");
-  var pendingDelete = null;
-  function openConfirm(id, label) {
-    pendingDelete = id;
+  var pendingDelete = [];   // ids awaiting confirmation (1 row or N selected)
+  function openConfirm(ids, label) {
+    pendingDelete = ids.slice();
+    var n = pendingDelete.length;
+    document.getElementById("c-title").textContent =
+      n > 1 ? t("deleteTitleN").replace("{n}", n) : t("deleteTitle");
     document.getElementById("c-name").textContent = label || "";
     if (typeof confirmDlg.showModal === "function") { if (!confirmDlg.open) confirmDlg.showModal(); }
     else confirmDlg.setAttribute("open", "");
   }
   function closeConfirm() {
-    pendingDelete = null;
+    pendingDelete = [];
     if (confirmDlg.open) confirmDlg.close(); else confirmDlg.removeAttribute("open");
   }
   function doDelete() {
-    var id = pendingDelete;
-    if (!id) return;
+    var ids = pendingDelete.slice();
+    if (!ids.length) return;
     var ok = document.getElementById("c-ok");
     ok.disabled = true; ok.textContent = t("deleting");
-    fetch(API + "reports/" + encodeURIComponent(id), { method: "DELETE" })
-      .then(function (r) {
-        if (r.status === 404) return null;  // already gone -> still drop it
-        if (r.status === 403) throw new Error("__forbidden__");
-        if (!r.ok) throw new Error("HTTP " + r.status);
-        return r.json();
-      })
-      .then(function () {
-        allReports = allReports.filter(function (x) { return x.id !== id; });
-        closeConfirm();
-        if (currentId === id) closeDetail();
-        applyFilter(true);
-      })
-      .catch(function (e) {
+    var failed = [];
+    Promise.all(ids.map(function (id) {
+      // Each DELETE is RBAC-checked server-side, so a forbidden one just fails.
+      return fetch(API + "reports/" + encodeURIComponent(id), { method: "DELETE" })
+        .then(function (r) {
+          if (r.status === 404 || r.ok) {
+            allReports = allReports.filter(function (x) { return x.id !== id; });
+            selectedIds.delete(id);
+            if (currentId === id) closeDetail();
+          } else { failed.push(id); }
+        })
+        .catch(function () { failed.push(id); });
+    })).then(function () {
+      applyFilter(true);
+      if (failed.length) {
+        pendingDelete = failed;
         document.getElementById("c-name").textContent =
-          e.message === "__forbidden__" ? t("forbidden") : t("deleteFail") + e.message;
-      })
-      .finally(function () { ok.disabled = false; ok.textContent = t("delete"); });
+          t("deleteFailedN").replace("{n}", failed.length);
+      } else {
+        closeConfirm();
+      }
+    }).finally(function () { ok.disabled = false; ok.textContent = t("delete"); });
   }
   document.getElementById("c-cancel").addEventListener("click", closeConfirm);
   document.getElementById("c-ok").addEventListener("click", doDelete);
-  confirmDlg.addEventListener("cancel", function () { pendingDelete = null; });
+  confirmDlg.addEventListener("cancel", function () { pendingDelete = []; });
+  closeOnBackdrop(confirmDlg, closeConfirm);
 
   document.getElementById("refresh").addEventListener("click", load);
+  document.addEventListener("pointermove", chartDragMove);
+  document.addEventListener("pointerup", chartDragEnd);
+  document.addEventListener("pointercancel", chartDragEnd);
   ["f-dag", "f-run"].forEach(function (id) {
     document.getElementById(id).addEventListener("input", applyFilter);
+  });
+  // Re-render the chart on resize so bars re-snap to the new pixel grid.
+  var _rsTimer;
+  window.addEventListener("resize", function () {
+    clearTimeout(_rsTimer);
+    _rsTimer = setTimeout(function () { if (reports.length) { chartScroll = null; renderChart(); } }, 150);
   });
   load();
 })();

@@ -15,14 +15,18 @@ matches Airflow.
 
 ### Added
 - **History chart** above the table — per-run stacked bars (pass/fail/error/skip)
-  with a legend toggle, run numbers, and a carousel past 30 runs; click a bar to
-  open that run.
+  with a legend toggle and run numbers; up to 30 fill the width and the rest live
+  in a smooth horizontal carousel you drag, swipe, or step with arrows. Each bar's
+  number matches a sortable **ID** run column in the list; click a bar to open it.
 - **Success donut** in the detail view: pass-rate in the centre, click a slice to
   filter the case table, hover for its share.
 - **Captured output for every test** (passed included) — `system-out`/`-err` plus
   failure/error tracebacks and skip reasons, expandable per row.
-- **Delete a report** from the UI (with confirmation): removes its files and now-
-  empty `dag/run/task` dirs; refuses any path outside the report root.
+- **Delete reports** from the UI — single (per-row) or **bulk**: Airflow-style
+  checkboxes + select-all raise a floating bottom toolbar to delete the selection
+  (with confirmation). Removes their files and now-empty `dag/run/task` dirs,
+  refuses any path outside the report root, and the list, stats, and chart update
+  immediately. Each delete is RBAC-checked individually.
 - **Airflow RBAC**: reads filter the list and gate detail (`403`) to DAGs the user
   may read; deletion requires permission to trigger the DAG. Checks fail **closed**;
   authorizers are injectable; the standalone dev server is open.
@@ -32,14 +36,25 @@ matches Airflow.
   Airflow parent URL, so a copied link reopens the report inside Airflow.
 - **EN/RU localisation** following Airflow's selected language, with locale-aware
   dates/numbers.
+- **Allure / TestOps export** (opt-in): `ArchivingResultParser(allure=True)`
+  adds `--alluredir` (needs `allure-pytest` on the worker), so raw Allure results
+  are archived next to the report — with an `executor.json` linking the Airflow
+  run — and the viewer/API expose them as a `.zip`
+  (`GET /api/reports/{id}/allure.zip`) to upload to Allure TestOps.
 - **List pagination** at 100 rows/page.
 
 ### Changed
+- **Renamed** the producer parser `ArchivingJUnitResultParser` →
+  `ArchivingResultParser` (it now archives more than JUnit). Update your DAG's
+  `parser=` import.
 - **Looks like Airflow**: Inter font, brand blue `#017CEE`, and `STATE_COLORS`;
   a navy dark theme and white/bordered light theme sampled from Airflow's own UI,
   with the page background read live from the parent when embedded (no white
   flash). Flat surfaces, an aligned header, a gentle `rgba(0,0,0,.5)` modal
-  backdrop, and a nav icon in Airflow's `fg.muted` grey.
+  backdrop, dark-theme scrollbars, and a nav icon in Airflow's `fg.muted` grey
+  that turns white when its menu item is active. Long test ids scroll
+  horizontally in the case table instead of overlapping the Time column, and the
+  chart bars are pixel-aligned so their edges stay crisp on the dark theme.
 
 ### Security
 - Report tokens are untrusted: path components are sanitised (no `.`/`..`

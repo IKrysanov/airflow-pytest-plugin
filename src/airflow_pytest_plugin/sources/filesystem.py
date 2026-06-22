@@ -16,17 +16,19 @@
 
 from __future__ import annotations
 
+import io
 import json
 import logging
 import os
 import shutil
+import zipfile
 from pathlib import Path
 from typing import Any
 
 from airflow_pytest_operator import JUnitResultParser
 
 from ..config import get_reports_root
-from ..layout import META_FILENAME, REPORT_FILENAME, ReportLayout
+from ..layout import ALLURE_DIRNAME, META_FILENAME, REPORT_FILENAME, ReportLayout
 from ..models import CaseView, ReportDetail, ReportRef, ReportSummary
 from .base import ReportSource
 
@@ -159,6 +161,24 @@ class FileSystemReportSource(ReportSource):
         _log.warning("Refusing report path outside the report root: %r", target)
         return None
 
+    def allure_archive(self, ref: ReportRef) -> bytes | None:
+        report_dir = self._safe_dir(ref)
+        if report_dir is None:
+            return None
+        allure_dir = os.path.join(report_dir, ALLURE_DIRNAME)
+        files = [
+            os.path.join(base, name)
+            for base, _dirs, names in os.walk(allure_dir)
+            for name in names
+        ]
+        if not files:
+            return None
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for full in files:
+                zf.write(full, os.path.relpath(full, allure_dir))
+        return buf.getvalue()
+
     @staticmethod
     def _prune_empty_parents(start: str, root: str) -> None:
         cur = os.path.realpath(start)
@@ -252,6 +272,7 @@ class FileSystemReportSource(ReportSource):
             success=bool(summary.get("success", False)),
             created_at=_opt_str(meta.get("created_at")),
             logical_date=_opt_str(meta.get("logical_date")),
+            has_allure=bool(meta.get("allure")),
         )
 
 

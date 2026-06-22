@@ -43,3 +43,10 @@ class ReportSource(ABC):
     def delete(self, ref: ReportRef) -> bool:
         """Permanently remove the report for ``ref``; ``True`` if one was removed."""
         raise NotImplementedError
+
+    def allure_archive(self, ref: ReportRef) -> bytes | None:
+        """A zip of the report's raw Allure results, or ``None`` if it has none.
+
+        Optional capability (default: unsupported) for exporting to Allure TestOps.
+        """
+        return None

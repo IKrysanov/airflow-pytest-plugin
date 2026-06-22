@@ -103,7 +103,7 @@ jobs:
       - name: Smoke-test imports against real Airflow
         run: |
           python -c "import airflow; print('Airflow', airflow.__version__)"
-          python -c "from airflow_pytest_plugin import ArchivingJUnitResultParser, create_app; print('plugin import OK')"
+          python -c "from airflow_pytest_plugin import ArchivingResultParser, create_app; print('plugin import OK')"
           python -c "from airflow_pytest_plugin.plugin import PytestReportsPlugin as P; assert P.fastapi_apps, 'FastAPI app not registered'; print('plugin registers', [a['url_prefix'] for a in P.fastapi_apps])"
       - name: Run the suite against real Airflow
         run: pytest -q

@@ -94,6 +94,7 @@ class ReportSummary:
     success: bool
     created_at: str | None = None
     logical_date: str | None = None
+    has_allure: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -112,6 +113,7 @@ class ReportSummary:
             "success": self.success,
             "created_at": self.created_at,
             "logical_date": self.logical_date,
+            "has_allure": self.has_allure,
         }
 
 
