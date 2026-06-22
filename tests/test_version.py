@@ -12,20 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Single source of truth for the package version (read from package metadata)."""
-
 from __future__ import annotations
 
-from importlib.metadata import PackageNotFoundError, version
+from importlib.metadata import PackageNotFoundError
 
-_DIST_NAME = "airflow-pytest-plugin"
-
-
-def _resolve_version() -> str:
-    try:
-        return version(_DIST_NAME)
-    except PackageNotFoundError:  # uninstalled source tree
-        return "0.0.0+unknown"
+from airflow_pytest_plugin import version
 
 
-__version__ = _resolve_version()
+def test_resolve_version_reads_metadata():
+    assert isinstance(version._resolve_version(), str)
+
+
+def test_resolve_version_falls_back_when_not_installed(monkeypatch):
+    def _raise(_name):
+        raise PackageNotFoundError
+
+    monkeypatch.setattr(version, "version", _raise)
+    assert version._resolve_version() == "0.0.0+unknown"

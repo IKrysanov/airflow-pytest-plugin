@@ -41,9 +41,7 @@ def test_fastapi_app_registered():
 
 
 def test_external_view_href_has_trailing_slash():
-    # Regression: a bare-prefix href falls through to the Airflow SPA, which
-    # renders its own nav inside the iframe (duplicated sidebar) and a 404 for
-    # the unknown client route. The trailing slash hits the mounted app's index.
+    # Regression: the trailing slash hits the mounted app's index, not the Airflow SPA.
     view = PytestReportsPlugin.external_views[0]
     assert view["href"] == f"{URL_PREFIX}/"
     assert view["href"].endswith("/")
@@ -52,8 +50,7 @@ def test_external_view_href_has_trailing_slash():
 
 
 def test_fastapi_apps_degrade_when_build_fails(monkeypatch):
-    # If app construction fails (e.g. FastAPI missing on a worker), registration
-    # is empty rather than crashing plugin discovery.
+    # If app construction fails, registration is empty rather than crashing discovery.
     import airflow_pytest_plugin.web as web
 
     def _boom(*args, **kwargs):

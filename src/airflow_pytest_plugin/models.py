@@ -12,14 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""View models for the reports UI.
-
-JSON-serializable domain types that sit above the operator's ``TestRunResult`` /
-``CaseResult`` (used only for parsing), so the web layer never sees operator
-types. A report is identified by its Airflow coordinates (:class:`ReportRef`);
-its :pyattr:`token` is an opaque, reversible id used in the HTTP API, so an
-endpoint can rebuild the ref (and on-disk location) without scanning.
-"""
+"""JSON-serializable view models for the reports UI."""
 
 from __future__ import annotations
 
@@ -44,9 +37,8 @@ def _decode_token(token: str) -> dict[str, Any]:
 class ReportRef:
     """The Airflow coordinates that uniquely identify one stored report.
 
-    ``map_index`` is ``-1`` for an ordinary (non-mapped) task instance, matching
-    Airflow's own convention, and ``>= 0`` for a single expanded element of a
-    dynamically-mapped task.
+    ``map_index`` is ``-1`` for a non-mapped task (Airflow's convention), ``>= 0``
+    for one expanded element of a mapped task.
     """
 
     dag_id: str
@@ -57,7 +49,7 @@ class ReportRef:
 
     @property
     def token(self) -> str:
-        """An opaque, URL-safe, reversible id for use in the HTTP API."""
+        """An opaque, URL-safe, reversible id for the HTTP API."""
         return _encode_token(
             {
                 "d": self.dag_id,
@@ -73,12 +65,16 @@ class ReportRef:
         """Inverse of :pyattr:`token`. Raises ``ValueError`` on a bad token."""
         try:
             d = _decode_token(token)
+            try_number = int(d["n"])
+            map_index = int(d["m"])
+            if try_number < 0 or map_index < -1:
+                raise ValueError("out-of-range try_number/map_index")
             return cls(
                 dag_id=str(d["d"]),
                 run_id=str(d["r"]),
                 task_id=str(d["t"]),
-                try_number=int(d["n"]),
-                map_index=int(d["m"]),
+                try_number=try_number,
+                map_index=map_index,
             )
         except (KeyError, ValueError, TypeError, json.JSONDecodeError) as exc:
             raise ValueError(f"malformed report token: {token!r}") from exc
@@ -86,10 +82,7 @@ class ReportRef:
 
 @dataclass(frozen=True)
 class ReportSummary:
-    """The headline numbers for one run -- enough to render a list row.
-
-    Built directly from ``meta.json`` so listing never has to parse XML.
-    """
+    """The headline numbers for one run, built from ``meta.json`` (no XML parse)."""
 
     ref: ReportRef
     total: int
@@ -101,6 +94,7 @@ class ReportSummary:
     success: bool
     created_at: str | None = None
     logical_date: str | None = None
+    has_allure: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -119,6 +113,7 @@ class ReportSummary:
             "success": self.success,
             "created_at": self.created_at,
             "logical_date": self.logical_date,
+            "has_allure": self.has_allure,
         }
 
 

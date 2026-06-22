@@ -15,7 +15,7 @@
 """Minimal DAG wiring the archiving parser into a PytestOperator.
 
 The only change from a plain operator setup is the ``parser=`` argument: swap
-``JUnitResultParser`` for ``ArchivingJUnitResultParser`` and every run is
+``JUnitResultParser`` for ``ArchivingResultParser`` and every run is
 archived where the Pytest Reports UI can find it. No ``cleanup`` tuning needed
 -- a parser-supplied directory is never removed by the runner.
 """
@@ -26,7 +26,7 @@ import pendulum
 from airflow import DAG
 from airflow_pytest_operator import PytestOperator
 
-from airflow_pytest_plugin import ArchivingJUnitResultParser
+from airflow_pytest_plugin import ArchivingResultParser
 
 with DAG(
     dag_id="pytest_reports_example",
@@ -40,7 +40,7 @@ with DAG(
         test_path="tests/",
         # report_root defaults to AIRFLOW_PYTEST_REPORTS_ROOT / the
         # [pytest_reports] reports_root config / /opt/airflow/pytest-reports.
-        parser=ArchivingJUnitResultParser(),
+        parser=ArchivingResultParser(allure=False),
         # Tests failing should not abort the pipeline here; the outcome is in
         # XCom and in the reports UI either way.
         fail_on_test_failure=False,

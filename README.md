@@ -32,8 +32,36 @@ It has two halves that share one on-disk layout:
 
 | Side | Where it runs | What it is |
 | --- | --- | --- |
-| **Producer** | the worker | `ArchivingJUnitResultParser`, a drop-in `parser=` for `PytestOperator` |
+| **Producer** | the worker | `ArchivingResultParser`, a drop-in `parser=` for `PytestOperator` |
 | **Reader** | the API server | a FastAPI app + single-page viewer, registered as an Airflow plugin |
+
+## Contents
+
+- [Screenshots](#screenshots)
+- [Install](#install)
+- [Quickstart](#quickstart)
+- [Do I need `cleanup="never"`?](#do-i-need-cleanupnever)
+- [How it works](#how-it-works)
+- [HTTP API](#http-api)
+- [Access control (RBAC)](#access-control-rbac)
+- [Configuration](#configuration)
+- [Architecture (SOLID)](#architecture-solid)
+- [Development](#development)
+- [License](#license)
+
+## Screenshots
+
+**Overview** — the run list with the historical chart (per-status legend
+toggles, run numbers, and a carousel beyond 30 runs), KPI cards, and Airflow-
+matched colours and font:
+
+![Pytest Reports — overview](https://raw.githubusercontent.com/IKrysanov/airflow-pytest-plugin/main/docs/screenshots/overview.png)
+
+**A single run** — a clickable success donut (pass-rate in the centre; click a
+slice to filter by status), the counts, and every test's captured output on
+expand:
+
+![Pytest Reports — a single run](https://raw.githubusercontent.com/IKrysanov/airflow-pytest-plugin/main/docs/screenshots/detail.png)
 
 ---
 
@@ -53,12 +81,12 @@ enough there too; the `[web]` extra only adds the standalone dev server.
 
 ```python
 from airflow_pytest_operator import PytestOperator
-from airflow_pytest_plugin import ArchivingJUnitResultParser
+from airflow_pytest_plugin import ArchivingResultParser
 
 PytestOperator(
     task_id="run_tests",
     test_path="tests/",
-    parser=ArchivingJUnitResultParser(),   # was JUnitResultParser()
+    parser=ArchivingResultParser(),   # was JUnitResultParser()
 )
 ```
 
@@ -96,7 +124,7 @@ python -m airflow_pytest_plugin.web --root ./pytest-reports --port 8000
 
 **No.** In the operator, the *parser* owns the report location, and a
 **parser-supplied directory is never deleted by the runner under any cleanup
-policy**. `ArchivingJUnitResultParser` supplies its own directory, so reports
+policy**. `ArchivingResultParser` supplies its own directory, so reports
 always survive regardless of the runner's `cleanup` setting. `cleanup="never"`
 only matters when you let the runner use throwaway temp dirs — which is exactly
 the fragile path (random names, no `dag/run/task` association, not visible to
@@ -108,7 +136,7 @@ other workers) this plugin replaces.
 worker                              shared volume                 API server
 ──────                              ─────────────                 ──────────
 PytestOperator                      {root}/{dag}/{run}/           FastAPI app
-  └─ ArchivingJUnitResultParser ──▶   {task}/t{try}/        ◀──── FileSystemReportSource
+  └─ ArchivingResultParser ──▶   {task}/t{try}/        ◀──── FileSystemReportSource
        report_request() → path          ├─ junit.xml              └─ lists meta.json,
        parse()          → meta.json     └─ meta.json                 parses junit.xml
 ```
@@ -136,8 +164,58 @@ runtime. Endpoints (relative to the mount):
 | `GET /` | the single-page viewer (HTML) |
 | `GET /api/reports?dag_id=&run_id=` | summaries, newest first |
 | `GET /api/reports/{report_id}` | one report with per-case rows |
+| `DELETE /api/reports/{report_id}` | delete a report (RBAC-gated) |
+| `GET /api/reports/{report_id}/allure.zip` | raw Allure results as a zip (if any) |
 | `GET /api/health` | `{"status": "ok"}` |
 | `GET /api/docs` | OpenAPI docs |
+
+The reads (`GET`) and the delete are gated by Airflow RBAC — see below.
+
+## Access control (RBAC)
+
+Access is enforced the way Airflow 3 enforces it: every check goes through
+Airflow's **auth manager** (`is_authorized_dag(...)`) — the same call Airflow's
+own DAG-run endpoints make — keyed by the report's `dag_id` and the
+authenticated user. Two permissions are checked:
+
+| Action | Airflow 3.x check | Airflow 2.x (FAB) equivalent |
+| --- | --- | --- |
+| **See / open a report** | `is_authorized_dag(method="GET", access_entity=RUN)` | `can_read` on the DAG |
+| **Delete a report** | `is_authorized_dag(method="POST", access_entity=RUN)` (may trigger the DAG) | trigger / `can_create` on the DAG |
+
+The report list is filtered to the DAGs you may read, opening a report you can't
+read returns `403`, and deleting one requires permission to **trigger** its DAG.
+Every check **fails closed**: if the auth manager can't be consulted, access is
+denied.
+
+**Airflow 2 → 3 mapping.** Airflow 2's FAB used `(action, resource)` pairs —
+`can_read` / `can_edit` / `can_delete` / `can_create` on a resource such as
+`DAG:<id>`. Airflow 3 replaced these with the auth manager's `method`: `GET` ↔
+read, `POST` ↔ create, `PUT` ↔ edit, `DELETE` ↔ delete, `MENU` ↔ menu access.
+This plugin maps **read → `GET`** and **delete → `POST`** (trigger), so it
+inherits your existing per-DAG roles with no extra configuration.
+
+**Plugin visibility.** The nav entry is an Airflow `external_views` item, which
+has no per-permission gate, so the menu link is visible to every signed-in user;
+access is enforced on the **content** (a user who may read no DAG sees an empty
+list and `403` on direct links). The standalone dev server (no Airflow auth)
+allows everything.
+
+## Allure / TestOps export
+
+Opt in per task and install [`allure-pytest`](https://pypi.org/project/allure-pytest/)
+on the worker:
+
+```python
+parser=ArchivingResultParser(allure=True)
+```
+
+The parser then adds `--alluredir` (pytest errors with *unrecognized arguments*
+if `allure-pytest` is missing), so the **raw Allure results** are archived next to
+the report, with an `executor.json` linking the launch back to the Airflow run.
+Download them from a report's detail view, or `GET
+/api/reports/{id}/allure.zip` — then upload to [Allure TestOps](https://qameta.io/)
+(`allurectl upload …`). The JUnit viewer is unaffected; both artifacts coexist.
 
 ## Configuration
 
@@ -154,7 +232,7 @@ Mirrors the operator's layering — each piece has one reason to change:
 | Module | Responsibility |
 | --- | --- |
 | `layout.ReportLayout` | the single `ReportRef → directory` mapping, shared by both sides |
-| `producer.ArchivingJUnitResultParser` | write JUnit XML + `meta.json` (extends the operator's parser) |
+| `producer.ArchivingResultParser` | write JUnit XML + `meta.json` (extends the operator's parser) |
 | `sources.ReportSource` / `FileSystemReportSource` | read/index reports behind an interface (Dependency Inversion) |
 | `web.create_app` | map HTTP onto a `ReportSource` — knows nothing about the filesystem |
 | `plugin.PytestReportsPlugin` | register the app with Airflow |

@@ -12,14 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""The on-disk layout -- the one place that knows where a report lives.
-
-Shared by the producer (which asks where to write) and the reader (where to read
-a report, and how to discover all of them via :data:`META_FILENAME`), so the two
-can never drift. The directory is a human-friendly container; the authoritative
-identity lives in ``meta.json`` / the :class:`ReportRef` token, so the path
-sanitisation below can be lossy without losing information.
-"""
+"""The on-disk layout: maps a report to its directory, shared by producer and reader."""
 
 from __future__ import annotations
 
@@ -32,29 +25,26 @@ from .models import ReportRef
 REPORT_FILENAME = "junit.xml"
 #: The sidecar identity+summary file. Its presence marks a stored report.
 META_FILENAME = "meta.json"
+#: Subdir of a report holding raw Allure results (for Allure TestOps export).
+ALLURE_DIRNAME = "allure-results"
 
-# Filesystem-safe component encoder. Airflow ``run_id`` values routinely carry
-# ``:`` and ``+`` (e.g. ``scheduled__2024-01-01T00:00:00+00:00``), which are
-# awkward or illegal on some filesystems. We map anything outside a conservative
-# safe set to ``_``. This is intentionally lossy: the true, exact identity is
-# preserved in meta.json / the ReportRef token, never recovered from the path.
+# Map filesystem-unsafe chars to ``_``. Intentionally lossy; exact identity lives
+# in meta.json / the ReportRef token, never recovered from the path.
 _UNSAFE = re.compile(r"[^A-Za-z0-9._=+-]")
 
 
 def _safe(component: str) -> str:
     cleaned = _UNSAFE.sub("_", component)
-    # Guard against empty / dot components producing a path that escapes root.
-    return cleaned or "_"
+    # Neutralise empty / dot-only components so a path-traversal segment can never escape the root.
+    if not cleaned or set(cleaned) <= {"."}:
+        return "_"
+    return cleaned
 
 
 class ReportLayout:
     """Maps a :class:`ReportRef` to its directory under a report root::
 
-        {root}/{dag_id}/{run_id}/{task_id}/t{try_number}[/m{map_index}]
-
-    The ``m{map_index}`` segment is added only for mapped tasks. A pure function
-    of its inputs, so the reader can locate a report from a token without
-    scanning the filesystem.
+    {root}/{dag_id}/{run_id}/{task_id}/t{try_number}[/m{map_index}]
     """
 
     def dir_for(self, root: str, ref: ReportRef) -> str:

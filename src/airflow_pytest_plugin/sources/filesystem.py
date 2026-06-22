@@ -12,25 +12,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Filesystem-backed report source.
-
-Lists by scanning ``meta.json`` sidecars (no XML parse); parses ``junit.xml`` on
-demand for per-case detail with the operator's ``JUnitResultParser``. The
-directory mapping is owned by :class:`ReportLayout`, shared with the producer.
-"""
+"""Filesystem-backed report source."""
 
 from __future__ import annotations
 
+import io
 import json
 import logging
 import os
+import shutil
+import zipfile
 from pathlib import Path
 from typing import Any
 
 from airflow_pytest_operator import JUnitResultParser
 
 from ..config import get_reports_root
-from ..layout import META_FILENAME, ReportLayout
+from ..layout import ALLURE_DIRNAME, META_FILENAME, REPORT_FILENAME, ReportLayout
 from ..models import CaseView, ReportDetail, ReportRef, ReportSummary
 from .base import ReportSource
 
@@ -41,20 +39,12 @@ except Exception:  # pragma: no cover - fallback path
 
 _log = logging.getLogger(__name__)
 
-#: Cap a single case's traceback so a pathological report can't bloat a response.
-_MAX_MESSAGE = 16000
+#: Cap one case's captured output so a pathological report can't bloat a response.
+_MAX_OUTPUT = 16000
 
 
 class FileSystemReportSource(ReportSource):
-    """Read archived reports from a directory tree on disk.
-
-    :param report_root: the archive root. Defaults to
-        :func:`~airflow_pytest_plugin.config.get_reports_root`.
-    :param layout: directory mapping (shared with the producer).
-    :param parser: parser used to read per-case detail. Defaults to the
-        operator's :class:`JUnitResultParser`; inject a configured one (e.g.
-        with ``defusedxml``) or a fake in tests.
-    """
+    """Read archived reports from a directory tree on disk."""
 
     def __init__(
         self,
@@ -89,26 +79,27 @@ class FileSystemReportSource(ReportSource):
             summary = self._summary_from_meta(meta)
             if summary is None:
                 continue
-            # Case-insensitive substring match (``in``), mirroring the UI.
             if dag_id and dag_id.lower() not in summary.ref.dag_id.lower():
                 continue
             if run_id and run_id.lower() not in summary.ref.run_id.lower():
                 continue
             summaries.append(summary)
 
-        # Newest first. created_at is an ISO-8601 string, so it sorts
-        # lexicographically in chronological order; missing values sort last.
+        # Newest first: ISO-8601 created_at sorts chronologically; missing sorts last.
         summaries.sort(key=lambda s: s.created_at or "", reverse=True)
         return summaries
 
     def get_detail(self, ref: ReportRef) -> ReportDetail | None:
-        report_path = self._layout.report_path(self._report_root, ref)
+        # Token is attacker-controlled: bound the directory before reading.
+        report_dir = self._safe_dir(ref)
+        if report_dir is None:
+            return None
+        report_path = os.path.join(report_dir, REPORT_FILENAME)
         if not os.path.exists(report_path):
             return None
 
-        # Prefer the stored summary (it records exit_code / success exactly as
-        # the run saw them); fall back to re-deriving from the parsed XML.
-        meta = self._load_meta(Path(self._layout.meta_path(self._report_root, ref)))
+        # Prefer the stored summary (exact exit_code/success); fall back to parsed XML.
+        meta = self._load_meta(Path(os.path.join(report_dir, META_FILENAME)))
         summary = self._summary_from_meta(meta) if meta is not None else None
 
         try:
@@ -130,10 +121,8 @@ class FileSystemReportSource(ReportSource):
                 created_at=None,
             )
 
-        # The operator's parser keeps only the short ``message`` attribute; for
-        # the detail view we want the full ``<failure>``/``<error>`` body (the
-        # traceback). Read it straight from the XML and prefer it per case.
-        tracebacks = self._full_messages(report_path)
+        # The parser keeps only the short message; read the XML for each case's full output.
+        outputs = self._case_outputs(report_path)
         cases = tuple(
             CaseView(
                 node_id=c.node_id,
@@ -141,22 +130,70 @@ class FileSystemReportSource(ReportSource):
                 classname=c.classname,
                 outcome=c.outcome,
                 time=c.time,
-                message=tracebacks.get((c.classname, c.name), c.message),
+                message=outputs.get((c.classname, c.name), c.message),
             )
             for c in result.cases
         )
         return ReportDetail(summary=summary, cases=cases)
 
+    def delete(self, ref: ReportRef) -> bool:
+        target = self._safe_dir(ref)
+        if target is None or not os.path.isdir(target):
+            return False
+        shutil.rmtree(target, ignore_errors=True)
+        # Remove now-empty ancestors so the tree doesn't accumulate orphan directories.
+        self._prune_empty_parents(
+            os.path.dirname(target), os.path.realpath(self._report_root)
+        )
+        _log.info("Deleted report %s", target)
+        return True
+
+    def _safe_dir(self, ref: ReportRef) -> str | None:
+        """The report dir for ``ref`` if it resolves under the root, else ``None``.
+
+        Token is attacker-controlled: resolve real paths (``..``, symlinks) and refuse
+        any escape -- the boundary both reads and deletes rely on.
+        """
+        root = os.path.realpath(self._report_root)
+        target = os.path.realpath(self._layout.dir_for(self._report_root, ref))
+        if target != root and target.startswith(root + os.sep):
+            return target
+        _log.warning("Refusing report path outside the report root: %r", target)
+        return None
+
+    def allure_archive(self, ref: ReportRef) -> bytes | None:
+        report_dir = self._safe_dir(ref)
+        if report_dir is None:
+            return None
+        allure_dir = os.path.join(report_dir, ALLURE_DIRNAME)
+        files = [
+            os.path.join(base, name)
+            for base, _dirs, names in os.walk(allure_dir)
+            for name in names
+        ]
+        if not files:
+            return None
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for full in files:
+                zf.write(full, os.path.relpath(full, allure_dir))
+        return buf.getvalue()
+
+    @staticmethod
+    def _prune_empty_parents(start: str, root: str) -> None:
+        cur = os.path.realpath(start)
+        while cur != root and cur.startswith(root + os.sep):
+            try:
+                os.rmdir(cur)  # raises if the directory is not empty
+            except OSError:
+                break
+            cur = os.path.dirname(cur)
+
     # -- internals -------------------------------------------------------
 
     @staticmethod
-    def _full_messages(report_path: str) -> dict[tuple[str, str], str]:
-        """Map ``(classname, name) -> full failure/error/skip text`` from the XML.
-
-        Combines the ``message`` attribute with the element body (the traceback
-        pytest writes there), capped per case. Best-effort: a parse failure
-        yields an empty map and the caller falls back to the short message.
-        """
+    def _case_outputs(report_path: str) -> dict[tuple[str, str], str]:
+        """Map ``(classname, name) -> full captured output`` from the XML (best-effort)."""
         try:
             tree = _xml_parse(report_path)
         except Exception:
@@ -166,22 +203,33 @@ class FileSystemReportSource(ReportSource):
         out: dict[tuple[str, str], str] = {}
         for suite in suites:
             for tc in suite.findall("testcase"):
+                sections: list[str] = []
                 # Element truthiness is child-based, so test ``is not None``.
-                node = tc.find("failure")
-                if node is None:
-                    node = tc.find("error")
-                if node is None:
-                    node = tc.find("skipped")
-                if node is None:
+                for tag in ("failure", "error", "skipped"):
+                    node = tc.find(tag)
+                    if node is None:
+                        continue
+                    parts = [
+                        p for p in (node.get("message"), (node.text or "").strip()) if p
+                    ]
+                    body = "\n".join(parts).strip()
+                    if body:
+                        sections.append(body)
+                    break
+                # Captured logs -- present for passed tests too under junit_logging=all.
+                for tag, label in (
+                    ("system-out", "Captured stdout / log"),
+                    ("system-err", "Captured stderr"),
+                ):
+                    node = tc.find(tag)
+                    body = (node.text or "").strip() if node is not None else ""
+                    if body:
+                        sections.append(f"--- {label} ---\n{body}")
+                if not sections:
                     continue
-                parts = [
-                    p for p in (node.get("message"), (node.text or "").strip()) if p
-                ]
-                text = "\n".join(parts).strip()
-                if not text:
-                    continue
-                if len(text) > _MAX_MESSAGE:
-                    text = text[:_MAX_MESSAGE] + "\n…(truncated)"
+                text = "\n\n".join(sections)
+                if len(text) > _MAX_OUTPUT:
+                    text = text[:_MAX_OUTPUT] + "\n…(truncated)"
                 out[(tc.get("classname", ""), tc.get("name", ""))] = text
         return out
 
@@ -224,6 +272,7 @@ class FileSystemReportSource(ReportSource):
             success=bool(summary.get("success", False)),
             created_at=_opt_str(meta.get("created_at")),
             logical_date=_opt_str(meta.get("logical_date")),
+            has_allure=bool(meta.get("allure")),
         )
 
 
