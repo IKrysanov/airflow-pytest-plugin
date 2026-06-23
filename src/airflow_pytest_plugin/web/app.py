@@ -35,6 +35,9 @@ if TYPE_CHECKING:
 #: An authorizer: ``(dag_id, user) -> bool``. ``user`` is ``None`` standalone.
 Authorizer = Callable[[str, Any], bool]
 
+#: Upper bound on failed cases returned by /api/failures, to bound the payload.
+_FAILURES_CAP = 5000
+
 
 def _no_user() -> None:
     """Standalone-mode user dependency: there is no Airflow user."""
@@ -167,6 +170,54 @@ def create_app(
             headers={
                 "Content-Disposition": 'attachment; filename="allure-results.zip"'
             },
+        )
+
+    @app.get("/api/failures")
+    def failures(
+        dag_id: str | None = None,
+        run_id: str | None = None,
+        task_id: str | None = None,
+        user: Any = Depends(user_dep),  # noqa: B008 - FastAPI dependency idiom
+    ) -> JSONResponse:
+        """Every failed/errored case across the visible runs (newest run first).
+
+        Filters mirror the list view; the client paginates the flat result. Capped
+        to keep the payload bounded -- ``capped`` flags truncation.
+        """
+        task_q = (task_id or "").lower()
+        items: list[dict[str, Any]] = []
+        capped = False
+        for s in src.list_summaries(dag_id=dag_id, run_id=run_id):
+            if task_q and task_q not in s.ref.task_id.lower():
+                continue
+            if (s.failed + s.errors) <= 0 or not read_auth(s.ref.dag_id, user):
+                continue
+            detail = src.get_detail(s.ref)
+            if detail is None:
+                continue
+            for c in detail.cases:
+                if c.outcome not in ("failed", "error"):
+                    continue
+                items.append(
+                    {
+                        "id": s.ref.token,
+                        "dag_id": s.ref.dag_id,
+                        "task_id": s.ref.task_id,
+                        "run_id": s.ref.run_id,
+                        "created_at": s.created_at,
+                        "node_id": c.node_id,
+                        "outcome": c.outcome,
+                    }
+                )
+            if len(items) >= _FAILURES_CAP:
+                capped = True
+                break
+        return JSONResponse(
+            {
+                "failures": items[:_FAILURES_CAP],
+                "total": len(items[:_FAILURES_CAP]),
+                "capped": capped,
+            }
         )
 
     @app.get("/icon.svg")
