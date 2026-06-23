@@ -63,6 +63,11 @@ expand:
 
 ![Pytest Reports — a single run](https://raw.githubusercontent.com/IKrysanov/airflow-pytest-plugin/main/docs/screenshots/detail.png)
 
+**Failed tests** — clicking the *Failures* KPI lists every failed/errored case
+across the visible runs (paginated); a row jumps to that run:
+
+![Pytest Reports — failed tests](https://raw.githubusercontent.com/IKrysanov/airflow-pytest-plugin/main/docs/screenshots/failures.png)
+
 ---
 
 ## Install
@@ -164,6 +169,7 @@ runtime. Endpoints (relative to the mount):
 | `GET /` | the single-page viewer (HTML) |
 | `GET /api/reports?dag_id=&run_id=` | summaries, newest first |
 | `GET /api/reports/{report_id}` | one report with per-case rows |
+| `GET /api/failures?dag_id=&run_id=&task_id=` | failed/errored cases across the visible runs |
 | `DELETE /api/reports/{report_id}` | delete a report (RBAC-gated) |
 | `GET /api/reports/{report_id}/allure.zip` | raw Allure results as a zip (if any) |
 | `GET /api/health` | `{"status": "ok"}` |

@@ -23,7 +23,7 @@ import pytest
 from airflow_pytest_plugin.compat import airflow_auth_available
 from airflow_pytest_plugin.models import ReportRef
 from airflow_pytest_plugin.sources import FileSystemReportSource
-from conftest import write_allure, write_report
+from conftest import write_allure, write_report, write_report_xml
 
 fastapi = pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
@@ -96,6 +96,11 @@ def test_index_has_feature_markers(client):
         "assignSeq",
         "closeOnBackdrop",
         "PAGE_SIZE",
+        'id="f-task"',
+        'id="d-allure"',
+        "openFailures",
+        "kpi-failures",
+        "setParentDim",
         "forbidden",
     ):
         assert marker in html
@@ -262,3 +267,84 @@ def test_list_exposes_has_allure(reports_root):
     write_allure(reports_root, ref)
     c = TestClient(make_app(reports_root))
     assert c.get("/api/reports").json()["reports"][0]["has_allure"] is True
+
+
+def test_failures_lists_failed_and_error_cases(reports_root):
+    write_report(
+        reports_root,
+        ReportRef("dag", "run", "task", 1),
+        passed=2,
+        failed=3,
+        errors=1,
+        skipped=1,
+    )
+    write_report(
+        reports_root, ReportRef("dag2", "run", "task", 1), passed=4
+    )  # excluded
+    c = TestClient(make_app(reports_root))
+    d = c.get("/api/failures").json()
+    assert d["total"] == 4 and d["capped"] is False
+    assert sorted({f["outcome"] for f in d["failures"]}) == ["error", "failed"]
+    assert all(
+        f["dag_id"] == "dag" for f in d["failures"]
+    )  # the all-pass run is skipped
+
+
+def test_failures_respects_task_filter(reports_root):
+    write_report(reports_root, ReportRef("dag", "run", "alpha", 1), passed=1, failed=2)
+    write_report(reports_root, ReportRef("dag", "run", "beta", 1), passed=1, failed=3)
+    c = TestClient(make_app(reports_root))
+    d = c.get("/api/failures?task_id=alpha").json()
+    assert d["total"] == 2 and all(f["task_id"] == "alpha" for f in d["failures"])
+
+
+def test_failures_hides_unreadable_runs(reports_root):
+    write_report(reports_root, ReportRef("seen", "r", "t", 1), passed=1, failed=2)
+    write_report(reports_root, ReportRef("hidden", "r", "t", 1), passed=1, failed=2)
+    c = TestClient(
+        make_app(reports_root, read_authorizer=lambda dag_id, user: dag_id != "hidden")
+    )
+    d = c.get("/api/failures").json()
+    assert {f["dag_id"] for f in d["failures"]} == {"seen"}
+
+
+def test_failures_empty_when_all_pass(reports_root):
+    write_report(reports_root, ReportRef("dag", "run", "task", 1), passed=5)
+    c = TestClient(make_app(reports_root))
+    assert c.get("/api/failures").json() == {
+        "failures": [],
+        "total": 0,
+        "capped": False,
+    }
+
+
+def test_failures_skips_runs_with_unreadable_xml(reports_root):
+    # meta marks the run as failing, but its junit.xml can't be parsed -> no cases.
+    write_report_xml(
+        reports_root,
+        ReportRef("dag", "r", "t", 1),
+        "<not-valid-xml",
+        summary={
+            "total": 2,
+            "passed": 0,
+            "failed": 2,
+            "errors": 0,
+            "skipped": 0,
+            "success": False,
+        },
+    )
+    c = TestClient(make_app(reports_root))
+    assert c.get("/api/failures").json() == {
+        "failures": [],
+        "total": 0,
+        "capped": False,
+    }
+
+
+def test_failures_capped(reports_root, monkeypatch):
+    import airflow_pytest_plugin.web.app as app_mod
+
+    monkeypatch.setattr(app_mod, "_FAILURES_CAP", 3)
+    write_report(reports_root, ReportRef("dag", "r", "t", 1), passed=1, failed=5)
+    d = TestClient(make_app(reports_root)).get("/api/failures").json()
+    assert d["capped"] is True and d["total"] == 3 and len(d["failures"]) == 3

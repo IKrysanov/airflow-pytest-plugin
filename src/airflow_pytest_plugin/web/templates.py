@@ -81,13 +81,25 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .controls { display: flex; align-items: center; gap: 10px;
     flex: 1 1 auto; min-width: 0; flex-wrap: wrap; justify-content: flex-end; }
   input, button { font: inherit; color: var(--fg); }
+  /* Each filter input + its custom suggestions dropdown live in a positioned wrap;
+     the wrap carries the adaptive flex sizing, the input fills it. */
+  .field-wrap { position: relative; display: flex; flex: 1 1 150px; min-width: 0; max-width: 200px; }
   .field {
     height: 36px; background: var(--surface-2); border: 1px solid var(--border);
-    border-radius: 8px; padding: 0 11px;
-    flex: 1 1 150px; min-width: 0; max-width: 200px;
+    border-radius: 8px; padding: 0 11px; flex: 1 1 auto; min-width: 0; width: 100%;
   }
   #refresh { flex: 0 0 auto; }
   .field:focus { outline: 2px solid var(--ring); outline-offset: 1px; border-color: var(--primary); }
+  /* Suggestions: a tidy dropdown anchored under the input (replaces the native
+     <datalist>, whose popup escapes the iframe with a detached system shadow). */
+  .suggest {
+    position: absolute; top: calc(100% + 5px); left: 0; right: 0; z-index: 60;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+    box-shadow: var(--shadow); max-height: 260px; overflow-y: auto; padding: 4px;
+  }
+  .suggest .opt { padding: 7px 9px; border-radius: 6px; cursor: pointer; font-size: 13px;
+    color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .suggest .opt:hover, .suggest .opt.active { background: var(--surface-2); }
   .btn {
     height: 36px; background: var(--surface-2); border: 1px solid var(--border);
     border-radius: 8px; padding: 0 13px; cursor: pointer; white-space: nowrap;
@@ -98,6 +110,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .btn.primary { background: var(--primary); border-color: var(--primary); color: var(--on-primary); }
   .btn.primary:hover { filter: brightness(1.08); }
   .icon-btn { height: auto; padding: 7px; }
+  /* Allure button: same height as the neighbouring icon buttons (32px), only wider. */
+  #d-allure { height: 32px; padding: 0 10px; gap: 6px; font-size: 12.5px; }
 
   main { padding: 18px 20px 40px; max-width: 1600px; margin: 0 auto; }
 
@@ -105,6 +119,9 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     gap: 12px; margin-bottom: 18px; }
   .kpi { background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
     padding: 14px 16px; box-shadow: var(--shadow); }
+  .kpi.clickable { cursor: pointer; transition: background .12s, border-color .12s; }
+  .kpi.clickable:hover { background: var(--surface-2); border-color: var(--muted); }
+  .kpi.clickable:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
   .kpi .label { font-size: 12px; color: var(--muted); text-transform: uppercase;
     letter-spacing: .04em; }
   .kpi .value { font-size: 26px; font-weight: 700; margin-top: 4px; }
@@ -269,7 +286,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .dlg-head { display: flex; align-items: center; gap: 10px; padding: 16px 20px;
     border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--surface); }
   .dlg-head h2 { margin: 0; font-size: 15px; font-weight: 650; overflow-wrap: anywhere; }
-  .d-seq { color: var(--muted); font-weight: 600; font-size: 14px;
+  /* Same size + line box as the title so the run number sits on its baseline. */
+  .d-seq { color: var(--muted); font-weight: 600; font-size: 15px;
     font-variant-numeric: tabular-nums; flex: 0 0 auto; }
   .d-seq:empty { display: none; }
   .dlg-body { padding: 18px 20px 22px; max-height: 72vh; overflow: auto; }
@@ -284,8 +302,21 @@ _INDEX_HTML = r"""<!DOCTYPE html>
      horizontally to its full width so it never overlaps the Time column. */
   .case-node { display: inline-block; white-space: nowrap; }
   .case-table { overflow-x: auto; }
-  .case-table table { width: max-content; min-width: 100%; }
+  /* border-collapse:separate so the frozen (sticky) outcome column keeps its OWN
+     borders -- with collapse, a sticky cell's borders belong to the table and get
+     painted over, so the column's row lines vanished and the header doubled up.
+     Each cell carries only border-bottom (+ the divider on the first cell), so the
+     lines are single and aligned across all columns. */
+  .case-table table { width: max-content; min-width: 100%;
+    border-collapse: separate; border-spacing: 0; }
   .case.clickable[aria-expanded="true"] { background: var(--surface-2); }
+  .case-table thead th:first-child,
+  .case-table tr.case > td:first-child { position: sticky; left: 0;
+    border-right: 1px solid var(--border); }
+  .case-table tr.case > td:first-child { background: var(--surface); z-index: 1; }
+  .case-table tr.case.clickable:hover > td:first-child,
+  .case-table tr.case[aria-expanded="true"] > td:first-child { background: var(--surface-2); }
+  .case-table thead th:first-child { z-index: 3; }
   .chev { display: inline-flex; color: var(--muted); transition: transform .15s; }
   .case[aria-expanded="true"] .chev { transform: rotate(90deg); }
   .case-exp > td { padding: 0 12px 12px; border-bottom: 1px solid var(--border); }
@@ -297,7 +328,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   @media (max-width: 680px) {
     .header-inner { flex-direction: column; align-items: stretch; gap: 10px; padding: 10px 12px; }
     .controls { width: 100%; flex-wrap: nowrap; }
-    .controls .field { flex: 1 1 0; min-width: 0; max-width: none; }
+    .controls .field-wrap { flex: 1 1 0; min-width: 0; max-width: none; }
     #refresh { flex: 0 0 auto; }
     main { padding: 12px 12px 32px; }
     th, td { padding: 8px 9px; }
@@ -337,10 +368,21 @@ _INDEX_HTML = r"""<!DOCTYPE html>
  <div class="header-inner">
   <span class="brand" data-i18n="brand">Pytest Reports</span>
   <div class="controls">
-    <input id="f-dag" class="field" data-i18n-ph="filterDag" data-i18n-al="filterDagAl"
-           list="dags" autocomplete="off" />
-    <input id="f-run" class="field" data-i18n-ph="filterRun" data-i18n-al="filterRunAl"
-           list="runs" autocomplete="off" />
+    <span class="field-wrap">
+      <input id="f-dag" class="field" data-i18n-ph="filterDag" data-i18n-al="filterDagAl"
+             autocomplete="off" role="combobox" aria-autocomplete="list" aria-expanded="false" />
+      <div class="suggest" id="sg-dag" role="listbox" hidden></div>
+    </span>
+    <span class="field-wrap">
+      <input id="f-task" class="field" data-i18n-ph="filterTask" data-i18n-al="filterTaskAl"
+             autocomplete="off" role="combobox" aria-autocomplete="list" aria-expanded="false" />
+      <div class="suggest" id="sg-task" role="listbox" hidden></div>
+    </span>
+    <span class="field-wrap">
+      <input id="f-run" class="field" data-i18n-ph="filterRun" data-i18n-al="filterRunAl"
+             autocomplete="off" role="combobox" aria-autocomplete="list" aria-expanded="false" />
+      <div class="suggest" id="sg-run" role="listbox" hidden></div>
+    </span>
     <button id="refresh" class="btn primary" type="button">
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"
            stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -349,8 +391,6 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       <span data-i18n="refresh">Refresh</span>
     </button>
   </div>
-  <datalist id="dags"></datalist>
-  <datalist id="runs"></datalist>
  </div>
 </header>
 
@@ -374,6 +414,13 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     <h2 id="d-title">Report</h2>
     <span class="grow" style="flex:1"></span>
     <span id="d-copied" class="copied" hidden data-i18n="copied">Copied</span>
+    <button id="d-allure" class="btn" type="button" hidden data-i18n-al="downloadAllure">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M12 3v12M7 10l5 5 5-5M5 21h14"/>
+      </svg>
+      <span data-i18n="downloadAllure">Allure results</span>
+    </button>
     <button id="d-copy" class="btn icon-btn" type="button" data-i18n-al="copyLink" title="Copy link">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
            stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -408,6 +455,20 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   </div>
 </dialog>
 
+<dialog id="failures" aria-labelledby="fl-title">
+  <div class="dlg-head">
+    <h2 id="fl-title" data-i18n="failuresTitle">Failed tests</h2>
+    <span class="grow" style="flex:1"></span>
+    <button id="fl-close" class="btn icon-btn" type="button" data-i18n-al="closeReport">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M18 6 6 18M6 6l12 12"/>
+      </svg>
+    </button>
+  </div>
+  <div class="dlg-body" id="fl-body"></div>
+</dialog>
+
 <div id="bulk-bar" class="bulk-bar" hidden></div>
 
 <script>
@@ -418,8 +479,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   var I18N = {
     en: {
       title: "Pytest Reports", brand: "Pytest Reports", refresh: "Refresh",
-      filterDag: "filter dag_id", filterRun: "filter run_id",
-      filterDagAl: "Filter by dag_id", filterRunAl: "Filter by run_id",
+      filterDag: "filter dag_id", filterTask: "filter task_id", filterRun: "filter run_id",
+      filterDagAl: "Filter by dag_id", filterTaskAl: "Filter by task_id", filterRunAl: "Filter by run_id",
       history: "Recent runs", copyLink: "Copy link", copied: "Copied",
       closeReport: "Close report",
       cId: "ID", cStatus: "Status", cDag: "DAG", cTask: "Task", cRun: "Run", cTry: "Try",
@@ -435,7 +496,10 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       noMatch: "No reports match the current filter.",
       noReports: "No reports found yet. Run a PytestOperator task with ArchivingResultParser to populate this view.",
       noCases: "No matching cases.", tryWord: "try",
+      failuresTitle: "Failed tests", noFailures: "No failed tests.",
+      failCapped: "Showing the first {n} failures.",
       loadFail: "Failed to load reports: ", reportFail: "Failed to load report: ",
+      failuresFail: "Failed to load failures: ",
       deleteReport: "Delete report", deleteTitle: "Delete report?",
       deleteTitleN: "Delete {n} reports?",
       deleteConfirm: "This permanently removes the report and its files everywhere.",
@@ -450,8 +514,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     },
     ru: {
       title: "Pytest Reports", brand: "Pytest-отчёты", refresh: "Обновить",
-      filterDag: "фильтр dag_id", filterRun: "фильтр run_id",
-      filterDagAl: "Фильтр по dag_id", filterRunAl: "Фильтр по run_id",
+      filterDag: "фильтр dag_id", filterTask: "фильтр task_id", filterRun: "фильтр run_id",
+      filterDagAl: "Фильтр по dag_id", filterTaskAl: "Фильтр по task_id", filterRunAl: "Фильтр по run_id",
       history: "Последние прогоны", copyLink: "Копировать ссылку", copied: "Скопировано",
       closeReport: "Закрыть отчёт",
       cId: "ID", cStatus: "Статус", cDag: "DAG", cTask: "Задача", cRun: "Запуск", cTry: "Попытка",
@@ -467,7 +531,10 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       noMatch: "Нет отчётов под текущий фильтр.",
       noReports: "Отчётов пока нет. Запусти задачу PytestOperator с ArchivingResultParser, чтобы они появились здесь.",
       noCases: "Нет подходящих тестов.", tryWord: "попытка",
+      failuresTitle: "Проваленные тесты", noFailures: "Проваленных тестов нет.",
+      failCapped: "Показаны первые {n} падений.",
       loadFail: "Не удалось загрузить отчёты: ", reportFail: "Не удалось загрузить отчёт: ",
+      failuresFail: "Не удалось загрузить падения: ",
       deleteReport: "Удалить отчёт", deleteTitle: "Удалить отчёт?",
       deleteTitleN: "Удалить отчётов: {n}?",
       deleteConfirm: "Отчёт и его файлы будут удалены безвозвратно — везде.",
@@ -695,13 +762,24 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       { label: t("kRuns"), value: runs },
       { label: t("kPassingRuns"), value: ok + " / " + runs, cls: ok === runs ? "c-pass" : "" },
       { label: t("kTests"), value: tests },
-      { label: t("kFailures"), value: failures, cls: failures ? "c-fail" : "c-pass" },
+      { label: t("kFailures"), value: failures, cls: failures ? "c-fail" : "c-pass",
+        id: "kpi-failures", click: failures > 0 },
     ];
     kpisEl.hidden = false;
     kpisEl.innerHTML = cards.map(function (c) {
-      return '<div class="kpi"><div class="label">' + esc(c.label) + '</div>'
+      var attrs = (c.id ? ' id="' + c.id + '"' : "")
+        + (c.click ? ' role="button" tabindex="0"' : "");
+      return '<div class="kpi' + (c.click ? " clickable" : "") + '"' + attrs
+        + '><div class="label">' + esc(c.label) + '</div>'
         + '<div class="value ' + (c.cls || "") + '">' + esc(c.value) + "</div></div>";
     }).join("");
+    var fk = document.getElementById("kpi-failures");
+    if (fk && failures > 0) {
+      fk.addEventListener("click", openFailures);
+      fk.addEventListener("keydown", function (e) {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openFailures(); }
+      });
+    }
   }
 
   function renderLegend() {
@@ -1100,24 +1178,69 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   }
   function applyFilter(keepPage) {
     var dag = document.getElementById("f-dag").value.trim();
+    var task = document.getElementById("f-task").value.trim();
     var run = document.getElementById("f-run").value.trim();
     reports = allReports.filter(function (r) {
-      return matchesIn(r.dag_id, dag) && matchesIn(r.run_id, run);
+      return matchesIn(r.dag_id, dag) && matchesIn(r.task_id, task) && matchesIn(r.run_id, run);
     });
     assignSeq();
     // Filter resets to the newest runs / first page; a delete keeps the user's place.
     if (!keepPage) { chartScroll = null; listPage = 0; }
     renderKpis(); renderChart(); renderList();
   }
+  var suggestVals = { dag_id: [], task_id: [], run_id: [] };
   function populateSuggestions() {
-    var dags = {}, runs = {};
-    allReports.forEach(function (r) { dags[r.dag_id] = 1; runs[r.run_id] = 1; });
-    function fill(id, keys) {
-      document.getElementById(id).innerHTML = Object.keys(keys).sort().map(function (k) {
-        return '<option value="' + esc(k) + '"></option>';
-      }).join("");
+    var d = {}, ta = {}, r = {};
+    allReports.forEach(function (x) { d[x.dag_id] = 1; ta[x.task_id] = 1; r[x.run_id] = 1; });
+    suggestVals = {
+      dag_id: Object.keys(d).sort(), task_id: Object.keys(ta).sort(), run_id: Object.keys(r).sort(),
+    };
+  }
+  // Tidy autocomplete that drops neatly under the input. The native <datalist>
+  // popup renders outside the sandboxed iframe with a detached system shadow.
+  function bindSuggest(inputId, boxId, field) {
+    var input = document.getElementById(inputId), box = document.getElementById(boxId);
+    var active = -1;
+    function opts() { return [].slice.call(box.querySelectorAll(".opt")); }
+    function close() {
+      box.hidden = true; box.innerHTML = ""; active = -1;
+      input.setAttribute("aria-expanded", "false");
     }
-    fill("dags", dags); fill("runs", runs);
+    function render() {
+      var q = input.value.trim().toLowerCase();
+      var matches = (suggestVals[field] || []).filter(function (v) {
+        var lv = v.toLowerCase(); return lv.indexOf(q) !== -1 && lv !== q;
+      }).slice(0, 50);
+      if (!matches.length) { close(); return; }
+      box.innerHTML = matches.map(function (v) {
+        return '<div class="opt" role="option">' + esc(v) + "</div>";
+      }).join("");
+      box.hidden = false; active = -1; input.setAttribute("aria-expanded", "true");
+      box.querySelectorAll(".opt").forEach(function (o) {
+        o.addEventListener("mousedown", function (e) {   // mousedown beats the input's blur
+          e.preventDefault();
+          input.value = o.textContent; close(); applyFilter();
+        });
+      });
+    }
+    input.addEventListener("input", render);
+    input.addEventListener("focus", render);
+    input.addEventListener("blur", function () { setTimeout(close, 120); });
+    input.addEventListener("keydown", function (e) {
+      if (e.key === "Escape") { close(); return; }
+      var o = opts();
+      if (e.key === "ArrowDown") { active = Math.min(active + 1, o.length - 1); }
+      else if (e.key === "ArrowUp") { active = Math.max(active - 1, 0); }
+      else if (e.key === "Enter") {
+        if (active >= 0 && o[active]) {
+          e.preventDefault(); input.value = o[active].textContent; close(); applyFilter();
+        }
+        return;
+      } else { return; }
+      e.preventDefault();
+      o.forEach(function (x, i) { x.classList.toggle("active", i === active); });
+      if (o[active]) o[active].scrollIntoView({ block: "nearest" });
+    });
   }
 
   var dlg = document.getElementById("detail");
@@ -1168,19 +1291,13 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       return '<a class="af-link" href="' + esc(href) + '" target="_top" rel="noopener">'
         + ext + esc(label) + "</a>";
     }
-    var out = '<div class="af-links">'
-      + link(dag, t("afDag")) + link(run, t("afRun")) + link(ti, t("afTask"));
-    if (m.has_allure) {
-      var dl = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"'
-        + ' stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
-        + '<path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>';
-      out += '<button type="button" class="af-link" data-allure="' + esc(m.id) + '">'
-        + dl + esc(t("downloadAllure")) + "</button>";
-    }
-    return out + "</div>";
+    return '<div class="af-links">'
+      + link(dag, t("afDag")) + link(run, t("afRun")) + link(ti, t("afTask")) + "</div>";
   }
 
   function openInAirflow(href) {
+    closeDetail();        // dismiss the modal...
+    setParentDim(false);  // ...and drop its full-screen dim now (don't wait for the close event)
     try {
       var top = window.top;
       if (top && top !== window.self && top.location
@@ -1220,6 +1337,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     // Run number (#N), matching the chart bar and the list ID column.
     var rec = reports.filter(function (x) { return x.id === currentId; })[0];
     document.getElementById("d-seq").textContent = rec && rec.seq ? "#" + rec.seq : "";
+    document.getElementById("d-allure").hidden = !m.has_allure;
 
     var kpis = [
       [t("kPassed"), m.passed, "c-pass"], [t("kFailed"), m.failed, "c-fail"],
@@ -1269,9 +1387,6 @@ _INDEX_HTML = r"""<!DOCTYPE html>
         openInAirflow(a.getAttribute("href"));
       });
     });
-    dBody.querySelectorAll("[data-allure]").forEach(function (b) {
-      b.addEventListener("click", function () { downloadAllure(b.getAttribute("data-allure")); });
-    });
     dBody.querySelectorAll(".dseg").forEach(function (seg) {
       seg.addEventListener("click", function () {
         var s = seg.getAttribute("data-status");
@@ -1307,6 +1422,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     dTitle.textContent = t("loading");
     if (typeof dlg.showModal === "function") { if (!dlg.open) dlg.showModal(); }
     else dlg.setAttribute("open", "");
+    updateParentDim();
     setReportParam(id);
     fetch(API + "reports/" + encodeURIComponent(id))
       .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
@@ -1360,6 +1476,38 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     d.addEventListener("click", function (e) { if (startedOutside && outside(e)) closeFn(); });
   }
 
+  // Dim the WHOLE Airflow window (nav included) behind a modal, like Airflow's
+  // own dialogs. Our <dialog> ::backdrop only covers the iframe, so when embedded
+  // we drop a full-screen overlay into the parent and lift our iframe above it --
+  // the iframe's own ::backdrop still dims the page around the dialog, so the dim
+  // is seamless across both. Standalone needs nothing (::backdrop is the window).
+  function setParentDim(on) {
+    var fe = window.frameElement;        // our iframe in the parent (same-origin only)
+    if (!fe) return;
+    try {
+      var pdoc = fe.ownerDocument, ID = "apx-modal-dim";
+      var ov = pdoc.getElementById(ID);
+      if (on) {
+        if (!ov) {
+          ov = pdoc.createElement("div");
+          ov.id = ID;
+          ov.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:2147483646;";
+          (pdoc.body || pdoc.documentElement).appendChild(ov);
+        }
+        fe.style.position = "relative";
+        fe.style.zIndex = "2147483647";
+      } else {
+        if (ov && ov.parentNode) ov.parentNode.removeChild(ov);
+        fe.style.zIndex = "";
+        fe.style.position = "";
+      }
+    } catch (e) { /* cross-origin parent: skip */ }
+  }
+  function updateParentDim() {
+    setParentDim((dlg && dlg.open) || (confirmDlg && confirmDlg.open)
+      || (failuresDlg && failuresDlg.open));
+  }
+
   // Copy a deep-link to this report.
   function copyLink() {
     if (!currentId) return;
@@ -1387,11 +1535,17 @@ _INDEX_HTML = r"""<!DOCTYPE html>
 
   document.getElementById("d-close").addEventListener("click", closeDetail);
   document.getElementById("d-copy").addEventListener("click", copyLink);
+  document.getElementById("d-allure").addEventListener("click", function () {
+    if (currentId) downloadAllure(currentId);
+  });
   document.getElementById("d-delete").addEventListener("click", function () {
     if (currentId) openConfirm([currentId], dTitle.textContent);
   });
   dlg.addEventListener("cancel", function () { detail = null; currentId = null; setReportParam(null); });
-  dlg.addEventListener("close", function () { if (lastFocus && lastFocus.focus) lastFocus.focus(); });
+  dlg.addEventListener("close", function () {
+    updateParentDim();
+    if (lastFocus && lastFocus.focus) lastFocus.focus();
+  });
   closeOnBackdrop(dlg, closeDetail);
 
   var confirmDlg = document.getElementById("confirm");
@@ -1404,6 +1558,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     document.getElementById("c-name").textContent = label || "";
     if (typeof confirmDlg.showModal === "function") { if (!confirmDlg.open) confirmDlg.showModal(); }
     else confirmDlg.setAttribute("open", "");
+    updateParentDim();
   }
   function closeConfirm() {
     pendingDelete = [];
@@ -1440,15 +1595,103 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   document.getElementById("c-cancel").addEventListener("click", closeConfirm);
   document.getElementById("c-ok").addEventListener("click", doDelete);
   confirmDlg.addEventListener("cancel", function () { pendingDelete = []; });
+  confirmDlg.addEventListener("close", updateParentDim);
   closeOnBackdrop(confirmDlg, closeConfirm);
+
+  // Failed-tests modal: clicking the FAILURES KPI lists every failed/errored case
+  // across the visible runs, paginated client-side at FAIL_PAGE per page.
+  var failuresDlg = document.getElementById("failures");
+  var flBody = document.getElementById("fl-body");
+  var FAIL_PAGE = 100;
+  var failuresData = [], failPage = 0, failCapped = false;
+
+  function filterQuery() {
+    var q = new URLSearchParams();
+    var dag = document.getElementById("f-dag").value.trim();
+    var task = document.getElementById("f-task").value.trim();
+    var run = document.getElementById("f-run").value.trim();
+    if (dag) q.set("dag_id", dag);
+    if (task) q.set("task_id", task);
+    if (run) q.set("run_id", run);
+    var s = q.toString();
+    return s ? "?" + s : "";
+  }
+  function openFailures() {
+    if (typeof failuresDlg.showModal === "function") { if (!failuresDlg.open) failuresDlg.showModal(); }
+    else failuresDlg.setAttribute("open", "");
+    updateParentDim();
+    flBody.innerHTML = '<div class="state"><div class="skeleton" style="width:40%;margin:0 auto"></div></div>';
+    fetch(API + "failures" + filterQuery())
+      .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+      .then(function (d) {
+        failuresData = d.failures || []; failCapped = !!d.capped; failPage = 0; renderFailures();
+      })
+      .catch(function (e) {
+        flBody.innerHTML = '<div class="state c-fail">' + esc(t("failuresFail") + e.message) + "</div>";
+      });
+  }
+  function closeFailures() {
+    if (failuresDlg.open) failuresDlg.close(); else failuresDlg.removeAttribute("open");
+  }
+  function renderFailures() {
+    if (!failuresData.length) {
+      flBody.innerHTML = '<div class="state">' + esc(t("noFailures")) + "</div>";
+      return;
+    }
+    var pages = Math.ceil(failuresData.length / FAIL_PAGE);
+    failPage = Math.max(0, Math.min(failPage, pages - 1));
+    var slice = failuresData.slice(failPage * FAIL_PAGE, failPage * FAIL_PAGE + FAIL_PAGE);
+    var rows = slice.map(function (f) {
+      var kind = f.outcome === "error" ? "error" : "fail";
+      var rec = reports.filter(function (x) { return x.id === f.id; })[0];
+      var run = esc(f.dag_id) + " · " + esc(f.task_id) + (rec && rec.seq ? " · #" + rec.seq : "");
+      return '<tr class="case clickable" tabindex="0" data-id="' + esc(f.id)
+        + '" data-outcome="' + esc(f.outcome) + '">'
+        + "<td>" + badge(kind, outcomeLabel(f.outcome)) + "</td>"
+        + '<td><span class="case-node mono">' + esc(f.node_id) + "</span></td>"
+        + '<td class="muted">' + run + "</td></tr>";
+    }).join("");
+    var cap = failCapped
+      ? '<div class="state muted">' + esc(t("failCapped").replace("{n}", failuresData.length)) + "</div>" : "";
+    var pager = pages > 1
+      ? '<div class="pager"><button type="button" class="nav-btn" id="fl-prev"'
+          + (failPage <= 0 ? " disabled" : "") + ' aria-label="' + esc(t("prevPage")) + '">‹</button>'
+        + "<span>" + esc(t("page")) + " " + (failPage + 1) + " / " + pages + "</span>"
+        + '<button type="button" class="nav-btn" id="fl-next"'
+          + (failPage >= pages - 1 ? " disabled" : "") + ' aria-label="' + esc(t("nextPage")) + '">›</button></div>'
+      : "";
+    flBody.innerHTML = '<div class="card table-wrap case-table"><table><thead><tr>'
+      + "<th>" + esc(t("hOutcome")) + "</th><th>" + esc(t("hTest")) + "</th><th>"
+      + esc(t("cRun")) + "</th></tr></thead><tbody>" + rows + "</tbody></table></div>" + cap + pager;
+    flBody.querySelectorAll(".case").forEach(function (tr) {
+      var open = function () {
+        openDetail(tr.getAttribute("data-id"));      // resets filter to "all"...
+        filter = tr.getAttribute("data-outcome");    // ...then land on the failing cases
+        closeFailures();
+      };
+      tr.addEventListener("click", open);
+      tr.addEventListener("keydown", function (e) {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); }
+      });
+    });
+    var p = document.getElementById("fl-prev"), n = document.getElementById("fl-next");
+    if (p) p.addEventListener("click", function () { if (failPage > 0) { failPage--; renderFailures(); } });
+    if (n) n.addEventListener("click", function () { if (failPage < pages - 1) { failPage++; renderFailures(); } });
+  }
+  document.getElementById("fl-close").addEventListener("click", closeFailures);
+  failuresDlg.addEventListener("close", updateParentDim);
+  closeOnBackdrop(failuresDlg, closeFailures);
 
   document.getElementById("refresh").addEventListener("click", load);
   document.addEventListener("pointermove", chartDragMove);
   document.addEventListener("pointerup", chartDragEnd);
   document.addEventListener("pointercancel", chartDragEnd);
-  ["f-dag", "f-run"].forEach(function (id) {
+  ["f-dag", "f-task", "f-run"].forEach(function (id) {
     document.getElementById(id).addEventListener("input", applyFilter);
   });
+  bindSuggest("f-dag", "sg-dag", "dag_id");
+  bindSuggest("f-task", "sg-task", "task_id");
+  bindSuggest("f-run", "sg-run", "run_id");
   // Re-render the chart on resize so bars re-snap to the new pixel grid.
   var _rsTimer;
   window.addEventListener("resize", function () {
