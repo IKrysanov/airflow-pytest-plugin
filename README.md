@@ -26,7 +26,9 @@ The operator runs a `pytest` suite as an Airflow task and parses the JUnit
 report into a structured result. This plugin archives each of those reports —
 keyed by `dag_id / run_id / task_id / try` — and serves a small web UI to browse
 them: pass/fail counts per run, durations, and the per-test breakdown (with
-failure messages) for any run.
+failure messages) for any run. On top of that it adds **cross-run analytics** —
+flaky-test detection, per-test history, run-to-run comparison, a duration
+histogram, and a searchable catalogue of unique tests.
 
 It has two halves that share one on-disk layout:
 
@@ -52,19 +54,31 @@ It has two halves that share one on-disk layout:
 ## Screenshots
 
 **Overview** — the run list with the historical chart (per-status legend
-toggles, run numbers, and a carousel beyond 30 runs), KPI cards, and Airflow-
+toggles, run numbers, and a carousel beyond 30 runs) beside a **flaky-tests
+panel**, KPI cards (including a clickable **unique tests** count), and Airflow-
 matched colours and font:
 
 ![Pytest Reports — overview](https://raw.githubusercontent.com/IKrysanov/airflow-pytest-plugin/main/docs/screenshots/overview.png)
 
-**A single run** — a clickable success donut (pass-rate in the centre; click a
-slice to filter by status), the counts, and every test's captured output on
-expand:
+**A single run** — a clickable success donut (pass-rate over the test count;
+click a slice to filter by status), a **test-duration histogram** (10-second
+buckets, scrollable), case search / group-by-module, and every test's captured
+output on expand:
 
 ![Pytest Reports — a single run](https://raw.githubusercontent.com/IKrysanov/airflow-pytest-plugin/main/docs/screenshots/detail.png)
 
-**Failed tests** — clicking the *Failures* KPI lists every failed/errored case
-across the visible runs (paginated); a row jumps to that run:
+**Flaky tests & comparison** — from a run, *Flaky tests* lists the tests that
+both pass and fail across recent runs (with a recent-outcome strip), and
+*Compare to previous* diffs it against the prior run; expanding a case offers its
+full **history**:
+
+![Pytest Reports — flaky tests](https://raw.githubusercontent.com/IKrysanov/airflow-pytest-plugin/main/docs/screenshots/flaky.png)
+
+**Unique tests & failures** — the *Unique tests* KPI opens the searchable,
+paginated catalogue of every distinct test; the *Failures* KPI lists every
+failed/errored case across the visible runs — a row jumps to that run:
+
+![Pytest Reports — unique tests](https://raw.githubusercontent.com/IKrysanov/airflow-pytest-plugin/main/docs/screenshots/unique.png)
 
 ![Pytest Reports — failed tests](https://raw.githubusercontent.com/IKrysanov/airflow-pytest-plugin/main/docs/screenshots/failures.png)
 
@@ -170,10 +184,15 @@ runtime. Endpoints (relative to the mount):
 | `GET /api/reports?dag_id=&run_id=` | summaries, newest first |
 | `GET /api/reports/{report_id}` | one report with per-case rows |
 | `GET /api/failures?dag_id=&run_id=&task_id=` | failed/errored cases across the visible runs |
+| `GET /api/compare?base=&head=` | per-test diff between two runs (newly failed / fixed / …) |
+| `GET /api/flaky?dag_id=&task_id=&window=` | tests that both pass and fail over recent runs |
+| `GET /api/test-history?dag_id=&task_id=&node_id=&limit=` | one test's outcome per run |
+| `GET /api/unique-tests?dag_id=&task_id=&run_id=&full=` | distinct test count (+ list when `full`) |
 | `DELETE /api/reports/{report_id}` | delete a report (RBAC-gated) |
 | `GET /api/reports/{report_id}/allure.zip` | raw Allure results as a zip (if any) |
-| `GET /api/health` | `{"status": "ok"}` |
-| `GET /api/docs` | OpenAPI docs |
+| `GET /api/health` | liveness + readiness: `status`, `ready`, `reports_root`(+`_exists`), `auth`, `secure_xml` |
+| `GET /api/version` | `{"name": ..., "version": ...}` from package metadata |
+| `GET /api/docs` | OpenAPI docs (Swagger UI) |
 
 The reads (`GET`) and the delete are gated by Airflow RBAC — see below.
 
@@ -230,6 +249,26 @@ Download them from a report's detail view, or `GET
 | `AIRFLOW_PYTEST_REPORTS_ROOT` (env) | — | report root (highest precedence) |
 | `[pytest_reports] reports_root` (cfg) | — | report root |
 | built-in default | `/opt/airflow/pytest-reports` | fallback |
+| `AIRFLOW_PYTEST_PLUGIN_ENABLE` (env) | `True` | reader on/off — see below |
+| `AIRFLOW_PYTEST_SCAN_CACHE_TTL` (env) | `2.0` | seconds a directory scan is reused (`0` disables) |
+
+**Enable / disable the reader.** Set `AIRFLOW_PYTEST_PLUGIN_ENABLE` to a falsey
+value (`0`, `false`, `no`, `off`) to stop the plugin registering its UI and API
+with Airflow; any other value, or leaving it unset, keeps it on (the default).
+This is a kill switch for the reader only — the producer-side
+`ArchivingResultParser` still archives reports regardless. It is read once at
+plugin discovery, so toggling it takes effect on the next API-server restart.
+
+```bash
+export AIRFLOW_PYTEST_PLUGIN_ENABLE=false   # hide the Pytest Reports UI + API
+```
+
+**Scan cache.** Loading the home page hits several summary-driven endpoints (the run
+list, the flaky panel, the unique-tests count), and the filter box queries as you
+type. To avoid walking the report tree once per call, the filesystem source reuses a
+single scan for `AIRFLOW_PYTEST_SCAN_CACHE_TTL` seconds (default `2.0`; deletes
+invalidate it immediately). New runs therefore appear within a couple of seconds (or
+on **Refresh**); set it to `0` for no caching, or higher on a very large tree.
 
 ## Architecture (SOLID)
 

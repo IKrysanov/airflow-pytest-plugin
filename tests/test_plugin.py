@@ -58,3 +58,17 @@ def test_fastapi_apps_degrade_when_build_fails(monkeypatch):
 
     monkeypatch.setattr(web, "create_app", _boom)
     assert plugin_mod._build_fastapi_apps() == []
+
+
+def test_plugin_disabled_via_env_registers_nothing(monkeypatch):
+    # The kill switch: a falsey AIRFLOW_PYTEST_PLUGIN_ENABLE registers no app / nav.
+    import importlib
+
+    monkeypatch.setenv("AIRFLOW_PYTEST_PLUGIN_ENABLE", "false")
+    try:
+        mod = importlib.reload(plugin_mod)
+        assert mod.PytestReportsPlugin.fastapi_apps == []
+        assert mod.PytestReportsPlugin.external_views == []
+    finally:
+        monkeypatch.delenv("AIRFLOW_PYTEST_PLUGIN_ENABLE", raising=False)
+        importlib.reload(plugin_mod)  # restore the enabled module for other tests

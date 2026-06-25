@@ -23,7 +23,7 @@ import pytest
 from airflow_pytest_plugin.compat import airflow_auth_available
 from airflow_pytest_plugin.models import ReportRef
 from airflow_pytest_plugin.sources import FileSystemReportSource
-from conftest import write_allure, write_report, write_report_xml
+from conftest import write_allure, write_report, write_report_xml, write_tests
 
 fastapi = pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
@@ -49,9 +49,31 @@ def client(reports_root):
     return TestClient(make_app(reports_root))
 
 
-def test_health(client):
+def test_health(client, reports_root):
     r = client.get("/api/health")
-    assert r.status_code == 200 and r.json()["status"] == "ok"
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "ok"
+    # The report root (where the producer writes and the reader reads) is reported,
+    # and the fixture wrote a report there so it exists -> ready.
+    assert body["reports_root"] == reports_root
+    assert body["ready"] is True and body["reports_root_exists"] is True
+    assert body["auth"] == ("airflow" if airflow_auth_available() else "open")
+    assert isinstance(body["secure_xml"], bool)
+
+
+def test_health_not_ready_when_root_missing(tmp_path):
+    body = TestClient(make_app(str(tmp_path / "absent"))).get("/api/health").json()
+    assert body["status"] == "ok"  # liveness still ok...
+    assert (
+        body["ready"] is False and body["reports_root_exists"] is False
+    )  # ...not ready
+
+
+def test_version_endpoint(client):
+    body = client.get("/api/version").json()
+    assert body["name"] == "airflow-pytest-plugin"
+    assert isinstance(body["version"], str) and body["version"]
 
 
 @pytest.mark.skipif(
@@ -101,6 +123,25 @@ def test_index_has_feature_markers(client):
         "openFailures",
         "kpi-failures",
         "setParentDim",
+        "openCompare",
+        'id="cmp-prev"',
+        "previousRun",
+        "openFlaky",
+        "openHistory",
+        "fillCases",
+        'id="case-q"',
+        'id="links-btn"',
+        'id="links-menu"',
+        "ofWord",
+        "renderFlakyBoard",
+        "fillBench",
+        'id="board"',
+        "bench-scroll",
+        "refreshUniqueTests",
+        "Unique tests",
+        "openUnique",
+        "fillUnique",
+        "kpi-unique",
         "forbidden",
     ):
         assert marker in html
@@ -121,6 +162,30 @@ def test_inline_script_is_syntactically_valid(client, tmp_path):
             [node, "--check", str(script)], capture_output=True, text=True
         )
         assert result.returncode == 0, f"script #{i}: {result.stderr}"
+
+
+def test_openapi_and_docs_serve(client):
+    # The header's docs link opens these; future annotations once 500'd the schema.
+    assert client.get("/api/docs").status_code == 200
+    spec = client.get("/api/openapi.json")
+    assert spec.status_code == 200
+    doc = spec.json()
+    paths = doc["paths"]
+    assert "/api/flaky" in paths and "/api/test-history" in paths
+    # Routes are grouped into the documented sections; the UI assets stay out of it.
+    assert [t["name"] for t in doc["tags"]] == [
+        "monitoring",
+        "reports",
+        "failures",
+        "compare",
+        "flaky",
+    ]
+    assert paths["/api/flaky"]["get"]["tags"] == ["flaky"]
+    assert paths["/api/compare"]["get"]["tags"] == ["compare"]
+    assert paths["/api/health"]["get"]["tags"] == ["monitoring"]
+    assert paths["/api/version"]["get"]["tags"] == ["monitoring"]
+    assert "/icon.svg" not in paths and "/" not in paths  # icons + viewer hidden
+    assert paths["/api/flaky"]["get"]["summary"]  # every method has a summary
 
 
 def test_icon_routes(client):
@@ -342,9 +407,242 @@ def test_failures_skips_runs_with_unreadable_xml(reports_root):
 
 
 def test_failures_capped(reports_root, monkeypatch):
-    import airflow_pytest_plugin.web.app as app_mod
+    import airflow_pytest_plugin.web.routes.failures as failures_mod
 
-    monkeypatch.setattr(app_mod, "_FAILURES_CAP", 3)
+    monkeypatch.setattr(failures_mod, "_FAILURES_CAP", 3)
     write_report(reports_root, ReportRef("dag", "r", "t", 1), passed=1, failed=5)
     d = TestClient(make_app(reports_root)).get("/api/failures").json()
     assert d["capped"] is True and d["total"] == 3 and len(d["failures"]) == 3
+
+
+def test_compare_diff_categories(reports_root):
+    base, head = ReportRef("dag", "base", "t", 1), ReportRef("dag", "head", "t", 1)
+    write_tests(
+        reports_root,
+        base,
+        [["a", "passed"], ["b", "failed"], ["c", "failed"], ["d", "passed"]],
+    )
+    write_tests(
+        reports_root,
+        head,
+        [["a", "failed"], ["b", "passed"], ["c", "failed"], ["e", "passed"]],
+    )
+    c = TestClient(make_app(reports_root))
+    d = c.get(f"/api/compare?base={base.token}&head={head.token}").json()
+    assert [x["node_id"] for x in d["newly_failed"]] == ["a"]
+    assert [x["node_id"] for x in d["fixed"]] == ["b"]
+    assert [x["node_id"] for x in d["still_failing"]] == ["c"]
+    assert [x["node_id"] for x in d["added"]] == ["e"]
+    assert [x["node_id"] for x in d["removed"]] == ["d"]
+    assert d["counts"] == {
+        "newly_failed": 1,
+        "fixed": 1,
+        "still_failing": 1,
+        "added": 1,
+        "removed": 1,
+    }
+
+
+def test_compare_bad_token_is_400(client):
+    assert client.get("/api/compare?base=%21%21bad&head=%21%21bad").status_code == 400
+
+
+def test_compare_missing_run_is_404(reports_root):
+    base = ReportRef("dag", "base", "t", 1)
+    write_tests(reports_root, base, [["a", "passed"]])
+    head = ReportRef("dag", "gone", "t", 1).token
+    c = TestClient(make_app(reports_root))
+    assert c.get(f"/api/compare?base={base.token}&head={head}").status_code == 404
+
+
+def test_compare_forbidden_when_read_denied(reports_root):
+    base, head = ReportRef("dag", "base", "t", 1), ReportRef("dag", "head", "t", 1)
+    write_tests(reports_root, base, [["a", "passed"]])
+    write_tests(reports_root, head, [["a", "failed"]])
+    c = TestClient(make_app(reports_root, read_authorizer=lambda dag_id, user: False))
+    assert c.get(f"/api/compare?base={base.token}&head={head.token}").status_code == 403
+
+
+def test_flaky_finds_flipping_tests(reports_root):
+    t = "task"
+    write_tests(
+        reports_root,
+        ReportRef("dag", "r1", t, 1),
+        [["a", "passed"], ["b", "passed"]],
+        created_at="2026-06-01T00:00:00+00:00",
+    )
+    write_tests(
+        reports_root,
+        ReportRef("dag", "r2", t, 1),
+        [["a", "failed"], ["b", "passed"]],
+        created_at="2026-06-02T00:00:00+00:00",
+    )
+    write_tests(
+        reports_root,
+        ReportRef("dag", "r3", t, 1),
+        [["a", "passed"], ["b", "passed"]],
+        created_at="2026-06-03T00:00:00+00:00",
+    )
+    d = TestClient(make_app(reports_root)).get("/api/flaky").json()
+    assert d["window"] == 30
+    assert {f["node_id"] for f in d["flaky"]} == {"a"}  # b is stable
+    a = d["flaky"][0]
+    assert a["runs"] == 3 and a["fails"] == 1 and a["flips"] == 2
+    assert a["recent"] == ["passed", "failed", "passed"]
+
+
+def test_flaky_needs_two_runs(reports_root):
+    write_tests(reports_root, ReportRef("dag", "r1", "t", 1), [["a", "failed"]])
+    assert TestClient(make_app(reports_root)).get("/api/flaky").json()["flaky"] == []
+
+
+def test_flaky_recent_strip_is_capped(reports_root):
+    # 14 runs of a flipping test -> the recent-outcomes strip is trimmed to keep the UI tidy.
+    for i in range(14):
+        outcome = "failed" if i % 2 else "passed"
+        write_tests(
+            reports_root,
+            ReportRef("dag", f"r{i:02d}", "t", 1),
+            [["a", outcome]],
+            created_at=f"2026-06-{i + 1:02d}T00:00:00+00:00",
+        )
+    f = TestClient(make_app(reports_root)).get("/api/flaky").json()["flaky"][0]
+    assert (
+        f["runs"] == 14 and len(f["recent"]) == 10
+    )  # full window counted, strip capped
+
+
+def test_flaky_respects_window(reports_root):
+    for i, o in enumerate(["failed", "passed", "passed"], start=1):
+        write_tests(
+            reports_root,
+            ReportRef("dag", f"r{i}", "t", 1),
+            [["a", o]],
+            created_at=f"2026-06-0{i}T00:00:00+00:00",
+        )
+    c = TestClient(make_app(reports_root))
+    assert c.get("/api/flaky?window=2").json()["flaky"] == []  # last 2 both passed
+    assert {f["node_id"] for f in c.get("/api/flaky?window=3").json()["flaky"]} == {"a"}
+
+
+def test_flaky_task_filter(reports_root):
+    for task in ("alpha", "beta"):
+        write_tests(
+            reports_root,
+            ReportRef("dag", "r1", task, 1),
+            [[task[0], "passed"]],
+            created_at="2026-06-01T00:00:00+00:00",
+        )
+        write_tests(
+            reports_root,
+            ReportRef("dag", "r2", task, 1),
+            [[task[0], "failed"]],
+            created_at="2026-06-02T00:00:00+00:00",
+        )
+    d = TestClient(make_app(reports_root)).get("/api/flaky?task_id=alpha").json()
+    assert {f["task_id"] for f in d["flaky"]} == {
+        "alpha"
+    }  # beta excluded by the filter
+
+
+def test_flaky_hides_unreadable(reports_root):
+    write_tests(reports_root, ReportRef("hidden", "r1", "t", 1), [["a", "passed"]])
+    write_tests(reports_root, ReportRef("hidden", "r2", "t", 1), [["a", "failed"]])
+    c = TestClient(make_app(reports_root, read_authorizer=lambda dag_id, user: False))
+    assert c.get("/api/flaky").json()["flaky"] == []
+
+
+def test_test_history_timeline(reports_root):
+    write_tests(
+        reports_root,
+        ReportRef("dag", "r1", "t", 1),
+        [["a", "passed", 0.1]],
+        created_at="2026-06-01T00:00:00+00:00",
+    )
+    write_tests(
+        reports_root,
+        ReportRef("dag", "r2", "t", 1),
+        [["a", "failed", 0.2]],
+        created_at="2026-06-02T00:00:00+00:00",
+    )
+    write_tests(
+        reports_root,
+        ReportRef("dag", "r3", "t", 1),
+        [["b", "passed"]],
+        created_at="2026-06-03T00:00:00+00:00",
+    )
+    d = (
+        TestClient(make_app(reports_root))
+        .get("/api/test-history?dag_id=dag&task_id=t&node_id=a")
+        .json()
+    )
+    assert d["node_id"] == "a"
+    assert [h["outcome"] for h in d["history"]] == [
+        None,
+        "failed",
+        "passed",
+    ]  # newest first
+    assert d["history"][1]["duration"] == 0.2
+
+
+def test_test_history_forbidden(reports_root):
+    write_tests(reports_root, ReportRef("dag", "r1", "t", 1), [["a", "passed"]])
+    c = TestClient(make_app(reports_root, read_authorizer=lambda dag_id, user: False))
+    assert c.get("/api/test-history?dag_id=dag&task_id=t&node_id=a").status_code == 403
+
+
+def test_test_history_requires_node_id(client):
+    assert client.get("/api/test-history?dag_id=d&task_id=t").status_code == 422
+
+
+def test_unique_tests_counts_distinct_node_ids(reports_root):
+    write_tests(
+        reports_root, ReportRef("dag", "r1", "t", 1), [["a", "passed"], ["b", "failed"]]
+    )
+    write_tests(
+        reports_root,
+        ReportRef("dag", "r2", "t", 1),
+        [["a", "passed"], ["b", "passed"], ["c", "passed"]],
+    )
+    write_tests(reports_root, ReportRef("dag2", "r1", "t", 1), [["x", "passed"]])
+    c = TestClient(make_app(reports_root))
+    # The KPI fetch is count-only (no list payload); the list rides ``full=1``.
+    light = c.get("/api/unique-tests").json()
+    assert light == {
+        "count": 4,
+        "capped": False,
+    }  # a, b, c, x -- distinct, not 6 summed
+    full = c.get("/api/unique-tests?full=1").json()
+    assert [x["node_id"] for x in full["tests"]] == ["a", "b", "c", "x"]  # sorted
+    assert full["tests"][3] == {"node_id": "x", "dag_id": "dag2", "task_id": "t"}
+
+
+def test_unique_tests_scan_is_capped(reports_root, monkeypatch):
+    import airflow_pytest_plugin.web.routes.reports as reports_mod
+
+    monkeypatch.setattr(reports_mod, "_UNIQUE_SCAN_CAP", 2)
+    # Three runs, each a distinct test; only the 2 newest are scanned -> count 2, capped.
+    for i in range(3):
+        write_tests(
+            reports_root,
+            ReportRef("dag", f"r{i}", "t", 1),
+            [[f"t{i}", "passed"]],
+            created_at=f"2026-06-0{i + 1}T00:00:00+00:00",
+        )
+    d = TestClient(make_app(reports_root)).get("/api/unique-tests?full=1").json()
+    assert d["count"] == 2 and d["capped"] is True
+    assert sorted(x["node_id"] for x in d["tests"]) == ["t1", "t2"]  # newest two
+
+
+def test_unique_tests_respects_filter_and_rbac(reports_root):
+    write_tests(reports_root, ReportRef("keep", "r1", "t", 1), [["a", "passed"]])
+    write_tests(reports_root, ReportRef("hide", "r1", "t", 1), [["z", "passed"]])
+    c = TestClient(
+        make_app(reports_root, read_authorizer=lambda dag_id, user: dag_id != "hide")
+    )
+    assert c.get("/api/unique-tests").json()["count"] == 1  # 'z' hidden by RBAC
+    assert c.get("/api/unique-tests?dag_id=keep").json()["count"] == 1
+    assert c.get("/api/unique-tests?dag_id=nope").json()["count"] == 0
+    assert (
+        c.get("/api/unique-tests?task_id=zzz").json()["count"] == 0
+    )  # task filter excludes all

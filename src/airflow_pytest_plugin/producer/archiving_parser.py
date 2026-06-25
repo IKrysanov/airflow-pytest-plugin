@@ -163,6 +163,9 @@ class ArchivingResultParser(JUnitResultParser):  # type: ignore[misc]
             "report_file": REPORT_FILENAME,
             "allure": self._archive_allure(out_dir, ref),
             "summary": result.to_xcom(),
+            # Compact per-test outcomes [node_id, outcome, duration] so cross-run
+            # views (compare/flaky/history) need not re-parse junit.xml.
+            "tests": _test_rows(result),
         }
         # Atomic write: a reader scanning concurrently never sees a half file.
         tmp = os.path.join(out_dir, f".{META_FILENAME}.{uuid.uuid4().hex}.tmp")
@@ -227,6 +230,18 @@ def _first_int(*values: Any, default: int) -> int:
         if isinstance(v, int):
             return v
     return default
+
+
+def _test_rows(result: TestRunResult) -> list[list[Any]]:
+    """Compact ``[node_id, outcome, duration]`` rows for cross-run views."""
+    rows: list[list[Any]] = []
+    for c in getattr(result, "cases", ()) or ():
+        try:
+            dur = round(float(getattr(c, "time", 0.0) or 0.0), 3)
+        except (TypeError, ValueError):
+            dur = 0.0
+        rows.append([c.node_id, c.outcome, dur])
+    return rows
 
 
 def _logical_date(context: dict[str, Any] | None) -> str | None:
