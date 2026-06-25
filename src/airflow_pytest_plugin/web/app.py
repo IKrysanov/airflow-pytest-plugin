@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""The FastAPI application: maps HTTP routes onto an injected ``ReportSource``."""
+"""The FastAPI application: wires the route modules onto an injected ``ReportSource``."""
 
 from __future__ import annotations
 
@@ -25,18 +25,48 @@ from ..compat import (
     is_authorized_to_read,
     is_authorized_to_trigger,
 )
-from ..models import ReportRef
 from ..sources import FileSystemReportSource, ReportSource
+from ..version import __version__
+from .routes.common import Authorizer, RouteDeps
 from .templates import index_html
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
+    from fastapi.responses import HTMLResponse, Response
+else:
+    # The viewer + icon routes annotate these Response classes; with future
+    # annotations FastAPI resolves them from the module globals, so they must live
+    # here. FastAPI is optional, so guard the import.
+    try:
+        from fastapi.responses import HTMLResponse, Response
+    except ModuleNotFoundError:  # pragma: no cover - only without fastapi installed
+        HTMLResponse = Response = None
 
-#: An authorizer: ``(dag_id, user) -> bool``. ``user`` is ``None`` standalone.
-Authorizer = Callable[[str, Any], bool]
+#: Per-tag descriptions shown as section headers in the Swagger UI.
+_OPENAPI_TAGS = [
+    {"name": "monitoring", "description": "Liveness of the reader."},
+    {
+        "name": "reports",
+        "description": "Browse archived runs, their per-test detail and history, "
+        "and the catalogue of unique tests.",
+    },
+    {
+        "name": "failures",
+        "description": "Failed and errored cases across the visible runs.",
+    },
+    {"name": "compare", "description": "Diff one run against another, test by test."},
+    {
+        "name": "flaky",
+        "description": "Tests that both pass and fail across recent runs.",
+    },
+]
 
-#: Upper bound on failed cases returned by /api/failures, to bound the payload.
-_FAILURES_CAP = 5000
+_API_DESCRIPTION = (
+    "JSON API behind the Pytest Reports viewer. Every read is gated by Airflow's "
+    "DAG permissions and deletes need permission to trigger the DAG; tokens identify "
+    "a run (dag·run·task·try). The viewer itself and its icons are served outside "
+    "this schema."
+)
 
 
 def _no_user() -> None:
@@ -73,8 +103,9 @@ def create_app(
     who may delete; both default to Airflow DAG permissions when its auth is
     available, else allow-all. ``user_dependency`` overrides current-user resolution.
     """
-    from fastapi import Depends, FastAPI, HTTPException
-    from fastapi.responses import HTMLResponse, JSONResponse, Response
+    from fastapi import FastAPI
+
+    from .routes import compare, failures, flaky, monitoring, reports
 
     src = source or FileSystemReportSource()
 
@@ -91,144 +122,33 @@ def create_app(
     # Depends keeps the user out of the annotations, so future-annotations can't
     # break dependency resolution.
     user_dep = user_dependency or (get_user_dependency() if auth_on else _no_user)
+    deps = RouteDeps(
+        src=src, read_auth=read_auth, delete_auth=delete_auth, user_dep=user_dep
+    )
 
     app = FastAPI(
         title="Airflow Pytest Reports",
+        version=__version__,
+        summary="Browse archived pytest results in the Airflow 3 UI.",
+        description=_API_DESCRIPTION,
+        openapi_tags=_OPENAPI_TAGS,
         docs_url="/api/docs",
         openapi_url="/api/openapi.json",
     )
 
-    @app.get("/api/health")
-    def health() -> JSONResponse:
-        return JSONResponse({"status": "ok"})
+    for module in (monitoring, reports, failures, compare, flaky):
+        app.include_router(module.build_router(deps))
 
-    @app.get("/api/reports")
-    def list_reports(
-        dag_id: str | None = None,
-        run_id: str | None = None,
-        user: Any = Depends(user_dep),  # noqa: B008 - FastAPI dependency idiom
-    ) -> JSONResponse:
-        summaries = src.list_summaries(dag_id=dag_id, run_id=run_id)
-        visible = [s for s in summaries if read_auth(s.ref.dag_id, user)]
-        return JSONResponse({"reports": [s.to_dict() for s in visible]})
-
-    @app.get("/api/reports/{report_id}")
-    def get_report(
-        report_id: str,
-        user: Any = Depends(user_dep),  # noqa: B008 - FastAPI dependency idiom
-    ) -> JSONResponse:
-        try:
-            ref = ReportRef.from_token(report_id)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        if not read_auth(ref.dag_id, user):
-            raise HTTPException(
-                status_code=403, detail="not authorized to read this report"
-            )
-        detail = src.get_detail(ref)
-        if detail is None:
-            raise HTTPException(status_code=404, detail="report not found")
-        return JSONResponse(detail.to_dict())
-
-    @app.delete("/api/reports/{report_id}")
-    def delete_report(
-        report_id: str,
-        user: Any = Depends(user_dep),  # noqa: B008 - FastAPI dependency idiom
-    ) -> JSONResponse:
-        try:
-            ref = ReportRef.from_token(report_id)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        if not delete_auth(ref.dag_id, user):
-            raise HTTPException(
-                status_code=403,
-                detail="deleting a report requires permission to trigger its DAG",
-            )
-        if not src.delete(ref):
-            raise HTTPException(status_code=404, detail="report not found")
-        return JSONResponse({"deleted": True})
-
-    @app.get("/api/reports/{report_id}/allure.zip")
-    def allure_zip(
-        report_id: str,
-        user: Any = Depends(user_dep),  # noqa: B008 - FastAPI dependency idiom
-    ) -> Response:
-        try:
-            ref = ReportRef.from_token(report_id)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        if not read_auth(ref.dag_id, user):
-            raise HTTPException(
-                status_code=403, detail="not authorized to read this report"
-            )
-        data = src.allure_archive(ref)
-        if data is None:
-            raise HTTPException(status_code=404, detail="no Allure results")
-        return Response(
-            data,
-            media_type="application/zip",
-            headers={
-                "Content-Disposition": 'attachment; filename="allure-results.zip"'
-            },
-        )
-
-    @app.get("/api/failures")
-    def failures(
-        dag_id: str | None = None,
-        run_id: str | None = None,
-        task_id: str | None = None,
-        user: Any = Depends(user_dep),  # noqa: B008 - FastAPI dependency idiom
-    ) -> JSONResponse:
-        """Every failed/errored case across the visible runs (newest run first).
-
-        Filters mirror the list view; the client paginates the flat result. Capped
-        to keep the payload bounded -- ``capped`` flags truncation.
-        """
-        task_q = (task_id or "").lower()
-        items: list[dict[str, Any]] = []
-        capped = False
-        for s in src.list_summaries(dag_id=dag_id, run_id=run_id):
-            if task_q and task_q not in s.ref.task_id.lower():
-                continue
-            if (s.failed + s.errors) <= 0 or not read_auth(s.ref.dag_id, user):
-                continue
-            detail = src.get_detail(s.ref)
-            if detail is None:
-                continue
-            for c in detail.cases:
-                if c.outcome not in ("failed", "error"):
-                    continue
-                items.append(
-                    {
-                        "id": s.ref.token,
-                        "dag_id": s.ref.dag_id,
-                        "task_id": s.ref.task_id,
-                        "run_id": s.ref.run_id,
-                        "created_at": s.created_at,
-                        "node_id": c.node_id,
-                        "outcome": c.outcome,
-                    }
-                )
-            if len(items) >= _FAILURES_CAP:
-                capped = True
-                break
-        return JSONResponse(
-            {
-                "failures": items[:_FAILURES_CAP],
-                "total": len(items[:_FAILURES_CAP]),
-                "capped": capped,
-            }
-        )
-
-    @app.get("/icon.svg")
+    # The viewer and its icons are UI assets, not part of the documented JSON API.
+    @app.get("/icon.svg", include_in_schema=False)
     def icon() -> Response:
         return Response(_flask_svg(_ICON_LIGHT), media_type="image/svg+xml")
 
-    @app.get("/icon-dark.svg")
+    @app.get("/icon-dark.svg", include_in_schema=False)
     def icon_dark() -> Response:
         return Response(_flask_svg(_ICON_DARK), media_type="image/svg+xml")
 
-    @app.get("/", response_class=HTMLResponse)
+    @app.get("/", response_class=HTMLResponse, include_in_schema=False)
     def index() -> HTMLResponse:
         return HTMLResponse(index_html())
 

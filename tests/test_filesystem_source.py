@@ -20,12 +20,47 @@ import os
 from airflow_pytest_plugin.layout import META_FILENAME, ReportLayout
 from airflow_pytest_plugin.models import ReportRef
 from airflow_pytest_plugin.sources import FileSystemReportSource
-from conftest import write_allure, write_report, write_report_xml
+from conftest import write_allure, write_report, write_report_xml, write_tests
 
 
 def test_missing_root_lists_nothing(reports_root):
     src = FileSystemReportSource(report_root=reports_root)
     assert src.list_summaries() == []
+
+
+def test_list_summaries_caches_the_scan(reports_root):
+    # Within the TTL the scan is reused -- a run added afterwards isn't seen yet.
+    src = FileSystemReportSource(report_root=reports_root, scan_cache_ttl=100.0)
+    write_tests(reports_root, ReportRef("d", "r1", "t", 1), [["a", "passed"]])
+    assert {s.ref.run_id for s in src.list_summaries()} == {"r1"}  # scans + caches
+    write_tests(reports_root, ReportRef("d", "r2", "t", 1), [["a", "passed"]])
+    assert {s.ref.run_id for s in src.list_summaries()} == {"r1"}  # cached: r2 unseen
+
+
+def test_scan_cache_ttl_zero_disables_caching(reports_root):
+    src = FileSystemReportSource(report_root=reports_root, scan_cache_ttl=0)
+    write_tests(reports_root, ReportRef("d", "r1", "t", 1), [["a", "passed"]])
+    src.list_summaries()
+    write_tests(reports_root, ReportRef("d", "r2", "t", 1), [["a", "passed"]])
+    assert {s.ref.run_id for s in src.list_summaries()} == {"r1", "r2"}  # always fresh
+
+
+def test_delete_invalidates_the_scan_cache(reports_root):
+    src = FileSystemReportSource(report_root=reports_root, scan_cache_ttl=100.0)
+    write_tests(reports_root, ReportRef("d", "r1", "t", 1), [["a", "passed"]])
+    write_tests(reports_root, ReportRef("d", "r2", "t", 1), [["a", "passed"]])
+    src.list_summaries()  # warm the cache with both
+    assert src.delete(ReportRef("d", "r1", "t", 1)) is True
+    assert {s.ref.run_id for s in src.list_summaries()} == {"r2"}  # rescanned: r1 gone
+
+
+def test_list_summaries_filters_the_cached_scan(reports_root):
+    src = FileSystemReportSource(report_root=reports_root, scan_cache_ttl=100.0)
+    write_tests(reports_root, ReportRef("keep", "r1", "t", 1), [["a", "passed"]])
+    write_tests(reports_root, ReportRef("other", "r2", "t", 1), [["b", "passed"]])
+    src.list_summaries()  # cache the full scan
+    assert {s.ref.dag_id for s in src.list_summaries(dag_id="keep")} == {"keep"}
+    assert {s.ref.run_id for s in src.list_summaries(run_id="r2")} == {"r2"}
 
 
 def test_list_returns_newest_first(reports_root):
@@ -334,3 +369,62 @@ def test_summary_has_allure_from_meta(reports_root):
         FileSystemReportSource(report_root=reports_root).list_summaries()[0].has_allure
         is True
     )
+
+
+def test_test_outcomes_from_meta(reports_root):
+    ref = ReportRef("dag", "run", "task", 1)
+    write_tests(reports_root, ref, [["t::a", "passed", 0.1], ["t::b", "failed", 0.2]])
+    out = FileSystemReportSource(report_root=reports_root).test_outcomes(ref)
+    assert out == {
+        "t::a": {"outcome": "passed", "duration": 0.1},
+        "t::b": {"outcome": "failed", "duration": 0.2},
+    }
+
+
+def test_test_outcomes_falls_back_to_junit(reports_root):
+    # Older archive: meta carries no per-test map -> parse junit.xml.
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref, passed=2, failed=1)
+    out = FileSystemReportSource(report_root=reports_root).test_outcomes(ref)
+    assert out is not None and len(out) == 3
+    assert sorted({v["outcome"] for v in out.values()}) == ["failed", "passed"]
+
+
+def test_test_outcomes_none_when_absent(reports_root):
+    out = FileSystemReportSource(report_root=reports_root).test_outcomes(
+        ReportRef("nope", "nope", "nope", 1)
+    )
+    assert out is None
+
+
+def test_test_outcomes_refuses_traversal(tmp_path):
+    root = tmp_path / "reports"
+    root.mkdir()
+    src = FileSystemReportSource(report_root=str(root))
+    assert src.test_outcomes(ReportRef("..", ".", ".", 1)) is None
+
+
+def test_test_outcomes_none_on_corrupt_junit(reports_root):
+    # No per-test map in meta, and the junit can't be parsed -> None.
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report_xml(reports_root, ref, "<not-valid", summary={})
+    assert FileSystemReportSource(report_root=reports_root).test_outcomes(ref) is None
+
+
+def test_base_source_optional_capabilities_default_none():
+    from airflow_pytest_plugin.sources.base import ReportSource
+
+    class _Min(ReportSource):
+        def list_summaries(self, **_k):
+            return []
+
+        def get_detail(self, _ref):
+            return None
+
+        def delete(self, _ref):
+            return False
+
+    m = _Min()
+    ref = ReportRef("d", "r", "t", 1)
+    assert m.allure_archive(ref) is None
+    assert m.test_outcomes(ref) is None

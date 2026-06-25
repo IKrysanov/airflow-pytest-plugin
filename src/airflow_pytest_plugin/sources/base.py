@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from typing import Any
 
 from ..models import ReportDetail, ReportRef, ReportSummary
 
@@ -48,5 +49,13 @@ class ReportSource(ABC):
         """A zip of the report's raw Allure results, or ``None`` if it has none.
 
         Optional capability (default: unsupported) for exporting to Allure TestOps.
+        """
+        return None
+
+    def test_outcomes(self, ref: ReportRef) -> dict[str, dict[str, Any]] | None:
+        """Map ``node_id -> {"outcome", "duration"}`` for one run, or ``None``.
+
+        Powers cross-run views (compare/flaky/history). Optional capability
+        (default: unsupported).
         """
         return None

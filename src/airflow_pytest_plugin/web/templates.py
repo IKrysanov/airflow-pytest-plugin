@@ -88,7 +88,19 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     height: 36px; background: var(--surface-2); border: 1px solid var(--border);
     border-radius: 8px; padding: 0 11px; flex: 1 1 auto; min-width: 0; width: 100%;
   }
-  #refresh { flex: 0 0 auto; }
+  #refresh, .menu-wrap { flex: 0 0 auto; }
+  .menu-wrap { position: relative; }
+  .menu-wrap .caret { width: 12px; height: 12px; opacity: .65; }
+  .menu { position: absolute; right: 0; top: calc(100% + 6px); z-index: 30; padding: 5px;
+    min-width: 190px; background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; box-shadow: var(--shadow); }
+  .menu[hidden] { display: none; }
+  .menu-item { display: flex; align-items: center; gap: 9px; width: 100%; border: 0;
+    background: none; color: var(--fg); cursor: pointer; font: inherit; font-size: 13px;
+    text-align: left; padding: 8px 10px; border-radius: 7px; }
+  .menu-item:hover { background: var(--surface-2); }
+  .menu-item:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
+  .menu-item svg { width: 16px; height: 16px; flex: 0 0 auto; color: var(--muted); }
   .field:focus { outline: 2px solid var(--ring); outline-offset: 1px; border-color: var(--primary); }
   /* Suggestions: a tidy dropdown anchored under the input (replaces the native
      <datalist>, whose popup escapes the iframe with a detached system shadow). */
@@ -180,13 +192,58 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .pager { display: flex; align-items: center; justify-content: flex-end; gap: 10px;
     padding: 10px 12px; border-top: 1px solid var(--border); font-size: 13px; color: var(--muted); }
 
+  /* Main board: the recent-runs chart and the flaky panel share the row 50/50. */
+  .board { display: flex; gap: 16px; align-items: stretch; margin-bottom: 18px; }
+  .board > .card { flex: 1 1 0; min-width: 0; margin-bottom: 0; }
+  .flaky-card { padding: 14px 16px; display: flex; flex-direction: column; }
+  .flaky-scroll { flex: 1 1 auto; min-height: 110px; max-height: 132px; overflow-y: auto;
+    overscroll-behavior-y: contain; scrollbar-width: thin; }
+  .fb-row { display: flex; align-items: center; gap: 10px; padding: 7px 2px;
+    border-bottom: 1px solid var(--border); cursor: pointer; font-size: 12.5px; }
+  .fb-row:last-child { border-bottom: 0; }
+  .fb-row:hover { background: var(--surface-2); }
+  .fb-main { flex: 1 1 auto; min-width: 0; }
+  .fb-node { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .fb-sub { display: block; color: var(--muted); font-size: 11px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .fb-meta { color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; flex: 0 0 auto; }
+  .fb-empty { color: var(--muted); font-size: 12.5px; padding: 16px 2px; }
+  @media (max-width: 860px) { .board { flex-direction: column; } }
+  /* Unique-tests list: one wrapping column, so a long node id never forces a
+     horizontal scrollbar (the dialog body scrolls vertically). */
+  .uq-row { padding: 9px 4px; border-bottom: 1px solid var(--border); cursor: pointer;
+    font-size: 12.5px; overflow-wrap: anywhere; }
+  .uq-row:last-child { border-bottom: 0; }
+  .uq-row:hover { background: var(--surface-2); }
+  .uq-row:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
+
+  /* Test-duration histogram inside a run: 10s buckets, drag/scroll carousel. */
+  .bench-card { margin: 16px 0 4px; padding: 12px 14px 10px; }
+  .bench-scroll { overflow-x: auto; overflow-y: hidden; cursor: grab; touch-action: pan-x;
+    overscroll-behavior-x: contain; scrollbar-width: none;
+    user-select: none; -webkit-user-select: none; }
+  .bench-scroll::-webkit-scrollbar { display: none; }
+  .bench-scroll.dragging { cursor: grabbing; }
+  .bench-strip { display: flex; align-items: flex-end; width: max-content; }
+  .bench-col { flex: 0 0 58px; display: flex; flex-direction: column; align-items: center; }
+  .bench-barwrap { height: 92px; width: 100%; display: flex; align-items: flex-end;
+    justify-content: center; cursor: default; }
+  .bench-bar { width: 26px; border-radius: 3px 3px 0 0; transition: filter .12s; }
+  .bench-bar:hover { filter: brightness(1.12); }
+  .bench-x { margin-top: 6px; font-size: 10px; color: var(--muted); white-space: nowrap;
+    font-variant-numeric: tabular-nums; }
+
   .detail-top { display: flex; gap: 18px; align-items: center; flex-wrap: wrap; }
   .detail-top .kpis { flex: 1 1 280px; margin: 0; }
-  .donut { width: 124px; height: 124px; flex: 0 0 auto; }
+  /* overflow:visible so a lifted slice isn't clipped at the svg's edge. */
+  .donut { width: 124px; height: 124px; flex: 0 0 auto; overflow: visible; }
   .donut-pct { font-size: 27px; font-weight: 700; fill: var(--fg); }
   .donut-lbl { font-size: 11px; fill: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
-  .dseg { cursor: pointer; transition: opacity .12s; }
-  .dseg:hover { opacity: 1; }
+  /* Rounded arc ends; hovering a slice lifts it (scaling a centred circle pushes its arc out). */
+  .dseg { cursor: pointer; stroke-linecap: round;
+    transition: opacity .12s, transform .12s ease-out;
+    transform-box: view-box; transform-origin: 60px 60px; }
+  .dseg:hover { opacity: 1; transform: scale(1.07); }
   .af-links { display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
     margin: 16px 0 2px; font-size: 13px; }
   .af-link { display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px;
@@ -228,17 +285,18 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .bulk-del:focus-visible, .bulk-close:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
   /* Checkboxes styled like Airflow's (Chakra): rounded square, brand-blue + white tick when on. */
   .sel-cell { width: 1%; white-space: nowrap; padding-right: 0; }
-  .sel-cell input[type="checkbox"] {
+  .sel-cell input[type="checkbox"], #case-grp {
     appearance: none; -webkit-appearance: none; margin: 0; width: 16px; height: 16px;
     cursor: pointer; vertical-align: middle; background: var(--surface);
-    border: 1px solid var(--border); border-radius: 4px;
+    border: 1px solid var(--border); border-radius: 4px; flex: 0 0 auto;
     display: inline-grid; place-content: center; transition: background .12s, border-color .12s; }
-  .sel-cell input[type="checkbox"]:hover { border-color: var(--primary); }
-  .sel-cell input[type="checkbox"]:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
-  .sel-cell input[type="checkbox"]:checked,
+  .sel-cell input[type="checkbox"]:hover, #case-grp:hover { border-color: var(--primary); }
+  .sel-cell input[type="checkbox"]:focus-visible, #case-grp:focus-visible {
+    outline: 2px solid var(--ring); outline-offset: 1px; }
+  .sel-cell input[type="checkbox"]:checked, #case-grp:checked,
   .sel-cell input[type="checkbox"]:indeterminate {
     background: var(--primary); border-color: var(--primary); }
-  .sel-cell input[type="checkbox"]:checked::after {
+  .sel-cell input[type="checkbox"]:checked::after, #case-grp:checked::after {
     content: ""; width: 4px; height: 8px; border: solid #fff; border-width: 0 2px 2px 0;
     transform: rotate(45deg) translate(-0.5px, -1px); }
   .sel-cell input[type="checkbox"]:indeterminate::after {
@@ -279,18 +337,25 @@ _INDEX_HTML = r"""<!DOCTYPE html>
 
   dialog {
     border: 1px solid var(--border); border-radius: 14px; background: var(--surface);
-    color: var(--fg); max-width: min(980px, 94vw); width: 100%; padding: 0;
-    box-shadow: 0 20px 60px #0007;
+    color: var(--fg); max-width: min(980px, 92vw); width: 100%; padding: 0;
+    /* Never touch the window edges: cap height and keep a margin all around. */
+    max-height: 90vh; margin: auto; box-shadow: 0 20px 60px #0007;
   }
+  dialog[open] { display: flex; flex-direction: column; }
+  /* Popups opened from inside a run sit inset within it -- narrower/shorter than the
+     detail dialog so they never touch its borders. */
+  #flaky, #history, #compare { max-width: min(680px, 84vw); max-height: 82vh; }
   dialog::backdrop { background: rgba(0, 0, 0, 0.5); }
   .dlg-head { display: flex; align-items: center; gap: 10px; padding: 16px 20px;
-    border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--surface); }
+    border-bottom: 1px solid var(--border); flex: 0 0 auto; background: var(--surface);
+    border-radius: 14px 14px 0 0; }
   .dlg-head h2 { margin: 0; font-size: 15px; font-weight: 650; overflow-wrap: anywhere; }
   /* Same size + line box as the title so the run number sits on its baseline. */
   .d-seq { color: var(--muted); font-weight: 600; font-size: 15px;
     font-variant-numeric: tabular-nums; flex: 0 0 auto; }
   .d-seq:empty { display: none; }
-  .dlg-body { padding: 18px 20px 22px; max-height: 72vh; overflow: auto; }
+  /* Body scrolls (both axes) within the capped dialog; head stays put. */
+  .dlg-body { padding: 18px 20px 22px; flex: 1 1 auto; min-height: 0; overflow: auto; }
   .pills { display: flex; flex-wrap: wrap; gap: 7px; margin: 16px 0 12px; }
   .pill { border: 1px solid var(--border); background: var(--surface-2); color: var(--fg);
     border-radius: 999px; padding: 5px 12px; cursor: pointer; font-size: 13px;
@@ -324,6 +389,39 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     overflow-x: auto; max-width: 100%; font-size: 12.5px; line-height: 1.55;
     white-space: pre; color: var(--fg); }
   .copied { font-size: 12px; color: var(--pass); }
+  /* Compare (diff) sections */
+  .cmp-sec { margin-bottom: 16px; }
+  .cmp-sec h3 { font-size: 13px; font-weight: 650; margin: 0 0 6px;
+    display: flex; align-items: center; gap: 7px; }
+  .cmp-sec h3 .dot { width: 9px; height: 9px; border-radius: 2px; flex: 0 0 auto; }
+  .cmp-list { margin: 0; padding: 0; list-style: none; }
+  .cmp-list li { display: flex; gap: 10px; align-items: baseline; justify-content: space-between;
+    padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 12.5px; }
+  .cmp-list li:last-child { border-bottom: 0; }
+  .cmp-list .node { overflow-wrap: anywhere; }
+  .cmp-list .chg { color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+  /* Flaky list + test-history timeline */
+  .od { display: inline-block; width: 11px; height: 11px; border-radius: 2px; }
+  .ostrip { display: inline-flex; gap: 3px; flex: 0 0 auto; }
+  .fk-row, .hist-row { display: flex; align-items: center; gap: 10px; padding: 9px 0;
+    border-bottom: 1px solid var(--border); font-size: 12.5px; }
+  .fk-row:last-child, .hist-row:last-child { border-bottom: 0; }
+  .fk-row .node, .hist-row .when { flex: 1 1 auto; overflow-wrap: anywhere; }
+  .hist-row .when { color: var(--muted); }
+  .fk-row .fk-meta, .hist-row .dur { color: var(--muted); white-space: nowrap;
+    font-variant-numeric: tabular-nums; }
+  .case-hist { background: none; border: 0; color: var(--primary); cursor: pointer;
+    font: inherit; font-size: 12px; padding: 0 0 8px; display: inline-flex; align-items: center; gap: 5px; }
+  .case-hist svg { width: 14px; height: 14px; }
+  .case-ctrls { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 0 0 10px; }
+  .case-q { flex: 1 1 220px; min-width: 0; max-width: 340px; height: 32px; color: var(--fg);
+    background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; padding: 0 10px; }
+  .case-q:focus { outline: 2px solid var(--ring); outline-offset: 1px; border-color: var(--primary); }
+  .case-grp-lbl { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px;
+    color: var(--muted); cursor: pointer; white-space: nowrap; }
+  .case-table tr.grp > td { background: var(--surface-2); font-weight: 600; cursor: pointer;
+    user-select: none; position: sticky; left: 0; }
+  .case-table tr.grp .chev { transition: transform .15s; }
 
   @media (max-width: 680px) {
     .header-inner { flex-direction: column; align-items: stretch; gap: 10px; padding: 10px 12px; }
@@ -383,6 +481,35 @@ _INDEX_HTML = r"""<!DOCTYPE html>
              autocomplete="off" role="combobox" aria-autocomplete="list" aria-expanded="false" />
       <div class="suggest" id="sg-run" role="listbox" hidden></div>
     </span>
+    <span class="menu-wrap">
+      <button id="links-btn" class="btn" type="button" data-i18n-al="linksAl"
+              aria-haspopup="true" aria-expanded="false">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+          <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+        </svg>
+        <svg class="caret" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="m6 9 6 6 6-6"/>
+        </svg>
+      </button>
+      <div class="menu" id="links-menu" role="menu" hidden>
+        <button class="menu-item" type="button" role="menuitem"
+                data-href="https://github.com/IKrysanov/airflow-pytest-plugin">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.7.5.5 5.7.5 12c0 5.1 3.3 9.4 7.9 10.9.6.1.8-.3.8-.6v-2c-3.2.7-3.9-1.4-3.9-1.4-.5-1.3-1.3-1.7-1.3-1.7-1.1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.7 1.3 3.4 1 .1-.8.4-1.3.7-1.6-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.5-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.3 1.2a11.5 11.5 0 0 1 6 0C17 5 18 5.3 18 5.3c.6 1.6.2 2.8.1 3.1.8.8 1.2 1.8 1.2 3.1 0 4.4-2.7 5.4-5.3 5.7.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6 4.6-1.5 7.9-5.8 7.9-10.9C23.5 5.7 18.3.5 12 .5z"/></svg>
+          <span data-i18n="ghItem">GitHub</span>
+        </button>
+        <button class="menu-item" type="button" role="menuitem" data-api="docs">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+            <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+          </svg>
+          <span data-i18n="apiDocs">API docs</span>
+        </button>
+      </div>
+    </span>
     <button id="refresh" class="btn primary" type="button">
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"
            stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -396,14 +523,24 @@ _INDEX_HTML = r"""<!DOCTYPE html>
 
 <main>
   <div class="kpis" id="kpis" hidden></div>
-  <div class="card chart-card" id="chart-card" hidden>
-    <div class="chart-head">
-      <span data-i18n="history">Recent runs</span>
-      <span class="legend" id="legend"></span>
-      <span style="flex:1"></span>
-      <span class="chart-nav" id="chart-nav"></span>
+  <div class="board" id="board" hidden>
+    <div class="card chart-card" id="chart-card" hidden>
+      <div class="chart-head">
+        <span data-i18n="history">Recent runs</span>
+        <span class="legend" id="legend"></span>
+        <span style="flex:1"></span>
+        <span class="chart-nav" id="chart-nav"></span>
+      </div>
+      <div id="chart"></div>
     </div>
-    <div id="chart"></div>
+    <div class="card flaky-card" id="flaky-card">
+      <div class="chart-head">
+        <span data-i18n="flakyTitle">Flaky tests</span>
+        <span style="flex:1"></span>
+        <span class="muted" id="flaky-count"></span>
+      </div>
+      <div class="flaky-scroll" id="flaky-list"></div>
+    </div>
   </div>
   <div class="card"><div id="list"></div></div>
 </main>
@@ -469,6 +606,62 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   <div class="dlg-body" id="fl-body"></div>
 </dialog>
 
+<dialog id="unique" aria-labelledby="uq-title">
+  <div class="dlg-head">
+    <h2 id="uq-title" data-i18n="uniqueTitle">Unique tests</h2>
+    <span class="grow" style="flex:1"></span>
+    <button id="uq-close" class="btn icon-btn" type="button" data-i18n-al="closeReport">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M18 6 6 18M6 6l12 12"/>
+      </svg>
+    </button>
+  </div>
+  <div class="dlg-body" id="uq-body"></div>
+</dialog>
+
+<dialog id="compare" aria-labelledby="cmp-title">
+  <div class="dlg-head">
+    <h2 id="cmp-title" data-i18n="compareTitle">Compare</h2>
+    <span class="grow" style="flex:1"></span>
+    <button id="cmp-close" class="btn icon-btn" type="button" data-i18n-al="closeReport">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M18 6 6 18M6 6l12 12"/>
+      </svg>
+    </button>
+  </div>
+  <div class="dlg-body" id="cmp-body"></div>
+</dialog>
+
+<dialog id="flaky" aria-labelledby="fk-title">
+  <div class="dlg-head">
+    <h2 id="fk-title" data-i18n="flakyTitle">Flaky tests</h2>
+    <span class="grow" style="flex:1"></span>
+    <button id="fk-close" class="btn icon-btn" type="button" data-i18n-al="closeReport">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M18 6 6 18M6 6l12 12"/>
+      </svg>
+    </button>
+  </div>
+  <div class="dlg-body" id="fk-body"></div>
+</dialog>
+
+<dialog id="history" aria-labelledby="hist-title">
+  <div class="dlg-head">
+    <h2 id="hist-title" data-i18n="historyTitle">Test history</h2>
+    <span class="grow" style="flex:1"></span>
+    <button id="hist-close" class="btn icon-btn" type="button" data-i18n-al="closeReport">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M18 6 6 18M6 6l12 12"/>
+      </svg>
+    </button>
+  </div>
+  <div class="dlg-body" id="hist-body"></div>
+</dialog>
+
 <div id="bulk-bar" class="bulk-bar" hidden></div>
 
 <script>
@@ -482,11 +675,13 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       filterDag: "filter dag_id", filterTask: "filter task_id", filterRun: "filter run_id",
       filterDagAl: "Filter by dag_id", filterTaskAl: "Filter by task_id", filterRunAl: "Filter by run_id",
       history: "Recent runs", copyLink: "Copy link", copied: "Copied",
-      closeReport: "Close report",
+      closeReport: "Close report", ofWord: "of", testsWord: "tests",
+      apiDocs: "API docs", linksAl: "Links & documentation", ghItem: "GitHub",
+      benchTitle: "Test durations (10s buckets)", uniqueTitle: "Unique tests",
       cId: "ID", cStatus: "Status", cDag: "DAG", cTask: "Task", cRun: "Run", cTry: "Try",
       cTotal: "Total", cPass: "Pass", cFail: "Fail", cErr: "Err", cSkip: "Skip",
       cDuration: "Duration", cWhen: "When",
-      kRuns: "Runs", kPassingRuns: "Passing runs", kTests: "Tests", kFailures: "Failures",
+      kRuns: "Runs", kPassingRuns: "Passing runs", kTests: "Unique tests", kFailures: "Failures",
       kPassed: "Passed", kFailed: "Failed", kErrors: "Errors", kSkipped: "Skipped",
       sPass: "PASS", sFail: "FAIL", sError: "ERROR", success: "success",
       passed: "passed", failed: "failed", error: "error", skipped: "skipped", all: "all",
@@ -497,6 +692,18 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       noReports: "No reports found yet. Run a PytestOperator task with ArchivingResultParser to populate this view.",
       noCases: "No matching cases.", tryWord: "try",
       failuresTitle: "Failed tests", noFailures: "No failed tests.",
+      compareTitle: "Compare", comparePrev: "Compare to previous",
+      comparePrevAl: "Compare to the previous run", compareFail: "Failed to compare: ",
+      compareNoChange: "No differences from the previous run.",
+      cmp_newly_failed: "Newly failed", cmp_fixed: "Fixed", cmp_still_failing: "Still failing",
+      cmp_added: "Added", cmp_removed: "Removed",
+      flakyTitle: "Flaky tests", flakyBtn: "Flaky tests",
+      flakyBtnAl: "Flaky tests in recent runs", flakyFail: "Failed to load flaky tests: ",
+      noFlaky: "No flaky tests in the recent runs.", flkFlips: "flips", flkFailed: "failed",
+      historyTitle: "Test history", historyBtn: "History",
+      historyFail: "Failed to load history: ", noHistory: "No history for this test.",
+      histDidntRun: "did not run",
+      caseSearch: "filter tests…", caseGroup: "Group by module",
       failCapped: "Showing the first {n} failures.",
       loadFail: "Failed to load reports: ", reportFail: "Failed to load report: ",
       failuresFail: "Failed to load failures: ",
@@ -517,11 +724,13 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       filterDag: "фильтр dag_id", filterTask: "фильтр task_id", filterRun: "фильтр run_id",
       filterDagAl: "Фильтр по dag_id", filterTaskAl: "Фильтр по task_id", filterRunAl: "Фильтр по run_id",
       history: "Последние прогоны", copyLink: "Копировать ссылку", copied: "Скопировано",
-      closeReport: "Закрыть отчёт",
+      closeReport: "Закрыть отчёт", ofWord: "из", testsWord: "тестов",
+      apiDocs: "Документация API", linksAl: "Ссылки и документация", ghItem: "GitHub",
+      benchTitle: "Время выполнения тестов (по 10с)", uniqueTitle: "Уникальные тесты",
       cId: "ID", cStatus: "Статус", cDag: "DAG", cTask: "Задача", cRun: "Запуск", cTry: "Попытка",
       cTotal: "Всего", cPass: "Усп", cFail: "Пров", cErr: "Ошиб", cSkip: "Проп",
       cDuration: "Время", cWhen: "Когда",
-      kRuns: "Прогонов", kPassingRuns: "Успешных прогонов", kTests: "Тестов", kFailures: "Падений",
+      kRuns: "Прогонов", kPassingRuns: "Успешных прогонов", kTests: "Уникальные тесты", kFailures: "Падений",
       kPassed: "Пройдено", kFailed: "Провалено", kErrors: "Ошибки", kSkipped: "Пропущено",
       sPass: "OK", sFail: "СБОЙ", sError: "ОШИБКА", success: "успех",
       passed: "пройден", failed: "провален", error: "ошибка", skipped: "пропущен", all: "все",
@@ -532,6 +741,18 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       noReports: "Отчётов пока нет. Запусти задачу PytestOperator с ArchivingResultParser, чтобы они появились здесь.",
       noCases: "Нет подходящих тестов.", tryWord: "попытка",
       failuresTitle: "Проваленные тесты", noFailures: "Проваленных тестов нет.",
+      compareTitle: "Сравнение", comparePrev: "Сравнить с предыдущим",
+      comparePrevAl: "Сравнить с предыдущим прогоном", compareFail: "Не удалось сравнить: ",
+      compareNoChange: "Отличий от предыдущего прогона нет.",
+      cmp_newly_failed: "Новые падения", cmp_fixed: "Починены", cmp_still_failing: "Всё ещё падают",
+      cmp_added: "Добавлены", cmp_removed: "Удалены",
+      flakyTitle: "Нестабильные тесты", flakyBtn: "Нестабильные",
+      flakyBtnAl: "Нестабильные тесты за последние прогоны", flakyFail: "Не удалось загрузить: ",
+      noFlaky: "Нестабильных тестов за последние прогоны нет.", flkFlips: "перекл.", flkFailed: "падений",
+      historyTitle: "История теста", historyBtn: "История",
+      historyFail: "Не удалось загрузить историю: ", noHistory: "Истории по этому тесту нет.",
+      histDidntRun: "не запускался",
+      caseSearch: "фильтр тестов…", caseGroup: "Группировать по модулю",
       failCapped: "Показаны первые {n} падений.",
       loadFail: "Не удалось загрузить отчёты: ", reportFail: "Не удалось загрузить отчёт: ",
       failuresFail: "Не удалось загрузить падения: ",
@@ -752,16 +973,41 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     { key: "created_at", label: "cWhen" },
   ];
 
+  // Distinct test count, fetched from the backend (the list summaries have only totals);
+  // null until the first response. Refreshed (debounced) whenever the filter changes.
+  var uniqueTests = null, uniqueTestsList = [], uniqTimer = null, uniqSeq = 0;
+  function uniqueQuery(extra) {
+    var q = new URLSearchParams();
+    var dag = document.getElementById("f-dag").value.trim();
+    var task = document.getElementById("f-task").value.trim();
+    var run = document.getElementById("f-run").value.trim();
+    if (dag) q.set("dag_id", dag);
+    if (task) q.set("task_id", task);
+    if (run) q.set("run_id", run);
+    if (extra) q.set(extra, "1");
+    return q.toString();
+  }
+  function refreshUniqueTests() {
+    clearTimeout(uniqTimer);
+    uniqTimer = setTimeout(function () {
+      var my = ++uniqSeq;  // ignore a stale response landing after a newer filter
+      fetch(API + "unique-tests?" + uniqueQuery())
+        .then(function (r) { return r.ok ? r.json() : { count: null }; })
+        .then(function (d) { if (my === uniqSeq) { uniqueTests = d.count; renderKpis(); } })
+        .catch(function () {});
+      if (uniqueDlg.open) loadUniqueList();  // keep an open list in sync with the filter
+    }, 250);
+  }
   function renderKpis() {
     if (!reports.length) { kpisEl.hidden = true; kpisEl.innerHTML = ""; return; }
     var runs = reports.length;
     var ok = reports.filter(function (r) { return r.success; }).length;
-    var tests = reports.reduce(function (a, r) { return a + r.total; }, 0);
     var failures = reports.reduce(function (a, r) { return a + r.failed + r.errors; }, 0);
     var cards = [
       { label: t("kRuns"), value: runs },
       { label: t("kPassingRuns"), value: ok + " / " + runs, cls: ok === runs ? "c-pass" : "" },
-      { label: t("kTests"), value: tests },
+      { label: t("kTests"), value: uniqueTests == null ? "…" : uniqueTests,
+        id: "kpi-unique", click: uniqueTests > 0 },
       { label: t("kFailures"), value: failures, cls: failures ? "c-fail" : "c-pass",
         id: "kpi-failures", click: failures > 0 },
     ];
@@ -778,6 +1024,13 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       fk.addEventListener("click", openFailures);
       fk.addEventListener("keydown", function (e) {
         if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openFailures(); }
+      });
+    }
+    var uq = document.getElementById("kpi-unique");
+    if (uq && uniqueTests > 0) {
+      uq.addEventListener("click", openUnique);
+      uq.addEventListener("keydown", function (e) {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openUnique(); }
       });
     }
   }
@@ -869,8 +1122,12 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       tipEl = document.createElement("div");
       tipEl.id = "tip";
       tipEl.setAttribute("role", "tooltip");
-      document.body.appendChild(tipEl);
     }
+    // A modal <dialog> renders in the top layer, above any z-index -- so a tooltip
+    // for a chart inside it must live in that dialog, or it's painted behind it.
+    var dlgs = document.querySelectorAll("dialog[open]");
+    var host = dlgs.length ? dlgs[dlgs.length - 1] : document.body;
+    if (tipEl.parentNode !== host) host.appendChild(tipEl);
     tipEl.innerHTML = html;
     tipEl.style.display = "block";
     tipMove(ev);
@@ -1156,6 +1413,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
         allReports = d.reports || [];
         populateSuggestions();
         applyFilter();
+        loadFlaky();
         // Open a deep-linked report; the param rides the Airflow parent URL when embedded.
         var want = new URLSearchParams(linkLoc().search).get("report");
         if (want && !detail) openDetail(want);
@@ -1186,7 +1444,47 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     assignSeq();
     // Filter resets to the newest runs / first page; a delete keeps the user's place.
     if (!keepPage) { chartScroll = null; listPage = 0; }
-    renderKpis(); renderChart(); renderList();
+    document.getElementById("board").hidden = allReports.length === 0;
+    renderKpis(); renderChart(); renderList(); renderFlakyBoard();
+    refreshUniqueTests();
+  }
+  // Flaky panel on the main board: global flaky tests, filtered client-side by the
+  // dag/task search; a row opens that test's history.
+  var allFlaky = [];
+  function renderFlakyBoard() {
+    var box = document.getElementById("flaky-list");
+    if (!box) return;
+    var dag = document.getElementById("f-dag").value.trim().toLowerCase();
+    var task = document.getElementById("f-task").value.trim().toLowerCase();
+    var rows = allFlaky.filter(function (f) {
+      return (!dag || f.dag_id.toLowerCase().indexOf(dag) !== -1)
+        && (!task || f.task_id.toLowerCase().indexOf(task) !== -1);
+    });
+    document.getElementById("flaky-count").textContent = rows.length ? String(rows.length) : "";
+    if (!rows.length) {
+      box.innerHTML = '<div class="fb-empty">' + esc(t("noFlaky")) + "</div>";
+      return;
+    }
+    box.innerHTML = rows.map(function (f) {
+      return '<div class="fb-row" data-dag="' + esc(f.dag_id) + '" data-task="' + esc(f.task_id)
+        + '" data-node="' + esc(f.node_id) + '"><span class="ostrip">'
+        + (f.recent || []).map(outcomeDot).join("") + "</span>"
+        + '<span class="fb-main"><span class="fb-node mono">' + esc(f.node_id) + "</span>"
+        + '<span class="fb-sub">' + esc(f.dag_id + " · " + f.task_id) + "</span></span>"
+        + '<span class="fb-meta">' + f.flips + " " + esc(t("flkFlips")) + "</span></div>";
+    }).join("");
+    box.querySelectorAll(".fb-row").forEach(function (row) {
+      row.addEventListener("click", function () {
+        openHistory(row.getAttribute("data-dag"), row.getAttribute("data-task"),
+          row.getAttribute("data-node"));
+      });
+    });
+  }
+  function loadFlaky() {
+    fetch(API + "flaky")
+      .then(function (r) { return r.ok ? r.json() : { flaky: [] }; })
+      .then(function (d) { allFlaky = d.flaky || []; renderFlakyBoard(); })
+      .catch(function () { allFlaky = []; renderFlakyBoard(); });
   }
   var suggestVals = { dag_id: [], task_id: [], run_id: [] };
   function populateSuggestions() {
@@ -1253,10 +1551,14 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   // Success donut: clickable slices filter the case table by status.
   function donut(m) {
     var total = m.total || 0;
-    var C = 2 * Math.PI * 50;  // r = 50
-    var ring = '<circle cx="60" cy="60" r="50" fill="none" stroke="var(--surface-2)" stroke-width="16"/>';
+    var SW = 12, R = 50;       // thinner ring than before; r = 50
+    var C = 2 * Math.PI * R;
+    var ring = '<circle cx="60" cy="60" r="50" fill="none" stroke="var(--surface-2)" stroke-width="' + SW + '"/>';
     var segs = [["passed", "var(--pass)", m.passed], ["skipped", "var(--skip)", m.skipped],
                 ["failed", "var(--fail)", m.failed], ["error", "var(--error)", m.errors]];
+    // Gap between slices, > the round cap diameter so the caps never touch (single slice = no gap).
+    var nSeg = segs.filter(function (s) { return (s[2] || 0) > 0; }).length;
+    var GAP = nSeg > 1 ? SW + 5 : 0;
     var off = 0, parts = "";
     segs.forEach(function (s) {
       var v = s[2] || 0;
@@ -1264,24 +1566,27 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       var len = (v / total) * C;
       var pct = Math.round((v / total) * 100);
       var lit = filter === "all" || filter === s[0];
+      // Inset each slice by half the gap on both sides; round caps then sit clear of neighbours.
+      var drawn = Math.max(len - GAP, 0.1);
       parts += '<circle class="dseg" data-status="' + s[0] + '" data-count="' + v
         + '" data-pct="' + pct + '" cx="60" cy="60" r="50" '
-        + 'fill="none" stroke="' + s[1] + '" stroke-width="16" stroke-dasharray="'
-        + len.toFixed(2) + " " + (C - len).toFixed(2) + '" stroke-dashoffset="'
-        + (-off).toFixed(2) + '" opacity="' + (lit ? 1 : 0.3) + '"></circle>';
+        + 'fill="none" stroke="' + s[1] + '" stroke-width="' + SW + '" stroke-dasharray="'
+        + drawn.toFixed(2) + " " + (C - drawn).toFixed(2) + '" stroke-dashoffset="'
+        + (-(off + GAP / 2)).toFixed(2) + '" opacity="' + (lit ? 1 : 0.3) + '"></circle>';
       off += len;
     });
     var pct = total > 0 ? Math.round((m.passed / total) * 100) : null;
+    var ofN = esc(t("ofWord")) + " " + total;
     var center = '<text x="60" y="58" text-anchor="middle" class="donut-pct">'
       + (pct == null ? "—" : pct + "%") + "</text>"
-      + '<text x="60" y="76" text-anchor="middle" class="donut-lbl">' + esc(t("success")) + "</text>";
+      + '<text x="60" y="76" text-anchor="middle" class="donut-lbl">' + ofN + "</text>";
     return '<svg viewBox="0 0 120 120" class="donut" role="img" aria-label="'
-      + (pct == null ? "" : pct + "% ") + esc(t("success")) + '">'
+      + (pct == null ? "" : pct + "% — ") + total + " " + esc(t("testsWord")) + '">'
       + '<g transform="rotate(-90 60 60)">' + ring + parts + "</g>" + center + "</svg>";
   }
 
   // Links back to the run's DAG / DAG run / task instance in the Airflow UI.
-  function airflowLinks(m) {
+  function airflowLinks(m, prev) {
     var enc = encodeURIComponent;
     var dag = "/dags/" + enc(m.dag_id);
     var run = dag + "/runs/" + enc(m.run_id);
@@ -1291,8 +1596,36 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       return '<a class="af-link" href="' + esc(href) + '" target="_top" rel="noopener">'
         + ext + esc(label) + "</a>";
     }
-    return '<div class="af-links">'
-      + link(dag, t("afDag")) + link(run, t("afRun")) + link(ti, t("afTask")) + "</div>";
+    var out = '<div class="af-links">'
+      + link(dag, t("afDag")) + link(run, t("afRun")) + link(ti, t("afTask"));
+    if (prev) {
+      var cmp = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"'
+        + ' stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+        + '<path d="M7 4 3 8l4 4M3 8h13M17 20l4-4-4-4M21 16H8"/></svg>';
+      out += '<button type="button" class="af-link" id="cmp-prev" data-i18n-al="comparePrevAl">'
+        + cmp + esc(t("comparePrev")) + "</button>";
+    }
+    var zap = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"'
+      + ' stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+      + '<path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z"/></svg>';
+    out += '<button type="button" class="af-link" id="flk-btn" data-i18n-al="flakyBtnAl">'
+      + zap + esc(t("flakyBtn")) + "</button>";
+    return out + "</div>";
+  }
+  function outcomeDot(o) {
+    var col = { passed: "--pass", failed: "--fail", error: "--error", skipped: "--skip" }[o] || "--muted";
+    return '<span class="od" style="background:var(' + col + ')" title="'
+      + esc(o ? outcomeLabel(o) : t("histDidntRun")) + '"></span>';
+  }
+  // The most-recent earlier run of the same dag·task (for "compare to previous").
+  function previousRun(rec) {
+    if (!rec) return null;
+    var sib = allReports.filter(function (x) {
+      return x.dag_id === rec.dag_id && x.task_id === rec.task_id
+        && String(x.created_at || "") < String(rec.created_at || "");
+    });
+    sib.sort(function (a, b) { return String(a.created_at || "") < String(b.created_at || "") ? 1 : -1; });
+    return sib[0] || null;
   }
 
   function openInAirflow(href) {
@@ -1329,6 +1662,139 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     }
   }
 
+  // Case-table state (reset per opened report).
+  var caseQuery = "", caseGroup = false, caseCollapsed = {};
+  var HIST_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"'
+    + ' stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+    + '<path d="M3 3v5h5"/><path d="M3.05 13A9 9 0 1 0 6 5.3L3 8"/><path d="M12 7v5l3 2"/></svg>';
+  function caseModule(node) {
+    var i = node.lastIndexOf("::");
+    return i > 0 ? node.slice(0, i) : node;
+  }
+  function caseRowHtml(c, i) {
+    var kind = { passed: "pass", failed: "fail", error: "error", skipped: "skip" }[c.outcome] || "skip";
+    var output = (c.message && c.message.trim()) ? c.message : t("noOutput");
+    return '<tr class="case clickable" tabindex="0" role="button" aria-expanded="false" data-exp="' + i + '">'
+      + "<td>" + badge(kind, outcomeLabel(c.outcome)) + "</td>"
+      + '<td><span class="case-node mono">' + esc(c.node_id) + "</span></td>"
+      + '<td class="num right">' + fmtDur(c.time) + "</td>"
+      + '<td class="right"><span class="chev">' + CHEV + "</span></td></tr>"
+      + '<tr class="case-exp" data-row="' + i + '" hidden><td colspan="4">'
+      + '<button class="case-hist" type="button" data-hist="' + esc(c.node_id) + '">'
+      + HIST_ICON + esc(t("historyBtn")) + "</button>"
+      + '<pre class="tb mono">' + esc(output) + "</pre></td></tr>";
+  }
+  function setOutcomeFilter(k) {
+    filter = k;
+    dBody.querySelectorAll(".pill").forEach(function (p) {
+      p.setAttribute("aria-pressed", String(p.getAttribute("data-f") === k));
+    });
+    // Re-light the donut to match (the table re-fills, but the donut isn't redrawn);
+    // use the `opacity` attribute, not inline style, so the :hover rule still wins.
+    dBody.querySelectorAll(".dseg").forEach(function (seg) {
+      var s = seg.getAttribute("data-status");
+      seg.setAttribute("opacity", k === "all" || k === s ? "1" : "0.3");
+    });
+    fillCases();
+  }
+  function fillCases() {
+    var tb = dBody.querySelector(".case-table tbody");
+    if (!tb || !detail) return;
+    var q = caseQuery.trim().toLowerCase();
+    var sel = [];
+    detail.cases.forEach(function (c, idx) {
+      if ((filter === "all" || c.outcome === filter)
+          && (!q || c.node_id.toLowerCase().indexOf(q) !== -1)) sel.push({ c: c, i: idx });
+    });
+    if (!sel.length) {
+      tb.innerHTML = '<tr><td colspan="4"><div class="state">' + esc(t("noCases")) + "</div></td></tr>";
+      return;
+    }
+    if (caseGroup) {
+      var groups = {};
+      sel.forEach(function (o) {
+        var mod = caseModule(o.c.node_id);
+        (groups[mod] = groups[mod] || []).push(o);
+      });
+      tb.innerHTML = Object.keys(groups).sort().map(function (mod) {
+        var coll = !!caseCollapsed[mod];
+        var rot = coll ? "" : ' style="transform:rotate(90deg)"';
+        var hd = '<tr class="grp" data-mod="' + esc(mod) + '"><td colspan="4">'
+          + '<span class="chev"' + rot + ">" + CHEV + "</span> "
+          + '<span class="mono">' + esc(mod) + '</span> <span class="muted">('
+          + groups[mod].length + ")</span></td></tr>";
+        return hd + (coll ? "" : groups[mod].map(function (o) { return caseRowHtml(o.c, o.i); }).join(""));
+      }).join("");
+    } else {
+      tb.innerHTML = sel.map(function (o) { return caseRowHtml(o.c, o.i); }).join("");
+    }
+    wireCaseRows();
+  }
+  function wireCaseRows() {
+    dBody.querySelectorAll("tr.case").forEach(function (tr) {
+      var toggle = function () {
+        var i = tr.getAttribute("data-exp");
+        var exp = dBody.querySelector('tr.case-exp[data-row="' + i + '"]');
+        var open = tr.getAttribute("aria-expanded") === "true";
+        tr.setAttribute("aria-expanded", String(!open));
+        if (exp) exp.hidden = open;
+      };
+      tr.addEventListener("click", toggle);
+      tr.addEventListener("keydown", function (e) {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); }
+      });
+    });
+    dBody.querySelectorAll(".case-hist").forEach(function (b) {
+      b.addEventListener("click", function (e) {
+        e.stopPropagation();
+        openHistory(detail.dag_id, detail.task_id, b.getAttribute("data-hist"));
+      });
+    });
+    dBody.querySelectorAll("tr.grp").forEach(function (tr) {
+      tr.addEventListener("click", function () {
+        var mod = tr.getAttribute("data-mod");
+        caseCollapsed[mod] = !caseCollapsed[mod];
+        fillCases();
+      });
+    });
+  }
+
+  // Histogram of this run's test durations in 10s buckets; a drag/scroll carousel.
+  function fillBench() {
+    var box = document.getElementById("bench");
+    if (!box || !detail) return;
+    var BIN = 10, BAR = 86;
+    var cases = detail.cases || [];
+    var maxT = 0;
+    cases.forEach(function (c) { var tm = +c.time || 0; if (tm > maxT) maxT = tm; });
+    var nBins = Math.min(120, Math.max(1, Math.ceil((maxT + 1e-6) / BIN)));
+    var bins = [];
+    for (var i = 0; i < nBins; i++) bins.push(0);
+    cases.forEach(function (c) {
+      var b = Math.floor((+c.time || 0) / BIN);
+      bins[b < 0 ? 0 : b >= nBins ? nBins - 1 : b]++;
+    });
+    var maxCount = Math.max.apply(null, bins.concat([1]));
+    box.innerHTML = '<div class="bench-strip">' + bins.map(function (cnt, i) {
+      var range = i * BIN + "–" + (i * BIN + BIN) + "s";
+      var h = cnt ? Math.max(6, Math.round((cnt / maxCount) * BAR)) : 3;
+      var col = cnt ? "var(--primary)" : "var(--surface-2)";
+      // The whole column height is the hover target so every bucket (even empty) reacts.
+      return '<div class="bench-col"><div class="bench-barwrap" data-range="' + esc(range)
+        + '" data-cnt="' + cnt + '"><div class="bench-bar" style="height:' + h
+        + "px;background:" + col + '"></div></div>'
+        + '<div class="bench-x">' + esc(range) + "</div></div>";
+    }).join("") + "</div>";
+    // Same tooltip style as the runs chart (#tip + a coloured stat dot) -- Airflow canon.
+    box.querySelectorAll(".bench-barwrap").forEach(function (w) {
+      bindTip(w, function () {
+        return '<div class="tt">' + esc(w.getAttribute("data-range")) + "</div>"
+          + '<div class="tr">' + statDot("--primary", t("testsWord"), w.getAttribute("data-cnt")) + "</div>";
+      });
+    });
+    enableChartDrag(box);
+  }
+
   function renderDetail() {
     var m = detail;
     var counts = { all: m.cases.length, passed: 0, failed: 0, error: 0, skipped: 0 };
@@ -1336,6 +1802,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     dTitle.textContent = m.dag_id + " · " + m.task_id + " · " + t("tryWord") + " " + m.try_number;
     // Run number (#N), matching the chart bar and the list ID column.
     var rec = reports.filter(function (x) { return x.id === currentId; })[0];
+    var prev = previousRun(rec);
     document.getElementById("d-seq").textContent = rec && rec.seq ? "#" + rec.seq : "";
     document.getElementById("d-allure").hidden = !m.has_allure;
 
@@ -1353,45 +1820,38 @@ _INDEX_HTML = r"""<!DOCTYPE html>
         + (filter === k) + '">' + esc(outcomeLabel(k)) + " (" + counts[k] + ")</button>";
     }).join("");
 
-    var rows = m.cases.filter(function (c) { return filter === "all" || c.outcome === filter; });
-    var body = rows.length ? rows.map(function (c, i) {
-      var kind = { passed: "pass", failed: "fail", error: "error", skipped: "skip" }[c.outcome] || "skip";
-      var output = (c.message && c.message.trim()) ? c.message : t("noOutput");
-      return '<tr class="case clickable" tabindex="0" role="button" aria-expanded="false" data-exp="' + i + '">'
-        + "<td>" + badge(kind, outcomeLabel(c.outcome)) + "</td>"
-        + '<td><span class="case-node mono">' + esc(c.node_id) + "</span></td>"
-        + '<td class="num right">' + fmtDur(c.time) + "</td>"
-        + '<td class="right"><span class="chev">' + CHEV + "</span></td></tr>"
-        + '<tr class="case-exp" data-row="' + i + '" hidden><td colspan="4">'
-        + '<pre class="tb mono">' + esc(output) + "</pre></td></tr>";
-    }).join("") : '<tr><td colspan="4"><div class="state">' + esc(t("noCases")) + "</div></td></tr>";
-
     dBody.innerHTML = '<div class="detail-top">' + donut(m)
       + '<div class="kpis">' + kpis + "</div></div>"
-      + airflowLinks(m)
+      + airflowLinks(m, prev)
+      + '<div class="card bench-card"><div class="chart-head"><span>' + esc(t("benchTitle"))
+      + '</span></div><div class="bench-scroll" id="bench"></div></div>'
       + '<div class="pills">' + pills + "</div>"
+      + '<div class="case-ctrls"><input id="case-q" class="case-q" type="text" placeholder="'
+      + esc(t("caseSearch")) + '" autocomplete="off">'
+      + '<label class="case-grp-lbl"><input type="checkbox" id="case-grp"> '
+      + esc(t("caseGroup")) + "</label></div>"
       + '<div class="card table-wrap case-table"><table><thead><tr>'
       + "<th>" + esc(t("hOutcome")) + "</th><th>" + esc(t("hTest"))
       + '</th><th class="right">' + esc(t("hTime")) + "</th><th></th>"
-      + "</tr></thead><tbody>" + body + "</tbody></table></div>";
+      + "</tr></thead><tbody></tbody></table></div>";
 
     dBody.querySelectorAll(".pill").forEach(function (p) {
-      p.addEventListener("click", function () { filter = p.getAttribute("data-f"); renderDetail(); });
+      p.addEventListener("click", function () { setOutcomeFilter(p.getAttribute("data-f")); });
     });
     // Airflow's iframe sandbox drops target="_top"/window.open (no top-navigation), but not
-    // the History API on the same-origin parent -- so drive React Router instead. The real
-    // <a href> stays so cmd/right-click still offers "open in new tab".
+    // the History API on the same-origin parent -- so drive React Router. The real <a href>
+    // stays so cmd/right-click still offers "open in new tab".
     dBody.querySelectorAll(".af-link[href]").forEach(function (a) {
-      a.addEventListener("click", function (ev) {
-        ev.preventDefault();
-        openInAirflow(a.getAttribute("href"));
-      });
+      a.addEventListener("click", function (ev) { ev.preventDefault(); openInAirflow(a.getAttribute("href")); });
     });
+    var cmpBtn = document.getElementById("cmp-prev");
+    if (cmpBtn && prev && rec) cmpBtn.addEventListener("click", function () { openCompare(prev, rec); });
+    var flkBtn = document.getElementById("flk-btn");
+    if (flkBtn) flkBtn.addEventListener("click", function () { openFlaky(m.dag_id, m.task_id); });
     dBody.querySelectorAll(".dseg").forEach(function (seg) {
       seg.addEventListener("click", function () {
         var s = seg.getAttribute("data-status");
-        filter = filter === s ? "all" : s;
-        renderDetail();
+        setOutcomeFilter(filter === s ? "all" : s);
       });
       bindTip(seg, function () {
         return '<div class="tt">' + esc(outcomeLabel(seg.getAttribute("data-status")))
@@ -1399,23 +1859,19 @@ _INDEX_HTML = r"""<!DOCTYPE html>
           + " · " + seg.getAttribute("data-pct") + "%</span></div>";
       });
     });
-    dBody.querySelectorAll("tr.case").forEach(function (tr) {
-      var toggle = function () {
-        var i = tr.getAttribute("data-exp");
-        var exp = dBody.querySelector('tr.case-exp[data-row="' + i + '"]');
-        var open = tr.getAttribute("aria-expanded") === "true";
-        tr.setAttribute("aria-expanded", String(!open));
-        if (exp) exp.hidden = open;
-      };
-      tr.addEventListener("click", toggle);
-      tr.addEventListener("keydown", function (e) {
-        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); }
-      });
-    });
+    var qi = document.getElementById("case-q");
+    qi.value = caseQuery;
+    qi.addEventListener("input", function () { caseQuery = qi.value; fillCases(); });
+    var grp = document.getElementById("case-grp");
+    grp.checked = caseGroup;
+    grp.addEventListener("change", function () { caseGroup = grp.checked; fillCases(); });
+    fillBench();
+    fillCases();
   }
 
   function openDetail(id) {
     filter = "all"; currentId = id;
+    caseQuery = ""; caseGroup = false; caseCollapsed = {};
     lastFocus = document.activeElement;
     document.getElementById("d-copied").hidden = true;
     dBody.innerHTML = '<div class="state"><div class="skeleton" style="width:40%;margin:0 auto"></div></div>';
@@ -1505,7 +1961,9 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   }
   function updateParentDim() {
     setParentDim((dlg && dlg.open) || (confirmDlg && confirmDlg.open)
-      || (failuresDlg && failuresDlg.open));
+      || (failuresDlg && failuresDlg.open) || (compareDlg && compareDlg.open)
+      || (flakyDlg && flakyDlg.open) || (historyDlg && historyDlg.open)
+      || (uniqueDlg && uniqueDlg.open));
   }
 
   // Copy a deep-link to this report.
@@ -1682,7 +2140,228 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   failuresDlg.addEventListener("close", updateParentDim);
   closeOnBackdrop(failuresDlg, closeFailures);
 
+  // Unique-tests list (opened from the KPI): client-side search + pagination. The
+  // search input lives in a fixed shell so a re-render never steals its focus.
+  var uniqueDlg = document.getElementById("unique");
+  var uqBody = document.getElementById("uq-body");
+  var UQ_PAGE = 100, uqPage = 0, uqQuery = "", uqCapped = false;
+  var uqListSeq = 0;
+  function openUnique() {
+    uqPage = 0; uqQuery = "";
+    if (typeof uniqueDlg.showModal === "function") { if (!uniqueDlg.open) uniqueDlg.showModal(); }
+    else uniqueDlg.setAttribute("open", "");
+    updateParentDim();
+    uqBody.innerHTML = '<input id="uq-q" class="case-q" type="text" placeholder="'
+      + esc(t("caseSearch")) + '" autocomplete="off" style="margin-bottom:12px">'
+      + '<div id="uq-list"></div><div id="uq-pager"></div>';
+    var qi = document.getElementById("uq-q");
+    qi.addEventListener("input", function () { uqQuery = qi.value; uqPage = 0; fillUnique(); });
+    loadUniqueList();
+    qi.focus();
+  }
+  function loadUniqueList() {
+    var listEl = document.getElementById("uq-list");
+    if (listEl) {
+      listEl.innerHTML = '<div class="state"><div class="skeleton" style="width:40%;margin:0 auto"></div></div>';
+    }
+    var my = ++uqListSeq;
+    fetch(API + "unique-tests?" + uniqueQuery("full"))
+      .then(function (r) { return r.ok ? r.json() : { tests: [] }; })
+      .then(function (d) {
+        if (my !== uqListSeq || !uniqueDlg.open) return;
+        uniqueTestsList = d.tests || []; uqCapped = !!d.capped; fillUnique();
+      })
+      .catch(function () {
+        if (my === uqListSeq && uniqueDlg.open) { uniqueTestsList = []; fillUnique(); }
+      });
+  }
+  function closeUnique() {
+    if (uniqueDlg.open) uniqueDlg.close(); else uniqueDlg.removeAttribute("open");
+  }
+  function fillUnique() {
+    var listEl = document.getElementById("uq-list");
+    if (!listEl) return;
+    var q = uqQuery.trim().toLowerCase();
+    var rows = uniqueTestsList.filter(function (x) {
+      return !q || x.node_id.toLowerCase().indexOf(q) !== -1;
+    });
+    var pages = Math.max(1, Math.ceil(rows.length / UQ_PAGE));
+    uqPage = Math.max(0, Math.min(uqPage, pages - 1));
+    var slice = rows.slice(uqPage * UQ_PAGE, uqPage * UQ_PAGE + UQ_PAGE);
+    listEl.innerHTML = slice.length
+      ? slice.map(function (x) {
+          return '<div class="uq-row" tabindex="0" role="button" data-dag="' + esc(x.dag_id)
+            + '" data-task="' + esc(x.task_id) + '" data-node="' + esc(x.node_id) + '">'
+            + '<span class="mono">' + esc(x.node_id) + "</span></div>";
+        }).join("")
+      : '<div class="state">' + esc(t("noCases")) + "</div>";
+    listEl.querySelectorAll(".uq-row").forEach(function (row) {
+      var open = function () {
+        openHistory(row.getAttribute("data-dag"), row.getAttribute("data-task"),
+          row.getAttribute("data-node"));
+      };
+      row.addEventListener("click", open);
+      row.addEventListener("keydown", function (e) {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); }
+      });
+    });
+    var cnt = (uqCapped ? "≥" : "") + rows.length + " " + esc(t("testsWord"));
+    document.getElementById("uq-pager").innerHTML = pages > 1
+      ? '<div class="pager"><button type="button" class="nav-btn" id="uq-prev"'
+          + (uqPage <= 0 ? " disabled" : "") + ' aria-label="' + esc(t("prevPage")) + '">‹</button>'
+        + "<span>" + esc(t("page")) + " " + (uqPage + 1) + " / " + pages + " · " + cnt + "</span>"
+        + '<button type="button" class="nav-btn" id="uq-next"'
+          + (uqPage >= pages - 1 ? " disabled" : "") + ' aria-label="' + esc(t("nextPage")) + '">›</button></div>'
+      : '<div class="pager"><span>' + cnt + "</span></div>";
+    var p = document.getElementById("uq-prev"), n = document.getElementById("uq-next");
+    if (p) p.addEventListener("click", function () { if (uqPage > 0) { uqPage--; fillUnique(); } });
+    if (n) n.addEventListener("click", function () { if (uqPage < pages - 1) { uqPage++; fillUnique(); } });
+  }
+  document.getElementById("uq-close").addEventListener("click", closeUnique);
+  uniqueDlg.addEventListener("close", updateParentDim);
+  closeOnBackdrop(uniqueDlg, closeUnique);
+
+  // Compare modal: per-test diff vs the previous run of the same dag·task.
+  var compareDlg = document.getElementById("compare");
+  var cmpBody = document.getElementById("cmp-body");
+  var CMP_SECS = [
+    ["newly_failed", "--fail"], ["fixed", "--pass"], ["still_failing", "--error"],
+    ["added", "--skip"], ["removed", "--muted"],
+  ];
+  function openCompare(baseRec, headRec) {
+    if (typeof compareDlg.showModal === "function") { if (!compareDlg.open) compareDlg.showModal(); }
+    else compareDlg.setAttribute("open", "");
+    updateParentDim();
+    document.getElementById("cmp-title").textContent =
+      t("compareTitle") + " · #" + (baseRec.seq || "?") + " → #" + (headRec.seq || "?");
+    cmpBody.innerHTML = '<div class="state"><div class="skeleton" style="width:40%;margin:0 auto"></div></div>';
+    fetch(API + "compare?base=" + encodeURIComponent(baseRec.id)
+      + "&head=" + encodeURIComponent(headRec.id))
+      .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+      .then(renderCompare)
+      .catch(function (e) {
+        cmpBody.innerHTML = '<div class="state c-fail">' + esc(t("compareFail") + e.message) + "</div>";
+      });
+  }
+  function closeCompare() {
+    if (compareDlg.open) compareDlg.close(); else compareDlg.removeAttribute("open");
+  }
+  function renderCompare(d) {
+    var any = CMP_SECS.some(function (s) { return (d[s[0]] || []).length; });
+    if (!any) { cmpBody.innerHTML = '<div class="state">' + esc(t("compareNoChange")) + "</div>"; return; }
+    cmpBody.innerHTML = CMP_SECS.map(function (s) {
+      var rows = d[s[0]] || [];
+      if (!rows.length) return "";
+      var items = rows.map(function (r) {
+        var chg = r.base && r.head
+          ? esc(outcomeLabel(r.base)) + " → " + esc(outcomeLabel(r.head))
+          : esc(outcomeLabel(r.outcome || ""));
+        return '<li><span class="node mono">' + esc(r.node_id)
+          + '</span><span class="chg">' + chg + "</span></li>";
+      }).join("");
+      return '<div class="cmp-sec"><h3><span class="dot" style="background:var(' + s[1] + ')"></span>'
+        + esc(t("cmp_" + s[0])) + " (" + rows.length + ')</h3><ul class="cmp-list">' + items + "</ul></div>";
+    }).join("");
+  }
+  document.getElementById("cmp-close").addEventListener("click", closeCompare);
+  compareDlg.addEventListener("close", updateParentDim);
+  closeOnBackdrop(compareDlg, closeCompare);
+
+  // Flaky tests: which tests in this dag·task both pass and fail over recent runs.
+  var flakyDlg = document.getElementById("flaky");
+  var fkBody = document.getElementById("fk-body");
+  function openFlaky(dag, task) {
+    if (typeof flakyDlg.showModal === "function") { if (!flakyDlg.open) flakyDlg.showModal(); }
+    else flakyDlg.setAttribute("open", "");
+    updateParentDim();
+    fkBody.innerHTML = '<div class="state"><div class="skeleton" style="width:40%;margin:0 auto"></div></div>';
+    var q = new URLSearchParams({ dag_id: dag, task_id: task });
+    fetch(API + "flaky?" + q.toString())
+      .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+      .then(renderFlaky)
+      .catch(function (e) {
+        fkBody.innerHTML = '<div class="state c-fail">' + esc(t("flakyFail") + e.message) + "</div>";
+      });
+  }
+  function closeFlaky() { if (flakyDlg.open) flakyDlg.close(); else flakyDlg.removeAttribute("open"); }
+  function renderFlaky(d) {
+    var rows = d.flaky || [];
+    if (!rows.length) { fkBody.innerHTML = '<div class="state">' + esc(t("noFlaky")) + "</div>"; return; }
+    fkBody.innerHTML = rows.map(function (f) {
+      var meta = f.flips + " " + t("flkFlips") + " · " + f.fails + "/" + f.runs + " " + t("flkFailed");
+      return '<div class="fk-row"><span class="ostrip">'
+        + (f.recent || []).map(outcomeDot).join("") + "</span>"
+        + '<span class="node mono">' + esc(f.node_id) + "</span>"
+        + '<span class="fk-meta">' + esc(meta) + "</span></div>";
+    }).join("");
+  }
+  document.getElementById("fk-close").addEventListener("click", closeFlaky);
+  flakyDlg.addEventListener("close", updateParentDim);
+  closeOnBackdrop(flakyDlg, closeFlaky);
+
+  // Test history: one test's outcome + duration across the runs of its dag·task.
+  var historyDlg = document.getElementById("history");
+  var histBody = document.getElementById("hist-body");
+  function openHistory(dag, task, node) {
+    if (typeof historyDlg.showModal === "function") { if (!historyDlg.open) historyDlg.showModal(); }
+    else historyDlg.setAttribute("open", "");
+    updateParentDim();
+    histBody.innerHTML = '<div class="state"><div class="skeleton" style="width:40%;margin:0 auto"></div></div>';
+    var q = new URLSearchParams({ dag_id: dag, task_id: task, node_id: node });
+    fetch(API + "test-history?" + q.toString())
+      .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+      .then(renderHistory)
+      .catch(function (e) {
+        histBody.innerHTML = '<div class="state c-fail">' + esc(t("historyFail") + e.message) + "</div>";
+      });
+  }
+  function closeHistory() { if (historyDlg.open) historyDlg.close(); else historyDlg.removeAttribute("open"); }
+  function renderHistory(d) {
+    var rows = d.history || [];
+    var head = '<div class="cbody mono">' + esc(d.node_id) + "</div>";
+    if (!rows.length) { histBody.innerHTML = head + '<div class="state">' + esc(t("noHistory")) + "</div>"; return; }
+    histBody.innerHTML = head + rows.map(function (h) {
+      var label = h.outcome ? outcomeLabel(h.outcome) : t("histDidntRun");
+      var dur = h.duration != null ? fmtDur(h.duration) : "";
+      return '<div class="hist-row">' + outcomeDot(h.outcome)
+        + '<span class="when">' + esc(label) + " · " + esc(fmtTime(h.created_at)) + "</span>"
+        + '<span class="dur">' + esc(dur) + "</span></div>";
+    }).join("");
+  }
+  document.getElementById("hist-close").addEventListener("click", closeHistory);
+  historyDlg.addEventListener("close", updateParentDim);
+  closeOnBackdrop(historyDlg, closeHistory);
+
   document.getElementById("refresh").addEventListener("click", load);
+  // Links menu: GitHub + the FastAPI docs. Airflow's iframe sandbox blocks _blank
+  // from inside, so open the tab from the same-origin parent; standalone uses ours.
+  var linksBtn = document.getElementById("links-btn");
+  var linksMenu = document.getElementById("links-menu");
+  function closeLinksMenu() {
+    linksMenu.hidden = true;
+    linksBtn.setAttribute("aria-expanded", "false");
+  }
+  linksBtn.addEventListener("click", function (e) {
+    e.stopPropagation();
+    var willOpen = linksMenu.hidden;
+    linksMenu.hidden = !willOpen;
+    linksBtn.setAttribute("aria-expanded", String(willOpen));
+  });
+  linksMenu.querySelectorAll(".menu-item").forEach(function (item) {
+    item.addEventListener("click", function () {
+      var href = item.getAttribute("data-href") || API + item.getAttribute("data-api");
+      (sameOriginTop() || window).open(href, "_blank", "noopener");
+      closeLinksMenu();
+    });
+  });
+  document.addEventListener("click", function (e) {
+    if (!linksMenu.hidden && !linksBtn.contains(e.target) && !linksMenu.contains(e.target)) {
+      closeLinksMenu();
+    }
+  });
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape" && !linksMenu.hidden) closeLinksMenu();
+  });
   document.addEventListener("pointermove", chartDragMove);
   document.addEventListener("pointerup", chartDragEnd);
   document.addEventListener("pointercancel", chartDragEnd);

@@ -21,21 +21,27 @@ import json
 import logging
 import os
 import shutil
+import threading
+import time
 import zipfile
 from pathlib import Path
 from typing import Any
 
 from airflow_pytest_operator import JUnitResultParser
 
-from ..config import get_reports_root
+from ..config import get_reports_root, get_scan_cache_ttl
 from ..layout import ALLURE_DIRNAME, META_FILENAME, REPORT_FILENAME, ReportLayout
 from ..models import CaseView, ReportDetail, ReportRef, ReportSummary
 from .base import ReportSource
 
 try:  # prefer the hardened parser when present (matches the operator)
     from defusedxml.ElementTree import parse as _xml_parse
+
+    _SECURE_XML = True
 except Exception:  # pragma: no cover - fallback path
     from xml.etree.ElementTree import parse as _xml_parse
+
+    _SECURE_XML = False
 
 _log = logging.getLogger(__name__)
 
@@ -52,14 +58,64 @@ class FileSystemReportSource(ReportSource):
         report_root: str | None = None,
         layout: ReportLayout | None = None,
         parser: JUnitResultParser | None = None,
+        scan_cache_ttl: float | None = None,
     ) -> None:
         self._report_root = os.path.abspath(report_root or get_reports_root())
         self._layout = layout or ReportLayout()
         self._parser = parser or JUnitResultParser()
+        self._scan_ttl = (
+            get_scan_cache_ttl() if scan_cache_ttl is None else scan_cache_ttl
+        )
+        # (monotonic_timestamp, summaries); guarded so concurrent requests on a cold
+        # cache do a single tree walk rather than one each (single-flight).
+        self._scan_cache: tuple[float, list[ReportSummary]] | None = None
+        self._scan_lock = threading.Lock()
 
     @property
     def report_root(self) -> str:
         return self._report_root
+
+    @property
+    def secure_xml(self) -> bool:
+        """Whether JUnit XML is parsed with the hardened ``defusedxml`` parser."""
+        return _SECURE_XML
+
+    def _scan_disk(self) -> list[ReportSummary]:
+        """Walk the tree and build every summary, newest first (uncached)."""
+        root = Path(self._report_root)
+        if not root.is_dir():
+            return []
+        out: list[ReportSummary] = []
+        for meta_file in root.rglob(META_FILENAME):
+            meta = self._load_meta(meta_file)
+            if meta is None:
+                continue
+            summary = self._summary_from_meta(meta)
+            if summary is not None:
+                out.append(summary)
+        # Newest first: ISO-8601 created_at sorts chronologically; missing sorts last.
+        out.sort(key=lambda s: s.created_at or "", reverse=True)
+        return out
+
+    def _all_summaries(self) -> list[ReportSummary]:
+        """The full scan, reused within the TTL so a page's several summary-driven
+        endpoints share one tree walk. ``ttl <= 0`` disables caching."""
+        if self._scan_ttl <= 0:
+            return self._scan_disk()
+        cached = self._scan_cache
+        if cached is not None and (time.monotonic() - cached[0]) < self._scan_ttl:
+            return cached[1]
+        with self._scan_lock:
+            # Re-check: another thread may have refreshed while we waited on the lock.
+            cached = self._scan_cache
+            if cached is not None and (time.monotonic() - cached[0]) < self._scan_ttl:
+                return cached[1]
+            fresh = self._scan_disk()
+            self._scan_cache = (time.monotonic(), fresh)
+            return fresh
+
+    def _invalidate_scan(self) -> None:
+        self._scan_cache = None
 
     def list_summaries(
         self,
@@ -67,27 +123,16 @@ class FileSystemReportSource(ReportSource):
         dag_id: str | None = None,
         run_id: str | None = None,
     ) -> list[ReportSummary]:
-        root = Path(self._report_root)
-        if not root.is_dir():
-            return []
-
-        summaries: list[ReportSummary] = []
-        for meta_file in root.rglob(META_FILENAME):
-            meta = self._load_meta(meta_file)
-            if meta is None:
-                continue
-            summary = self._summary_from_meta(meta)
-            if summary is None:
-                continue
-            if dag_id and dag_id.lower() not in summary.ref.dag_id.lower():
-                continue
-            if run_id and run_id.lower() not in summary.ref.run_id.lower():
-                continue
-            summaries.append(summary)
-
-        # Newest first: ISO-8601 created_at sorts chronologically; missing sorts last.
-        summaries.sort(key=lambda s: s.created_at or "", reverse=True)
-        return summaries
+        d = dag_id.lower() if dag_id else None
+        r = run_id.lower() if run_id else None
+        summaries = self._all_summaries()
+        # Filter into a fresh list -- never hand back (or sort) the cached one.
+        return [
+            s
+            for s in summaries
+            if (not d or d in s.ref.dag_id.lower())
+            and (not r or r in s.ref.run_id.lower())
+        ]
 
     def get_detail(self, ref: ReportRef) -> ReportDetail | None:
         # Token is attacker-controlled: bound the directory before reading.
@@ -136,6 +181,40 @@ class FileSystemReportSource(ReportSource):
         )
         return ReportDetail(summary=summary, cases=cases)
 
+    def test_outcomes(self, ref: ReportRef) -> dict[str, dict[str, Any]] | None:
+        report_dir = self._safe_dir(ref)
+        if report_dir is None:
+            return None
+        meta = self._load_meta(Path(os.path.join(report_dir, META_FILENAME)))
+        rows = meta.get("tests") if isinstance(meta, dict) else None
+        if isinstance(rows, list):
+            out: dict[str, dict[str, Any]] = {}
+            for row in rows:
+                if isinstance(row, (list, tuple)) and len(row) >= 2 and row[0]:
+                    dur = (
+                        float(row[2])
+                        if len(row) > 2 and isinstance(row[2], int | float)
+                        else 0.0
+                    )
+                    out[str(row[0])] = {"outcome": str(row[1]), "duration": dur}
+            return out
+        # Older archive without the per-test map: parse junit.xml on demand.
+        report_path = os.path.join(report_dir, REPORT_FILENAME)
+        if not os.path.isfile(report_path):
+            return None
+        try:
+            result = self._parser.parse(report_path)
+        except Exception:
+            _log.exception("Failed to parse JUnit report %s", report_path)
+            return None
+        return {
+            c.node_id: {
+                "outcome": c.outcome,
+                "duration": float(getattr(c, "time", 0.0) or 0.0),
+            }
+            for c in result.cases
+        }
+
     def delete(self, ref: ReportRef) -> bool:
         target = self._safe_dir(ref)
         if target is None or not os.path.isdir(target):
@@ -145,6 +224,7 @@ class FileSystemReportSource(ReportSource):
         self._prune_empty_parents(
             os.path.dirname(target), os.path.realpath(self._report_root)
         )
+        self._invalidate_scan()  # the deleted run must drop out of the list at once
         _log.info("Deleted report %s", target)
         return True
 

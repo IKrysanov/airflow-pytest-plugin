@@ -25,6 +25,46 @@ CONF_SECTION = "pytest_reports"
 CONF_KEY = "reports_root"
 DEFAULT_ROOT = "/opt/airflow/pytest-reports"
 
+#: Toggles whether the reader plugin (UI + API) registers with Airflow. Default on.
+ENABLE_ENV_VAR = "AIRFLOW_PYTEST_PLUGIN_ENABLE"
+_FALSEY = frozenset({"0", "false", "no", "off", "n", "f"})
+
+
+def is_plugin_enabled() -> bool:
+    """Whether the reader plugin should register with Airflow.
+
+    Reads ``AIRFLOW_PYTEST_PLUGIN_ENABLE`` -- ``True`` (the default when unset/empty)
+    registers the UI + API; a falsey value (``0``/``false``/``no``/``off``) disables
+    it. Only gates the reader; the producer-side parser is unaffected.
+    """
+    raw = os.environ.get(ENABLE_ENV_VAR)
+    if raw is None or not raw.strip():
+        return True
+    return raw.strip().lower() not in _FALSEY
+
+
+#: How long (seconds) the filesystem source may reuse a directory scan. A short
+#: window lets the several summary-driven endpoints on one page load (list + flaky +
+#: unique-tests, plus filter typing) share one tree walk instead of rescanning each.
+SCAN_TTL_ENV_VAR = "AIRFLOW_PYTEST_SCAN_CACHE_TTL"
+DEFAULT_SCAN_TTL = 2.0
+
+
+def get_scan_cache_ttl() -> float:
+    """Resolve the directory-scan cache TTL in seconds (``0`` disables caching).
+
+    Reads ``AIRFLOW_PYTEST_SCAN_CACHE_TTL``; falls back to ``DEFAULT_SCAN_TTL``.
+    A malformed or negative value falls back to the default.
+    """
+    raw = os.environ.get(SCAN_TTL_ENV_VAR)
+    if raw is None or not raw.strip():
+        return DEFAULT_SCAN_TTL
+    try:
+        ttl = float(raw.strip())
+    except ValueError:
+        return DEFAULT_SCAN_TTL
+    return ttl if ttl >= 0 else DEFAULT_SCAN_TTL
+
 
 def get_reports_root() -> str:
     """Resolve the report root directory (absolute path)."""

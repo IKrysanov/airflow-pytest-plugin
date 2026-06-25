@@ -20,6 +20,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from .compat import get_airflow_plugin_base
+from .config import ENABLE_ENV_VAR, is_plugin_enabled
 
 _log = logging.getLogger(__name__)
 
@@ -73,9 +74,16 @@ else:
         _Base = object
 
 
+#: Kill switch: when AIRFLOW_PYTEST_PLUGIN_ENABLE is falsey the reader registers
+#: nothing (no app, no nav link), so the UI/API are unavailable.
+_ENABLED = is_plugin_enabled()
+if not _ENABLED:
+    _log.info("Pytest Reports reader disabled via %s; not registering.", ENABLE_ENV_VAR)
+
+
 class PytestReportsPlugin(_Base):
-    """Exposes the Pytest Reports UI to Airflow."""
+    """Exposes the Pytest Reports UI to Airflow (unless disabled via the env var)."""
 
     name = "pytest_reports"
-    fastapi_apps = _build_fastapi_apps()
-    external_views = _build_external_views()
+    fastapi_apps = _build_fastapi_apps() if _ENABLED else []
+    external_views = _build_external_views() if _ENABLED else []

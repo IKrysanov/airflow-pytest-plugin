@@ -127,6 +127,35 @@ def write_allure(root: str, ref: ReportRef, files: dict | None = None) -> str:
     return allure_dir
 
 
+def write_tests(
+    root: str,
+    ref: ReportRef,
+    rows: list,
+    *,
+    created_at: str = "2026-06-21T10:00:00+00:00",
+) -> str:
+    """Write a report whose meta carries a per-test outcomes map (no junit needed)."""
+    out_dir = ReportLayout().dir_for(root, ref)
+    os.makedirs(out_dir, exist_ok=True)
+    tests = [[r[0], r[1], r[2] if len(r) > 2 else 0.0] for r in rows]
+    meta = {
+        "schema_version": 1,
+        "dag_id": ref.dag_id,
+        "run_id": ref.run_id,
+        "task_id": ref.task_id,
+        "try_number": ref.try_number,
+        "map_index": ref.map_index,
+        "logical_date": None,
+        "created_at": created_at,
+        "report_file": "junit.xml",
+        "summary": {},
+        "tests": tests,
+    }
+    with open(os.path.join(out_dir, META_FILENAME), "w", encoding="utf-8") as fh:
+        json.dump(meta, fh)
+    return out_dir
+
+
 def write_report_xml(
     root: str,
     ref: ReportRef,

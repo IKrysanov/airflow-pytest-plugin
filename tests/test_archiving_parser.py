@@ -235,3 +235,17 @@ def test_executor_json_has_buildurl_with_base_url(monkeypatch):
     assert data["type"] == "airflow"
     assert data["buildUrl"].startswith("http://airflow.example/dags/dag/runs/")
     assert "%3A" in data["buildUrl"]  # the run_id ':' is URL-encoded
+
+
+def test_meta_has_per_test_rows(monkeypatch, reports_root):
+    ti = FakeTI(dag_id="d", task_id="t", run_id="r", try_number=1)
+    _patch_context(monkeypatch, {"ti": ti})
+    parser = ArchivingResultParser(report_root=reports_root)
+    rd, req = _run_with_report(parser, reports_root)
+    with open(req.report_path, "w", encoding="utf-8") as fh:
+        fh.write(junit_xml(passed=2, failed=1, errors=1, skipped=1))
+    parser.parse(req.report_path)
+    rows = json.load(open(os.path.join(rd, META_FILENAME), encoding="utf-8"))["tests"]
+    assert len(rows) == 5
+    assert sorted({r[1] for r in rows}) == ["error", "failed", "passed", "skipped"]
+    assert all(len(r) == 3 and isinstance(r[2], (int, float)) for r in rows)
