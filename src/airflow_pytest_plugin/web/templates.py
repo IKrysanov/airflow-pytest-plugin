@@ -30,6 +30,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     --primary: #017cee; --on-primary: #ffffff; --ring: #017cee40;
     --pass: #008000; --fail: #ff0000; --skip: #ff69b4; --error: #9370db;
     --pass-bg: #0080001a; --fail-bg: #ff00001a; --skip-bg: #ff69b41f; --error-bg: #9370db1f;
+    --trend: #0891b2;  /* cyan pass-rate trend line (darker for contrast on white) */
+    --thresh: #d97706;  /* amber success-threshold gridline -- distinct from the line */
     --shadow: 0 1px 2px #0000000d, 0 1px 3px #00000014;
     /* Tooltip inverts the page: dark bubble on the light theme. */
     --tip-bg: #18181b; --tip-fg: #fafafa; --tip-border: #3f3f46;
@@ -40,6 +42,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     --primary: #4ba3f5; --on-primary: #07121e; --ring: #017cee66;
     --pass: #2ecc71; --fail: #ff6b6b; --skip: #ff8ecb; --error: #b39ddb;
     --pass-bg: #2ecc711f; --fail-bg: #ff6b6b1f; --skip-bg: #ff8ecb1f; --error-bg: #b39ddb1f;
+    --trend: #22d3ee;  /* cyan pass-rate trend line (brighter on the navy theme) */
+    --thresh: #fbbf24;  /* amber success-threshold gridline */
     --shadow: 0 1px 3px #00000040, 0 2px 8px #00000033;
     /* ...and a white bubble on the dark theme. */
     --tip-bg: #fafafa; --tip-fg: #18181b; --tip-border: #d4d4d8;
@@ -150,6 +154,21 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     font: inherit; font-weight: 600; text-decoration: underline; padding: 0; }
   .chart-clear:hover { opacity: .8; }
   .chart-clear:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; border-radius: 3px; }
+  /* Pass-rate trend: checkbox toggle + the cyan line/dots/threshold overlay. */
+  .trend-toggle { display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
+    font-weight: 500; white-space: nowrap; color: var(--muted); }
+  #chart { position: relative; }
+  .trend-svg { position: absolute; left: 0; top: 0; pointer-events: none; overflow: visible; }
+  .trend-line { fill: none; stroke: var(--trend); stroke-width: 2;
+    stroke-linejoin: round; stroke-linecap: round; }
+  .trend-dot { fill: var(--trend); stroke: var(--surface); stroke-width: 1.5;
+    pointer-events: auto; cursor: pointer; }
+  .trend-thresh { position: absolute; left: 0; right: 0; pointer-events: none;
+    border-top: 2px dashed var(--thresh); }
+  .trend-thresh span { position: absolute; right: 2px; top: -9px; font-size: 10px;
+    font-weight: 700; color: var(--thresh); background: var(--surface); padding: 0 4px;
+    border-radius: 3px; box-shadow: 0 0 0 1px var(--thresh); }
+  .trend-thresh.label-below span { top: 3px; }  /* high threshold -> label under the line */
   .legend { display: inline-flex; gap: 6px; flex-wrap: wrap; }
   .legend button { display: inline-flex; align-items: center; gap: 5px; border: 0;
     background: none; color: var(--fg); cursor: pointer; font: inherit; font-weight: 500;
@@ -163,7 +182,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
      The bars live in a fixed-width strip inside a horizontal scroll viewport:
      drag (mouse) or swipe/trackpad (native) or the arrows pan it smoothly. The
      scrollbar is hidden -- the arrows + grab cursor are the affordance. */
-  .chart-bars { position: relative; height: 122px; overflow-x: auto; overflow-y: hidden;
+  /* 6px of headroom up top so a 100%-pass trend dot is never clipped. */
+  .chart-bars { position: relative; height: 128px; overflow-x: auto; overflow-y: hidden;
     cursor: grab; touch-action: pan-x; overscroll-behavior-x: contain; scrollbar-width: none;
     user-select: none; -webkit-user-select: none; }
   .chart-bars::-webkit-scrollbar { display: none; }
@@ -171,8 +191,12 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .chart-bars.dragging .bar { cursor: grabbing; }
   .bars-strip { position: relative; height: 100%; }
   .bar { position: absolute; bottom: 22px; height: 100px; border-radius: 2px;
-    background: var(--surface-2); transition: filter .12s; cursor: pointer; }
+    background: var(--surface-2); transition: filter .12s, opacity .12s; cursor: pointer; }
   .bar:hover { filter: brightness(1.08); }
+  /* With the trend on, bars recede so the line/threshold read clearly; hovering one
+     brings it back to full strength. */
+  .bars-strip.trend-on .bar { opacity: .26; }
+  .bars-strip.trend-on .bar:hover { opacity: 1; filter: brightness(1.08); }
   .bnum { position: absolute; bottom: 0; width: 36px; text-align: center; font-size: 10px;
     color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
   /* Hover tooltip: inverts the page theme. */
@@ -298,20 +322,21 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .bulk-del:focus-visible, .bulk-close:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
   /* Checkboxes styled like Airflow's (Chakra): rounded square, brand-blue + white tick when on. */
   .sel-cell { width: 1%; white-space: nowrap; padding-right: 0; }
-  .sel-cell input[type="checkbox"], #case-grp, #flk-qonly, #flk-board-qonly {
+  .sel-cell input[type="checkbox"], #case-grp, #flk-qonly, #flk-board-qonly, #trend-toggle {
     appearance: none; -webkit-appearance: none; margin: 0; width: 16px; height: 16px;
     cursor: pointer; vertical-align: middle; background: var(--surface);
     border: 1px solid var(--border); border-radius: 4px; flex: 0 0 auto;
     display: inline-grid; place-content: center; transition: background .12s, border-color .12s; }
   .sel-cell input[type="checkbox"]:hover, #case-grp:hover, #flk-qonly:hover,
-  #flk-board-qonly:hover { border-color: var(--primary); }
+  #flk-board-qonly:hover, #trend-toggle:hover { border-color: var(--primary); }
   .sel-cell input[type="checkbox"]:focus-visible, #case-grp:focus-visible, #flk-qonly:focus-visible,
-  #flk-board-qonly:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
+  #flk-board-qonly:focus-visible, #trend-toggle:focus-visible {
+    outline: 2px solid var(--ring); outline-offset: 1px; }
   .sel-cell input[type="checkbox"]:checked, #case-grp:checked, #flk-qonly:checked,
-  #flk-board-qonly:checked, .sel-cell input[type="checkbox"]:indeterminate {
+  #flk-board-qonly:checked, #trend-toggle:checked, .sel-cell input[type="checkbox"]:indeterminate {
     background: var(--primary); border-color: var(--primary); }
   .sel-cell input[type="checkbox"]:checked::after, #case-grp:checked::after, #flk-qonly:checked::after,
-  #flk-board-qonly:checked::after {
+  #flk-board-qonly:checked::after, #trend-toggle:checked::after {
     content: ""; width: 4px; height: 8px; border: solid #fff; border-width: 0 2px 2px 0;
     transform: rotate(45deg) translate(-0.5px, -1px); }
   .sel-cell input[type="checkbox"]:indeterminate::after {
@@ -563,6 +588,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
         <span class="chart-filter" id="chart-filter" hidden></span>
         <span class="legend" id="legend"></span>
         <span style="flex:1"></span>
+        <label class="trend-toggle"><input type="checkbox" id="trend-toggle" />
+          <span data-i18n="trendToggle">Pass-rate trend</span></label>
         <span class="chart-nav" id="chart-nav"></span>
       </div>
       <div id="chart"></div>
@@ -716,6 +743,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       filterDagAl: "Filter by dag_id", filterTaskAl: "Filter by task_id", filterRunAl: "Filter by run_id",
       history: "Recent runs", copyLink: "Copy link", copied: "Copied",
       chartSelected: "showing {n} selected", chartShowAll: "show all",
+      trendToggle: "Pass-rate trend", passRate: "pass rate",
       closeReport: "Close report", ofWord: "of", testsWord: "tests",
       apiDocs: "API docs", linksAl: "Links & documentation", ghItem: "GitHub",
       benchTitle: "Test durations (10s buckets)", uniqueTitle: "Unique tests",
@@ -774,6 +802,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       filterDagAl: "Фильтр по dag_id", filterTaskAl: "Фильтр по task_id", filterRunAl: "Фильтр по run_id",
       history: "Последние прогоны", copyLink: "Копировать ссылку", copied: "Скопировано",
       chartSelected: "показаны выбранные: {n}", chartShowAll: "показать все",
+      trendToggle: "Тренд прохождения", passRate: "доля прохождения",
       closeReport: "Закрыть отчёт", ofWord: "из", testsWord: "тестов",
       apiDocs: "Документация API", linksAl: "Ссылки и документация", ghItem: "GitHub",
       benchTitle: "Время выполнения тестов (по 10с)", uniqueTitle: "Уникальные тесты",
@@ -1009,6 +1038,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     ["error", "errors", "var(--error)"],
   ];
   var chartSel = { passed: true, skipped: true, failed: true, error: true };
+  var passTrend = false;        // overlay the pass-rate trend line (checkbox-toggled)
+  var successThreshold = 0.85;  // echoed by /api/reports; drives the trend's threshold line
   var CHART_VISIBLE = 30; // bars visible at once; beyond that the strip scrolls (carousel)
   var PAGE_SIZE = 100;    // list rows per page
   var chartScroll = null; // null => snap to newest; else a remembered scrollLeft (px)
@@ -1305,6 +1336,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       bar.addEventListener("click", function () { if (!chartDragged) openDetail(id); });
       bindTip(bar, function () { return barTip(r, r.seq); });
     });
+    renderTrend(chart, strip, win, slot, stripW);
 
     // Start at the newest (right) unless a scroll position is being preserved
     // (e.g. across a legend toggle). Wire arrows, drag, and scroll memory.
@@ -1315,6 +1347,52 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       chartScroll = barsEl.scrollLeft; updateChartArrows(barsEl);
     });
     enableChartDrag(barsEl);
+  }
+
+  // Pass-rate trend overlay: a cyan line through each bar's green-top (passed/total),
+  // dots with an exact-% tooltip, and a dashed threshold gridline. Bars are 100%-
+  // normalised, so the green top IS the pass rate. Only drawn when the checkbox is on.
+  function renderTrend(chart, strip, win, slot, stripW) {
+    if (!passTrend) return;
+    strip.classList.add("trend-on");  // dim the bars so the line stands out
+    // Map a pass rate to a y inside the bar's pixel box: the bar fills the bottom
+    // 100px (above a 22px label strip), leaving headroom up top for the 100% dot.
+    var BAR_BOTTOM = 22, BAR_H = 100;
+    var barTop = (strip.clientHeight || 128) - BAR_BOTTOM - BAR_H;  // = top headroom
+    var yOf = function (rate) { return barTop + BAR_H * (1 - rate); };
+    var pts = [];
+    win.forEach(function (r, i) {
+      var tot = r.total || 0;
+      if (tot <= 0) return;  // no tests -> no green top to plot
+      var rate = (r.passed || 0) / tot;
+      pts.push({ x: slot * (i + 0.5), y: yOf(rate), r: r, rate: rate });
+    });
+    var poly = pts.map(function (p) { return p.x.toFixed(1) + "," + p.y.toFixed(1); }).join(" ");
+    var dots = pts.map(function (p) {
+      return '<circle class="trend-dot" cx="' + p.x.toFixed(1) + '" cy="' + p.y.toFixed(1)
+        + '" r="3.2" data-id="' + esc(p.r.id) + '"></circle>';
+    }).join("");
+    var line = pts.length > 1
+      ? '<polyline class="trend-line" points="' + esc(poly) + '"></polyline>' : "";
+    strip.insertAdjacentHTML("beforeend",
+      '<svg class="trend-svg" width="' + stripW + '" height="' + (strip.clientHeight || 128)
+      + '" aria-hidden="true">' + line + dots + "</svg>");
+    strip.querySelectorAll(".trend-dot").forEach(function (dot, i) {
+      var p = pts[i];
+      dot.addEventListener("click", function () { if (!chartDragged) openDetail(p.r.id); });
+      bindTip(dot, function () {
+        return "<b>#" + p.r.seq + "</b> " + esc(t("passRate")) + ": "
+          + Math.round(p.rate * 100) + "% (" + (p.r.passed || 0) + "/" + (p.r.total || 0) + ")";
+      });
+    });
+    // Dashed threshold gridline, pinned (lives in #chart, outside the scrolling strip).
+    var thy = yOf(successThreshold);
+    var th = document.createElement("div");
+    // Near the top (a high threshold) the label flips below the line so it isn't clipped.
+    th.className = "trend-thresh" + (thy < 14 ? " label-below" : "");
+    th.style.top = thy.toFixed(1) + "px";
+    th.innerHTML = "<span>" + Math.round(successThreshold * 100) + "%</span>";
+    chart.appendChild(th);
   }
 
   function renderChartFilterNote(active, shown) {
@@ -1492,6 +1570,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
       .then(function (d) {
         allReports = d.reports || [];
+        if (typeof d.success_threshold === "number") successThreshold = d.success_threshold;
         populateSuggestions();
         applyFilter();
         loadFlaky();
@@ -2518,6 +2597,10 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   if (flkBoardQ) flkBoardQ.addEventListener("input", renderFlakyBoard);
   var flkBoardQOnly = document.getElementById("flk-board-qonly");
   if (flkBoardQOnly) flkBoardQOnly.addEventListener("change", renderFlakyBoard);
+  var trendToggle = document.getElementById("trend-toggle");
+  if (trendToggle) trendToggle.addEventListener("change", function () {
+    passTrend = this.checked; renderChart();
+  });
   bindSuggest("f-dag", "sg-dag", "dag_id");
   bindSuggest("f-task", "sg-task", "task_id");
   bindSuggest("f-run", "sg-run", "run_id");

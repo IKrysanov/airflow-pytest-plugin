@@ -21,6 +21,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse, Response
 
+from ...config import get_success_threshold
 from .common import RouteDeps, ref_from_token
 
 TAG = "reports"
@@ -49,11 +50,17 @@ def build_router(deps: RouteDeps) -> APIRouter:
         Each entry carries the pass/fail/skip/error counts, duration, identity
         (dag·run·task·try) and its opaque token. Optional ``dag_id`` / ``run_id``
         narrow by case-insensitive substring. Only runs the caller may read are
-        returned (RBAC).
+        returned (RBAC). ``success_threshold`` echoes the configured pass-rate bar
+        (0–1) so the UI can draw it on the chart.
         """
         summaries = src.list_summaries(dag_id=dag_id, run_id=run_id)
         visible = [s for s in summaries if read_auth(s.ref.dag_id, user)]
-        return JSONResponse({"reports": [s.to_dict() for s in visible]})
+        return JSONResponse(
+            {
+                "reports": [s.to_dict() for s in visible],
+                "success_threshold": get_success_threshold(),
+            }
+        )
 
     @router.get("/api/reports/{report_id}", summary="Get a run")
     def get_report(

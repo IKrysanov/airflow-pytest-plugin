@@ -30,6 +30,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Chart run-filter** — ticking runs in the list now filters the history chart to
   just those bars (empty selection = all), so you can read the trend of a chosen
   subset; a "show all" affordance on the chart clears it.
+- **Pass-rate trend line** — a checkbox over the chart overlays a cyan line through
+  each bar's pass ratio (top of the green band), with per-run dots (exact pass-% on
+  hover) and an amber dashed gridline at the success threshold; while it's on the
+  bars recede and the hovered one lights up, so the quality trend and the bar
+  against it read at a glance. Off by default; `/api/reports` now echoes
+  `success_threshold` for the gridline.
 - **Configurable success threshold** — a run now counts as successful (the *Passing
   runs* KPI and the PASS status) when its pass rate over *executed* tests is at or
   above `AIRFLOW_PYTEST_SUCCESS_THRESHOLD` (env or cfg, default `0.85`); skipped

@@ -141,6 +141,12 @@ def test_index_has_feature_markers(client):
         "renderChartFilterNote",
         "clearSelection",
         "chartSelected",
+        'id="trend-toggle"',
+        "renderTrend",
+        "trendToggle",
+        "trend-line",
+        "trend-thresh",
+        "trend-on",
         "fillCases",
         'id="case-q"',
         'id="links-btn"',
@@ -222,8 +228,11 @@ def test_reports_success_reflects_pass_rate_threshold(reports_root):
     # A run with a failure but a 90% pass rate counts as successful at the default
     # 0.85 bar -> drives the "Passing runs" KPI and the PASS status badge.
     write_report(reports_root, ReportRef("dag", "run", "task", 1), passed=9, failed=1)
-    r = TestClient(make_app(reports_root)).get("/api/reports").json()["reports"][0]
+    body = TestClient(make_app(reports_root)).get("/api/reports").json()
+    r = body["reports"][0]
     assert r["failed"] == 1 and r["success"] is True
+    # The threshold is echoed so the chart can draw the pass-rate gridline.
+    assert body["success_threshold"] == 0.85
 
 
 def test_detail_endpoint_round_trips_token(client):

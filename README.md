@@ -54,10 +54,11 @@ It has two halves that share one on-disk layout:
 ## Screenshots
 
 **Overview** — the run list with the historical chart (per-status legend
-toggles, run numbers, and a carousel beyond 30 runs; **tick runs in the list to
-filter the chart to just their trend**) beside a **flaky-tests panel** (with its
-own search and a quarantined-only toggle), KPI cards (including a clickable
-**unique tests** count), and Airflow-matched colours and font:
+toggles, run numbers, a carousel beyond 30 runs, an optional **pass-rate trend
+line** with a success-threshold gridline, and **tick runs in the list to filter
+the chart to just their trend**) beside a **flaky-tests panel** (with its own
+search and a quarantined-only toggle), KPI cards (including a clickable **unique
+tests** count), and Airflow-matched colours and font:
 
 ![Pytest Reports — overview](https://raw.githubusercontent.com/IKrysanov/airflow-pytest-plugin/main/docs/screenshots/overview.png)
 
