@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Group the run list by dag·task (on by default)** — a checkbox over the list
+  (like the run detail's *group by module*) folds the runs into collapsible dag·task
+  groups under a **sortable** dag / task / runs / pass-% / avg-time / status / when
+  header that **reorders the groups** (and, for run columns, the runs too); uncheck
+  it for the flat, paginated list. Each group shows its run count, pass-rate, average
+  duration and last status, and expands to its own **sortable** full column header +
+  runs (first 100) — and that header sorts **only its own group**, independently. A
+  group's checkbox selects all its runs (even while collapsed; *select all* ticks
+  every group), which **focuses the history chart on that group**.
+- **`GET /api/groups`** — runs aggregated by dag·task (count, pass-rate, average
+  duration, newest run's status/time), RBAC-filtered with optional `dag_id` /
+  `task_id`. Lets grouped views and dashboards read group stats without fetching
+  every run (the basis for scaling past in-browser grouping).
+
 ## [0.3.1] - 2026-06-27
 
 ### Added

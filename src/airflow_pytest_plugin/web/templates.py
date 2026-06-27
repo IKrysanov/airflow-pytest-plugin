@@ -322,21 +322,22 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .bulk-del:focus-visible, .bulk-close:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
   /* Checkboxes styled like Airflow's (Chakra): rounded square, brand-blue + white tick when on. */
   .sel-cell { width: 1%; white-space: nowrap; padding-right: 0; }
-  .sel-cell input[type="checkbox"], #case-grp, #flk-qonly, #flk-board-qonly, #trend-toggle {
+  .sel-cell input[type="checkbox"], #case-grp, #flk-qonly, #flk-board-qonly, #trend-toggle, #list-grp {
     appearance: none; -webkit-appearance: none; margin: 0; width: 16px; height: 16px;
     cursor: pointer; vertical-align: middle; background: var(--surface);
     border: 1px solid var(--border); border-radius: 4px; flex: 0 0 auto;
     display: inline-grid; place-content: center; transition: background .12s, border-color .12s; }
   .sel-cell input[type="checkbox"]:hover, #case-grp:hover, #flk-qonly:hover,
-  #flk-board-qonly:hover, #trend-toggle:hover { border-color: var(--primary); }
+  #flk-board-qonly:hover, #trend-toggle:hover, #list-grp:hover { border-color: var(--primary); }
   .sel-cell input[type="checkbox"]:focus-visible, #case-grp:focus-visible, #flk-qonly:focus-visible,
-  #flk-board-qonly:focus-visible, #trend-toggle:focus-visible {
+  #flk-board-qonly:focus-visible, #trend-toggle:focus-visible, #list-grp:focus-visible {
     outline: 2px solid var(--ring); outline-offset: 1px; }
   .sel-cell input[type="checkbox"]:checked, #case-grp:checked, #flk-qonly:checked,
-  #flk-board-qonly:checked, #trend-toggle:checked, .sel-cell input[type="checkbox"]:indeterminate {
+  #flk-board-qonly:checked, #trend-toggle:checked, #list-grp:checked,
+  .sel-cell input[type="checkbox"]:indeterminate {
     background: var(--primary); border-color: var(--primary); }
   .sel-cell input[type="checkbox"]:checked::after, #case-grp:checked::after, #flk-qonly:checked::after,
-  #flk-board-qonly:checked::after, #trend-toggle:checked::after {
+  #flk-board-qonly:checked::after, #trend-toggle:checked::after, #list-grp:checked::after {
     content: ""; width: 4px; height: 8px; border: solid #fff; border-width: 0 2px 2px 0;
     transform: rotate(45deg) translate(-0.5px, -1px); }
   .sel-cell input[type="checkbox"]:indeterminate::after {
@@ -349,8 +350,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .03em;
     border-bottom: 1px solid var(--border); user-select: none;
   }
-  th.sortable { cursor: pointer; }
-  th.sortable:hover { color: var(--fg); }
+  th.sortable, th.gsort, th.rsort { cursor: pointer; }
+  th.sortable:hover, th.gsort:hover, th.rsort:hover { color: var(--fg); }
   th .arrow { opacity: .9; margin-left: 4px; }
   tbody td { border-bottom: 1px solid var(--border); }
   tbody tr { transition: background .12s; }
@@ -480,6 +481,17 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .case-table tr.grp > td { background: var(--surface-2); font-weight: 600; cursor: pointer;
     user-select: none; position: sticky; left: 0; }
   .case-table tr.grp .chev { transition: transform .15s; }
+  /* Run-list grouping by dag·task: toggle control + collapsible group headers. */
+  .list-ctrls { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 10px 12px; }
+  .list-grp-lbl { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px;
+    color: var(--muted); cursor: pointer; white-space: nowrap; }
+  #list .table-wrap > table { width: 100%; }
+  tr.lgrp > td { background: var(--surface-2); font-weight: 600; cursor: pointer; user-select: none; }
+  tr.lgrp .chev { transition: transform .15s; }
+  /* A group's runs sit in their own full sub-table, marked by a left accent rather
+     than an indent gap (which looked off). */
+  tr.grp-runs > td { padding: 0; border-left: 2px solid var(--primary); background: var(--surface); }
+  tr.grp-more td { color: var(--muted); font-size: 12px; text-align: center; padding: 8px; }
 
   @media (max-width: 680px) {
     .header-inner { flex-direction: column; align-items: stretch; gap: 10px; padding: 10px 12px; }
@@ -749,7 +761,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       benchTitle: "Test durations (10s buckets)", uniqueTitle: "Unique tests",
       cId: "ID", cStatus: "Status", cDag: "DAG", cTask: "Task", cRun: "Run", cTry: "Try",
       cTotal: "Total", cPass: "Pass", cFail: "Fail", cErr: "Err", cSkip: "Skip",
-      cDuration: "Duration", cWhen: "When",
+      cDuration: "Duration", cWhen: "When", cRuns: "Runs", cPassRate: "Pass %", cAvgDur: "Avg time",
       kRuns: "Runs", kPassingRuns: "Passing runs", kTests: "Unique tests", kFailures: "Failures",
       kPassed: "Passed", kFailed: "Failed", kErrors: "Errors", kSkipped: "Skipped",
       sPass: "PASS", sFail: "FAIL", sError: "ERROR", success: "success",
@@ -781,6 +793,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       historyFail: "Failed to load history: ", noHistory: "No history for this test.",
       histDidntRun: "did not run",
       caseSearch: "filter tests…", caseGroup: "Group by module",
+      listGroup: "Group by dag·task", runsWord: "runs", selectGroup: "Select group",
+      groupMore: "Showing 100 of {n} runs — filter to this dag·task to see all.",
       failCapped: "Showing the first {n} failures.",
       loadFail: "Failed to load reports: ", reportFail: "Failed to load report: ",
       failuresFail: "Failed to load failures: ",
@@ -808,7 +822,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       benchTitle: "Время выполнения тестов (по 10с)", uniqueTitle: "Уникальные тесты",
       cId: "ID", cStatus: "Статус", cDag: "DAG", cTask: "Задача", cRun: "Запуск", cTry: "Попытка",
       cTotal: "Всего", cPass: "Усп", cFail: "Пров", cErr: "Ошиб", cSkip: "Проп",
-      cDuration: "Время", cWhen: "Когда",
+      cDuration: "Время", cWhen: "Когда", cRuns: "Прогоны", cPassRate: "Проход %", cAvgDur: "Ср. время",
       kRuns: "Прогонов", kPassingRuns: "Успешных прогонов", kTests: "Уникальные тесты", kFailures: "Падений",
       kPassed: "Пройдено", kFailed: "Провалено", kErrors: "Ошибки", kSkipped: "Пропущено",
       sPass: "OK", sFail: "СБОЙ", sError: "ОШИБКА", success: "успех",
@@ -841,6 +855,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       historyFail: "Не удалось загрузить историю: ", noHistory: "Истории по этому тесту нет.",
       histDidntRun: "не запускался",
       caseSearch: "фильтр тестов…", caseGroup: "Группировать по модулю",
+      listGroup: "Группировать по dag·task", runsWord: "прогонов", selectGroup: "Выбрать группу",
+      groupMore: "Показаны 100 из {n} прогонов — отфильтруйте по этому dag·task.",
       failCapped: "Показаны первые {n} падений.",
       loadFail: "Не удалось загрузить отчёты: ", reportFail: "Не удалось загрузить отчёт: ",
       failuresFail: "Не удалось загрузить падения: ",
@@ -1028,7 +1044,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   var kpisEl = document.getElementById("kpis");
   var allReports = [];  // everything fetched
   var reports = [];     // the current filtered view
-  var sort = { key: "created_at", dir: -1 };
+  var sort = { key: "created_at", dir: -1 };       // run-level sort (flat list + within a group)
+  var groupSort = { key: "created_at", dir: -1 };  // order of the dag·task groups
 
   // Chart status series: [status key, report field, colour].
   var ORDER = [
@@ -1045,6 +1062,10 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   var chartScroll = null; // null => snap to newest; else a remembered scrollLeft (px)
   var chartDragged = false;
   var listPage = 0;
+  var listGroup = true;          // group the run list by dag·task (on by default; checkbox-toggled)
+  var listExpanded = {};         // group key -> expanded? (collapsed by default)
+  var groupRunSort = {};         // group key -> {key,dir} run-sort override for that group only
+  var GROUP_ROW_CAP = 100;       // max run rows rendered per expanded group (bounds the DOM)
   var selectedIds = new Set();   // report ids ticked for bulk delete
 
   var COLS = [
@@ -1413,17 +1434,20 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     syncSelAll(); updateBulkBar(); renderChart();
   }
 
-  function sortReports() {
-    var col = COLS.filter(function (c) { return c.key === sort.key; })[0] || COLS[0];
+  // Comparator for a given run-sort state {key, dir} -- reused by the flat list and
+  // by each group (which may carry its own override).
+  function runComparator(s) {
+    var col = COLS.filter(function (c) { return c.key === s.key; })[0] || COLS[0];
     var getv = col.get || function (r) { return r[col.key]; };
-    reports.sort(function (a, b) {
+    return function (a, b) {
       var x = getv(a), y = getv(b);
       if (typeof x === "string") { x = x.toLowerCase(); y = String(y).toLowerCase(); }
-      if (x < y) return -1 * sort.dir;
-      if (x > y) return 1 * sort.dir;
+      if (x < y) return -1 * s.dir;
+      if (x > y) return 1 * s.dir;
       return 0;
-    });
+    };
   }
+  function sortReports() { reports.sort(runComparator(sort)); }
 
   function renderRows(rows) {
     return rows.map(function (r) {
@@ -1450,6 +1474,88 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     return '<span class="arrow">' + (sort.dir === 1 ? "↑" : "↓") + "</span>";
   }
 
+  // Group the run list by dag·task: a checkbox toggles it (like the detail's
+  // group-by-module). Each header collapses/expands and its checkbox selects the whole
+  // group, which focuses the chart on it.
+  function groupReports(rows) {
+    var order = [], byKey = {};
+    rows.forEach(function (r) {
+      var key = JSON.stringify([r.dag_id, r.task_id]);
+      if (!byKey[key]) {
+        byKey[key] = { key: key, dag: r.dag_id, task: r.task_id, runs: [] };
+        order.push(byKey[key]);
+      }
+      byKey[key].runs.push(r);
+    });
+    // The newest run drives the group's status / when and the status/recency
+    // ordering -- independent of how runs are sorted within the group.
+    order.forEach(function (g) {
+      g.newest = g.runs.reduce(function (a, b) {
+        return String(a.created_at || "") >= String(b.created_at || "") ? a : b;
+      });
+      g.passed = g.runs.filter(function (r) { return r.success; }).length;
+      g.avgDur = g.runs.reduce(function (s, r) { return s + (+r.duration || 0); }, 0) / g.runs.length;
+    });
+    return order;
+  }
+  // Flat-list column headers -- sorted by the global run sort.
+  function headCells() {
+    return COLS.map(function (c) {
+      var asc = sort.key === c.key ? (sort.dir === 1 ? "ascending" : "descending") : "none";
+      return '<th class="sortable" data-key="' + c.key + '" aria-sort="' + asc + '">'
+        + esc(t(c.label)) + arrow(c.key) + "</th>";
+    }).join("");
+  }
+  // A group's full column header -- sorts the runs of THAT group only (class rsort,
+  // tagged with the group key); arrows reflect the group's effective sort `eff`.
+  function subHead(g, eff) {
+    var cells = COLS.map(function (c) {
+      var on = eff.key === c.key;
+      var ar = on ? '<span class="arrow">' + (eff.dir === 1 ? "↑" : "↓") + "</span>" : "";
+      return '<th class="rsort" data-key="' + c.key + '" data-gkey="' + esc(g.key)
+        + '" aria-sort="' + (on ? (eff.dir === 1 ? "ascending" : "descending") : "none") + '">'
+        + esc(t(c.label)) + ar + "</th>";
+    }).join("");
+    return '<th class="sel-cell"></th>' + cells + "<th></th>";
+  }
+  // A group-level column header (reorders the groups; uses the separate groupSort).
+  function gHeadCell(key, label) {
+    var asc = groupSort.key === key ? (groupSort.dir === 1 ? "ascending" : "descending") : "none";
+    return '<th class="gsort" data-key="' + key + '" aria-sort="' + asc + '">'
+      + esc(t(label)) + groupArrow(key) + "</th>";
+  }
+  function groupArrow(key) {
+    if (groupSort.key !== key) return "";
+    return '<span class="arrow">' + (groupSort.dir === 1 ? "↑" : "↓") + "</span>";
+  }
+  // A group's value for the active group-sort column.
+  function groupVal(g) {
+    if (groupSort.key === "dag_id") return g.dag.toLowerCase();
+    if (groupSort.key === "task_id") return g.task.toLowerCase();
+    if (groupSort.key === "runs") return g.runs.length;
+    if (groupSort.key === "pass_rate") return g.passed / g.runs.length;
+    if (groupSort.key === "avg_dur") return g.avgDur;
+    if (groupSort.key === "status") return g.newest.success ? 2 : (g.newest.errors ? 0 : 1);
+    return String(g.newest.created_at || "");  // created_at, and the default
+  }
+  function groupHeaderHtml(g) {
+    var exp = !!listExpanded[g.key];
+    var nSel = g.runs.filter(function (r) { return selectedIds.has(r.id); }).length;
+    var rate = Math.round(g.passed / g.runs.length * 100);
+    var st = statusOf(g.newest);
+    return '<tr class="lgrp" data-key="' + esc(g.key) + '">'
+      + '<td class="sel-cell"><input type="checkbox" class="gsel" data-key="' + esc(g.key) + '"'
+        + (nSel === g.runs.length ? " checked" : "") + ' aria-label="' + esc(t("selectGroup")) + '"></td>'
+      + '<td class="mono"><span class="chev"' + (exp ? ' style="transform:rotate(90deg)"' : "")
+        + ">" + CHEV + "</span> " + esc(g.dag) + "</td>"
+      + '<td class="mono">' + esc(g.task) + "</td>"
+      + '<td class="num">' + g.runs.length + "</td>"
+      + '<td class="num">' + rate + "%</td>"
+      + '<td class="num">' + fmtDur(g.avgDur) + "</td>"
+      + "<td>" + badge(st, statusLabel(st)) + "</td>"
+      + '<td class="muted">' + fmtTime(g.newest.created_at) + "</td></tr>";
+  }
+
   function renderList() {
     if (!reports.length) {
       listEl.innerHTML = '<div class="state">'
@@ -1458,27 +1564,61 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       return;
     }
     sortReports();
-    var pages = Math.ceil(reports.length / PAGE_SIZE);
-    listPage = Math.max(0, Math.min(listPage, pages - 1));
-    var pageRows = reports.slice(listPage * PAGE_SIZE, listPage * PAGE_SIZE + PAGE_SIZE);
-
-    var head = COLS.map(function (c) {
-      var asc = sort.key === c.key ? (sort.dir === 1 ? "ascending" : "descending") : "none";
-      return '<th class="sortable" data-key="' + c.key + '" aria-sort="' + asc + '">'
-        + esc(t(c.label)) + arrow(c.key) + "</th>";
-    }).join("");
-    var pager = pages > 1
-      ? '<div class="pager"><button type="button" class="nav-btn" id="pg-prev"'
-          + (listPage <= 0 ? " disabled" : "") + ' aria-label="' + esc(t("prevPage")) + '">‹</button>'
-        + "<span>" + esc(t("page")) + " " + (listPage + 1) + " / " + pages + "</span>"
-        + '<button type="button" class="nav-btn" id="pg-next"'
-          + (listPage >= pages - 1 ? " disabled" : "") + ' aria-label="' + esc(t("nextPage")) + '">›</button></div>'
-      : "";
+    var ctrls = '<div class="list-ctrls"><label class="list-grp-lbl"><input type="checkbox" id="list-grp"'
+      + (listGroup ? " checked" : "") + "> " + esc(t("listGroup")) + "</label></div>";
     var selAllTh = '<th class="sel-cell"><input type="checkbox" id="sel-all" aria-label="'
       + esc(t("selectAll")) + '"></th>';
-    listEl.innerHTML = '<div class="table-wrap"><table><thead><tr>' + selAllTh + head
-      + "<th></th></tr></thead><tbody>" + renderRows(pageRows) + "</tbody></table></div>" + pager;
 
+    var pages = 1, keyMap = {}, theadInner, body, pager = "";
+    if (listGroup) {
+      // The top header (gsort) reorders the GROUPS -- and, for run columns, the runs
+      // too (handled in the click). Each opened group's own header (rsort) sorts only
+      // that group's runs (groupRunSort override, else the global run sort).
+      theadInner = selAllTh + gHeadCell("dag_id", "cDag") + gHeadCell("task_id", "cTask")
+        + gHeadCell("runs", "cRuns") + gHeadCell("pass_rate", "cPassRate")
+        + gHeadCell("avg_dur", "cAvgDur") + gHeadCell("status", "cStatus")
+        + gHeadCell("created_at", "cWhen");
+      var groups = groupReports(reports);
+      groups.forEach(function (g) { keyMap[g.key] = g; });
+      groups.sort(function (a, b) {
+        var x = groupVal(a), y = groupVal(b);
+        if (x < y) return -1 * groupSort.dir;
+        if (x > y) return 1 * groupSort.dir;
+        return 0;
+      });
+      body = groups.map(function (g) {
+        if (!listExpanded[g.key]) return groupHeaderHtml(g);
+        var eff = groupRunSort[g.key] || sort;  // this group's own run sort, else global
+        var runs = g.runs.slice().sort(runComparator(eff));
+        var more = g.runs.length > GROUP_ROW_CAP
+          ? '<tr class="grp-more"><td colspan="' + (COLS.length + 2) + '">'
+            + esc(t("groupMore").replace("{n}", String(g.runs.length))) + "</td></tr>"
+          : "";
+        return groupHeaderHtml(g)
+          + '<tr class="grp-runs"><td colspan="8"><div class="table-wrap">'
+          + '<table class="sub-table"><thead><tr>' + subHead(g, eff) + "</tr></thead><tbody>"
+          + renderRows(runs.slice(0, GROUP_ROW_CAP)) + more + "</tbody></table></div></td></tr>";
+      }).join("");
+    } else {
+      theadInner = selAllTh + headCells() + "<th></th>";
+      pages = Math.ceil(reports.length / PAGE_SIZE);
+      listPage = Math.max(0, Math.min(listPage, pages - 1));
+      body = renderRows(reports.slice(listPage * PAGE_SIZE, listPage * PAGE_SIZE + PAGE_SIZE));
+      pager = pages > 1
+        ? '<div class="pager"><button type="button" class="nav-btn" id="pg-prev"'
+            + (listPage <= 0 ? " disabled" : "") + ' aria-label="' + esc(t("prevPage")) + '">‹</button>'
+          + "<span>" + esc(t("page")) + " " + (listPage + 1) + " / " + pages + "</span>"
+          + '<button type="button" class="nav-btn" id="pg-next"'
+            + (listPage >= pages - 1 ? " disabled" : "") + ' aria-label="' + esc(t("nextPage")) + '">›</button></div>'
+        : "";
+    }
+    listEl.innerHTML = ctrls + '<div class="table-wrap"><table><thead><tr>' + theadInner
+      + "</tr></thead><tbody>" + body + "</tbody></table></div>" + pager;
+
+    var lg = document.getElementById("list-grp");
+    if (lg) lg.addEventListener("change", function () {
+      listGroup = lg.checked; listExpanded = {}; listPage = 0; renderList();  // start folded
+    });
     listEl.querySelectorAll("th.sortable").forEach(function (th) {
       th.addEventListener("click", function () {
         var k = th.getAttribute("data-key");
@@ -1487,9 +1627,48 @@ _INDEX_HTML = r"""<!DOCTYPE html>
         renderList();
       });
     });
+    listEl.querySelectorAll("th.gsort").forEach(function (th) {  // top header: groups + tests
+      th.addEventListener("click", function () {
+        var k = th.getAttribute("data-key");
+        if (groupSort.key === k) groupSort.dir *= -1; else { groupSort.key = k; groupSort.dir = 1; }
+        groupRunSort = {};  // drop per-group overrides -- the top header is the global control
+        // If the column maps to a run field, move the runs (in every group) too.
+        if (COLS.some(function (c) { return c.key === k; })) { sort.key = k; sort.dir = groupSort.dir; }
+        renderList();
+      });
+    });
+    listEl.querySelectorAll("th.rsort").forEach(function (th) {  // sort one group's runs only
+      th.addEventListener("click", function () {
+        var gk = th.getAttribute("data-gkey"), k = th.getAttribute("data-key");
+        var cur = groupRunSort[gk] || { key: sort.key, dir: sort.dir };
+        groupRunSort[gk] = cur.key === k ? { key: k, dir: -cur.dir } : { key: k, dir: 1 };
+        renderList();
+      });
+    });
     var pgPrev = document.getElementById("pg-prev"), pgNext = document.getElementById("pg-next");
     if (pgPrev) pgPrev.addEventListener("click", function () { if (listPage > 0) { listPage--; renderList(); } });
     if (pgNext) pgNext.addEventListener("click", function () { if (listPage < pages - 1) { listPage++; renderList(); } });
+    // Group headers: row toggles expand/collapse; its checkbox selects the whole group
+    // (selecting focuses the chart, and ticks the group even while collapsed).
+    listEl.querySelectorAll("tr.lgrp").forEach(function (tr) {
+      tr.addEventListener("click", function () {
+        var key = tr.getAttribute("data-key");
+        listExpanded[key] = !listExpanded[key];
+        renderList();
+      });
+    });
+    listEl.querySelectorAll(".gsel").forEach(function (cb) {
+      var g = keyMap[cb.getAttribute("data-key")];
+      var nSel = g.runs.filter(function (r) { return selectedIds.has(r.id); }).length;
+      cb.indeterminate = nSel > 0 && nSel < g.runs.length;
+      cb.addEventListener("click", function (e) { e.stopPropagation(); });
+      cb.addEventListener("change", function () {
+        g.runs.forEach(function (r) {
+          if (cb.checked) selectedIds.add(r.id); else selectedIds.delete(r.id);
+        });
+        renderChart(); renderList(); updateBulkBar();
+      });
+    });
     listEl.querySelectorAll(".row-del").forEach(function (b) {
       b.addEventListener("click", function (e) {
         e.stopPropagation();  // don't open the detail when deleting
@@ -1508,25 +1687,54 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       cb.addEventListener("change", function () {
         var id = cb.getAttribute("data-id");
         if (cb.checked) selectedIds.add(id); else selectedIds.delete(id);
-        syncSelAll(); updateBulkBar(); renderChart();  // chart follows the selection
+        syncSelAll(); syncGroupChecks(); updateBulkBar(); renderChart();  // chart follows
       });
     });
     var selAll = document.getElementById("sel-all");
     if (selAll) selAll.addEventListener("change", function () {
-      listEl.querySelectorAll(".sel").forEach(function (cb) {
-        cb.checked = selAll.checked;
-        var id = cb.getAttribute("data-id");
-        if (selAll.checked) selectedIds.add(id); else selectedIds.delete(id);
-      });
+      if (listGroup) {
+        // Select every run across all groups (even collapsed) and tick the groups.
+        reports.forEach(function (r) {
+          if (selAll.checked) selectedIds.add(r.id); else selectedIds.delete(r.id);
+        });
+        listEl.querySelectorAll(".sel").forEach(function (cb) { cb.checked = selAll.checked; });
+        syncGroupChecks();
+      } else {
+        listEl.querySelectorAll(".sel").forEach(function (cb) {
+          cb.checked = selAll.checked;
+          var id = cb.getAttribute("data-id");
+          if (selAll.checked) selectedIds.add(id); else selectedIds.delete(id);
+        });
+      }
       selAll.indeterminate = false;
       updateBulkBar(); renderChart();
     });
     syncSelAll(); updateBulkBar();
   }
 
+  // Reflect the current selection onto the group checkboxes (incl. collapsed groups).
+  function syncGroupChecks() {
+    if (!listGroup) return;
+    var byKey = {};
+    groupReports(reports).forEach(function (g) { byKey[g.key] = g; });
+    listEl.querySelectorAll(".gsel").forEach(function (cb) {
+      var g = byKey[cb.getAttribute("data-key")];
+      if (!g) return;
+      var n = g.runs.filter(function (r) { return selectedIds.has(r.id); }).length;
+      cb.checked = n === g.runs.length;
+      cb.indeterminate = n > 0 && n < g.runs.length;
+    });
+  }
+
   function syncSelAll() {
     var selAll = document.getElementById("sel-all");
     if (!selAll) return;
+    if (listGroup) {  // count over all runs, since collapsed groups render no rows
+      var sn = reports.filter(function (r) { return selectedIds.has(r.id); }).length;
+      selAll.checked = reports.length > 0 && sn === reports.length;
+      selAll.indeterminate = sn > 0 && sn < reports.length;
+      return;
+    }
     var boxes = listEl.querySelectorAll(".sel"), n = 0;
     boxes.forEach(function (cb) { if (cb.checked) n++; });
     selAll.checked = boxes.length > 0 && n === boxes.length;

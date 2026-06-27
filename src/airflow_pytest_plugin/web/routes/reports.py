@@ -31,6 +31,46 @@ TAG = "reports"
 _UNIQUE_SCAN_CAP = 1000
 
 
+def summarize_groups(summaries: list[Any]) -> list[dict[str, Any]]:
+    """Aggregate run summaries by dag·task (pure).
+
+    One entry per dag·task with the run count, how many passed (per the configured
+    success threshold), the pass rate, the average run duration, and the newest run's
+    status/time. Sorted by most-recent activity. Lets a grouped view or dashboard read
+    group stats without shipping every run -- the basis for scaling past in-browser
+    grouping.
+    """
+    order: list[tuple[str, str]] = []
+    groups: dict[tuple[str, str], list[Any]] = {}
+    for s in summaries:
+        key = (s.ref.dag_id, s.ref.task_id)
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(s)
+
+    out: list[dict[str, Any]] = []
+    for dag, task in order:
+        runs = groups[(dag, task)]
+        newest = max(runs, key=lambda s: s.created_at or "")
+        passed = sum(1 for s in runs if s.success)
+        last = "passed" if newest.success else ("error" if newest.errors else "failed")
+        out.append(
+            {
+                "dag_id": dag,
+                "task_id": task,
+                "runs": len(runs),
+                "passed": passed,
+                "pass_rate": round(passed / len(runs), 3),
+                "avg_duration": round(sum(s.duration for s in runs) / len(runs), 3),
+                "last_status": last,
+                "last_created_at": newest.created_at,
+            }
+        )
+    out.sort(key=lambda g: g["last_created_at"] or "", reverse=True)
+    return out
+
+
 def build_router(deps: RouteDeps) -> APIRouter:
     """Routes tagged ``reports``."""
     router = APIRouter(tags=[TAG])
@@ -61,6 +101,27 @@ def build_router(deps: RouteDeps) -> APIRouter:
                 "success_threshold": get_success_threshold(),
             }
         )
+
+    @router.get("/api/groups", summary="Run groups by dag·task")
+    def groups(
+        dag_id: str | None = None,
+        task_id: str | None = None,
+        user: Any = Depends(user_dep),  # noqa: B008 - FastAPI dependency idiom
+    ) -> JSONResponse:
+        """Runs aggregated by dag·task: count, pass-rate, and the newest run's
+        status/time. Optional ``dag_id`` / ``task_id`` narrow by case-insensitive
+        substring; RBAC-filtered. Built for grouped views and dashboards so they can
+        show group stats without fetching every run (scales past in-browser grouping).
+        """
+        task_q = (task_id or "").lower()
+        visible = [
+            s
+            for s in src.list_summaries(dag_id=dag_id)
+            if (not task_q or task_q in s.ref.task_id.lower())
+            and read_auth(s.ref.dag_id, user)
+        ]
+        items = summarize_groups(visible)
+        return JSONResponse({"groups": items, "total": len(items)})
 
     @router.get("/api/reports/{report_id}", summary="Get a run")
     def get_report(

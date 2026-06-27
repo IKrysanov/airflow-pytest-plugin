@@ -58,7 +58,10 @@ toggles, run numbers, a carousel beyond 30 runs, an optional **pass-rate trend
 line** with a success-threshold gridline, and **tick runs in the list to filter
 the chart to just their trend**) beside a **flaky-tests panel** (with its own
 search and a quarantined-only toggle), KPI cards (including a clickable **unique
-tests** count), and Airflow-matched colours and font:
+tests** count), and Airflow-matched colours and font. The run list is **grouped by
+dag·task** by default (a checkbox toggles the flat list) — collapsible groups with
+run count, pass-rate, average duration and last status, each sortable on its own;
+select a whole group to chart its trend:
 
 ![Pytest Reports — overview](https://raw.githubusercontent.com/IKrysanov/airflow-pytest-plugin/main/docs/screenshots/overview.png)
 
@@ -186,6 +189,7 @@ runtime. Endpoints (relative to the mount):
 | `GET /` | the single-page viewer (HTML) |
 | `GET /api/reports?dag_id=&run_id=` | summaries, newest first |
 | `GET /api/reports/{report_id}` | one report with per-case rows |
+| `GET /api/groups?dag_id=&task_id=` | runs aggregated by dag·task (count, pass-rate, avg duration, last status) |
 | `GET /api/failures?dag_id=&run_id=&task_id=` | failed/errored cases across the visible runs |
 | `GET /api/compare?base=&head=` | per-test diff between two runs (newly failed / fixed / …) |
 | `GET /api/flaky?dag_id=&task_id=&window=` | flaky tests with score, trend, and a quarantine flag |
