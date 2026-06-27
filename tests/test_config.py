@@ -80,3 +80,66 @@ def test_scan_cache_ttl_invalid_or_negative_falls_back(monkeypatch):
     for val in ("abc", "-1", "  "):
         monkeypatch.setenv(config.SCAN_TTL_ENV_VAR, val)
         assert config.get_scan_cache_ttl() == config.DEFAULT_SCAN_TTL, val
+
+
+def test_retention_settings_from_env(monkeypatch):
+    monkeypatch.setenv(config.RETENTION_MAX_RUNS_ENV, "25")
+    assert config.get_retention_max_runs() == 25
+
+
+def test_retention_settings_invalid_or_non_positive_are_none(monkeypatch):
+    for val in ("abc", "0", "-4", "  "):
+        monkeypatch.setenv(config.RETENTION_MAX_AGE_DAYS_ENV, val)
+        monkeypatch.setattr(config, "get_conf_value", lambda s, k: None)
+        assert config.get_retention_max_age_days() is None, val
+
+
+def test_retention_settings_fall_back_to_cfg(monkeypatch):
+    monkeypatch.delenv(config.RETENTION_MAX_TOTAL_MB_ENV, raising=False)
+    monkeypatch.setattr(config, "get_conf_value", lambda s, k: "50")
+    assert config.get_retention_max_total_mb() == 50
+
+
+def test_flaky_window_default_and_env(monkeypatch):
+    monkeypatch.delenv(config.FLAKY_WINDOW_ENV, raising=False)
+    monkeypatch.setattr(config, "get_conf_value", lambda s, k: None)
+    assert config.get_flaky_window() == config.DEFAULT_FLAKY_WINDOW
+    monkeypatch.setenv(config.FLAKY_WINDOW_ENV, "50")
+    assert config.get_flaky_window() == 50
+
+
+def test_flaky_quarantine_score_default_env_and_clamp(monkeypatch):
+    monkeypatch.delenv(config.FLAKY_QUARANTINE_SCORE_ENV, raising=False)
+    monkeypatch.setattr(config, "get_conf_value", lambda s, k: None)
+    assert config.get_flaky_quarantine_score() == config.DEFAULT_FLAKY_QUARANTINE_SCORE
+    monkeypatch.setenv(config.FLAKY_QUARANTINE_SCORE_ENV, "0.8")
+    assert config.get_flaky_quarantine_score() == 0.8
+    for bad in ("abc", "1.5", "-0.2"):  # invalid / out of 0–1 -> default
+        monkeypatch.setenv(config.FLAKY_QUARANTINE_SCORE_ENV, bad)
+        assert (
+            config.get_flaky_quarantine_score() == config.DEFAULT_FLAKY_QUARANTINE_SCORE
+        )
+
+
+def test_flaky_min_score_default_env_and_clamp(monkeypatch):
+    monkeypatch.delenv(config.FLAKY_MIN_SCORE_ENV, raising=False)
+    monkeypatch.setattr(config, "get_conf_value", lambda s, k: None)
+    assert config.get_flaky_min_score() == config.DEFAULT_FLAKY_MIN_SCORE
+    monkeypatch.setenv(config.FLAKY_MIN_SCORE_ENV, "0.25")
+    assert config.get_flaky_min_score() == 0.25
+    for bad in ("x", "2", "-1"):  # invalid / out of 0–1 -> default
+        monkeypatch.setenv(config.FLAKY_MIN_SCORE_ENV, bad)
+        assert config.get_flaky_min_score() == config.DEFAULT_FLAKY_MIN_SCORE
+
+
+def test_success_threshold_default_env_and_clamp(monkeypatch):
+    monkeypatch.delenv(config.SUCCESS_THRESHOLD_ENV, raising=False)
+    monkeypatch.setattr(config, "get_conf_value", lambda s, k: None)
+    assert config.get_success_threshold() == config.DEFAULT_SUCCESS_THRESHOLD == 0.85
+    monkeypatch.setenv(config.SUCCESS_THRESHOLD_ENV, "0.9")
+    assert config.get_success_threshold() == 0.9
+    monkeypatch.setenv(config.SUCCESS_THRESHOLD_ENV, "1")  # strict legacy mode
+    assert config.get_success_threshold() == 1.0
+    for bad in ("x", "1.5", "-0.1"):  # invalid / out of 0–1 -> default
+        monkeypatch.setenv(config.SUCCESS_THRESHOLD_ENV, bad)
+        assert config.get_success_threshold() == config.DEFAULT_SUCCESS_THRESHOLD

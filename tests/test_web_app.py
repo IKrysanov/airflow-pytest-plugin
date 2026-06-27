@@ -128,6 +128,25 @@ def test_index_has_feature_markers(client):
         "previousRun",
         "openFlaky",
         "openHistory",
+        "flakyMeta",
+        "quarantineBadge",
+        "trendArrow",
+        'id="flk-win"',
+        "flkScoreTip",
+        'id="flk-board-q"',
+        'id="flk-board-qonly"',
+        "flkSearch",
+        "flkNoMatch",
+        'id="chart-filter"',
+        "renderChartFilterNote",
+        "clearSelection",
+        "chartSelected",
+        'id="trend-toggle"',
+        "renderTrend",
+        "trendToggle",
+        "trend-line",
+        "trend-thresh",
+        "trend-on",
         "fillCases",
         'id="case-q"',
         'id="links-btn"',
@@ -203,6 +222,17 @@ def test_list_endpoint(client):
     assert len(reports) == 1
     assert reports[0]["dag_id"] == "dag"
     assert reports[0]["failed"] == 1
+
+
+def test_reports_success_reflects_pass_rate_threshold(reports_root):
+    # A run with a failure but a 90% pass rate counts as successful at the default
+    # 0.85 bar -> drives the "Passing runs" KPI and the PASS status badge.
+    write_report(reports_root, ReportRef("dag", "run", "task", 1), passed=9, failed=1)
+    body = TestClient(make_app(reports_root)).get("/api/reports").json()
+    r = body["reports"][0]
+    assert r["failed"] == 1 and r["success"] is True
+    # The threshold is echoed so the chart can draw the pass-rate gridline.
+    assert body["success_threshold"] == 0.85
 
 
 def test_detail_endpoint_round_trips_token(client):
@@ -484,11 +514,92 @@ def test_flaky_finds_flipping_tests(reports_root):
         created_at="2026-06-03T00:00:00+00:00",
     )
     d = TestClient(make_app(reports_root)).get("/api/flaky").json()
-    assert d["window"] == 30
+    assert d["window"] == 30 and d["quarantine_score"] == 0.5
     assert {f["node_id"] for f in d["flaky"]} == {"a"}  # b is stable
     a = d["flaky"][0]
     assert a["runs"] == 3 and a["fails"] == 1 and a["flips"] == 2
     assert a["recent"] == ["passed", "failed", "passed"]
+    # flaky-deeper fields: flip rate 2/2 = 1.0 -> quarantined; <4 runs -> flat trend
+    assert a["score"] == 1.0 and a["quarantined"] is True and a["trend"] == "flat"
+
+
+def test_flaky_stats_score_trend_quarantine():
+    from airflow_pytest_plugin.web.routes.flaky import flaky_stats
+
+    assert (
+        flaky_stats(["passed"] * 5, quarantine_score=0.5) is None
+    )  # stable -> not flaky
+    alt = flaky_stats(["passed", "failed"] * 3, quarantine_score=0.5)
+    assert alt["score"] == 1.0 and alt["quarantined"] is True  # flips every run
+    # calm older half, flips concentrated late -> trend up; score below threshold
+    blip = flaky_stats(["passed"] * 5 + ["failed", "passed"], quarantine_score=0.5)
+    assert blip["flips"] == 2 and blip["trend"] == "up" and blip["quarantined"] is False
+
+
+def test_flip_rate_and_trend_edges():
+    from airflow_pytest_plugin.web.routes.flaky import _flip_rate, _trend
+
+    assert _flip_rate([]) == 0.0 and _flip_rate(["passed"]) == 0.0  # len < 2
+    assert _trend(["passed", "failed", "passed"]) == "flat"  # < 4 runs -> flat
+
+
+def test_flaky_stats_min_score_filters_lone_blip():
+    from airflow_pytest_plugin.web.routes.flaky import flaky_stats
+
+    seq = ["passed"] * 20 + ["failed"]  # one fail in a long history -> flip rate 1/20
+    assert flaky_stats(seq, min_score=0.0)["score"] == 0.05  # counts with floor off
+    assert flaky_stats(seq, min_score=0.1) is None  # too steady -> filtered out
+
+
+def test_flaky_excludes_lone_blip_via_min_score(reports_root, monkeypatch):
+    import airflow_pytest_plugin.web.routes.flaky as flaky_mod
+
+    # always passed, failed only in the latest run -> 1 flip / 11 = 0.09 < default 0.1
+    for i in range(12):
+        outcome = "failed" if i == 11 else "passed"
+        write_tests(
+            reports_root,
+            ReportRef("dag", f"r{i:02d}", "t", 1),
+            [["a", outcome]],
+            created_at=f"2026-06-{i + 1:02d}T00:00:00+00:00",
+        )
+    c = TestClient(make_app(reports_root))
+    d = c.get("/api/flaky").json()
+    assert d["min_score"] == 0.1 and d["flaky"] == []  # lone blip filtered out
+    monkeypatch.setattr(flaky_mod, "get_flaky_min_score", lambda: 0.0)
+    assert {f["node_id"] for f in c.get("/api/flaky").json()["flaky"]} == {
+        "a"
+    }  # floor off
+
+
+def test_flaky_window_param_overrides_default(reports_root):
+    for i, o in enumerate(["failed", "passed", "passed", "passed"], start=1):
+        write_tests(
+            reports_root,
+            ReportRef("dag", f"r{i}", "t", 1),
+            [["a", o]],
+            created_at=f"2026-06-0{i}T00:00:00+00:00",
+        )
+    c = TestClient(make_app(reports_root))
+    assert c.get("/api/flaky?window=2").json()["flaky"] == []  # last 2 both passed
+    d = c.get("/api/flaky?window=4").json()
+    assert d["window"] == 4 and {f["node_id"] for f in d["flaky"]} == {"a"}
+
+
+def test_flaky_quarantine_threshold_from_config(reports_root, monkeypatch):
+    import airflow_pytest_plugin.web.routes.flaky as flaky_mod
+
+    # a single mid blip -> score ~0.67; a high threshold leaves it un-quarantined
+    for i, o in enumerate(["passed", "passed", "failed", "passed"], start=1):
+        write_tests(
+            reports_root,
+            ReportRef("dag", f"r{i}", "t", 1),
+            [["a", o]],
+            created_at=f"2026-06-0{i}T00:00:00+00:00",
+        )
+    monkeypatch.setattr(flaky_mod, "get_flaky_quarantine_score", lambda: 0.9)
+    a = TestClient(make_app(reports_root)).get("/api/flaky").json()["flaky"][0]
+    assert a["quarantined"] is False  # score ~0.67 < 0.9
 
 
 def test_flaky_needs_two_runs(reports_root):

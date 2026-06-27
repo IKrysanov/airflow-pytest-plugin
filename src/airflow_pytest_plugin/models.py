@@ -117,6 +117,19 @@ class ReportSummary:
         }
 
 
+def run_succeeds(passed: int, failed: int, errors: int, threshold: float) -> bool:
+    """Whether a run counts as successful at a given pass-rate ``threshold`` (0–1).
+
+    The rate is over *executed* tests -- ``passed / (passed + failed + errors)`` --
+    so skipped tests neither help nor hurt; a run with nothing executed is a pass.
+    At ``threshold == 1.0`` this is exactly "no failures or errors".
+    """
+    executed = passed + failed + errors
+    if executed <= 0:
+        return True
+    return passed / executed >= threshold
+
+
 @dataclass(frozen=True)
 class CaseView:
     """One test case, flattened for the detail table."""

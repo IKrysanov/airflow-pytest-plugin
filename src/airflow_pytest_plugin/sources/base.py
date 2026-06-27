@@ -59,3 +59,11 @@ class ReportSource(ABC):
         (default: unsupported).
         """
         return None
+
+    def report_size(self, ref: ReportRef) -> int:
+        """Bytes one report occupies on the backing store (``0`` if unknown).
+
+        Used by size-based retention. Optional capability (default: ``0``, which
+        leaves the size policy inert for sources that can't measure themselves).
+        """
+        return 0
