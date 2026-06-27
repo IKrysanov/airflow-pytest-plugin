@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-06-27
+
+### Added
+- **Retention / auto-cleanup** — opt-in deletion of old runs by **age**
+  (`AIRFLOW_PYTEST_RETENTION_MAX_AGE_DAYS`), **count** per dag·task
+  (`…_MAX_RUNS`), or total **size** (`…_MAX_TOTAL_MB`); env or `[pytest_reports]`
+  cfg. Schedule the exported `prune_reports` callable from a maintenance DAG (it
+  also takes a `RetentionPolicy` and a `dry_run` flag). The newest run of each
+  dag·task is always kept, and cleanup is scheduler-driven — the plugin never
+  deletes on its own.
+- **Flaky, deeper** — `/api/flaky` now reports a **flakiness score** (flip rate
+  0–1, shown with an explanatory tooltip), a **trend** (`up`/`down`/`flat`, recent
+  vs older half) and a **quarantine** flag (score ≥
+  `AIRFLOW_PYTEST_FLAKY_QUARANTINE_SCORE`, default `0.5`). A **minimum-score floor**
+  (`AIRFLOW_PYTEST_FLAKY_MIN_SCORE`, default `0.1`) drops near-steady tests — e.g. a
+  lone failure in a long passing history — out of the list. The flaky modal gains an
+  analysis-window selector and a quarantined-only filter; the home flaky panel shows
+  score + trend and gains its own **search box** and **quarantined-only** toggle. The
+  default window is configurable (`AIRFLOW_PYTEST_FLAKY_WINDOW`, default `30`).
+
+- **Chart run-filter** — ticking runs in the list now filters the history chart to
+  just those bars (empty selection = all), so you can read the trend of a chosen
+  subset; a "show all" affordance on the chart clears it.
+- **Configurable success threshold** — a run now counts as successful (the *Passing
+  runs* KPI and the PASS status) when its pass rate over *executed* tests is at or
+  above `AIRFLOW_PYTEST_SUCCESS_THRESHOLD` (env or cfg, default `0.85`); skipped
+  tests are excluded, and `1.0` keeps the old strict "zero failures" behaviour.
+
+### Fixed
+- Test-history modal no longer scrolls horizontally on a long test name (it wraps).
+
 ## [0.3.0] - 2026-06-25
 
 Cross-run analytics: flaky detection, history, comparison, and a test catalogue.
@@ -120,7 +151,8 @@ the Airflow 3 web UI.
 - CI/CD: lint, type-check, unit (py3.10–3.13) + Airflow 3 integration matrices,
   CodeQL, OpenSSF Scorecard, DCO, and Trusted-Publishing release workflows.
 
-[Unreleased]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.1.0...v0.2.0

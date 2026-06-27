@@ -143,6 +143,13 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .chart-card { margin-bottom: 18px; padding: 14px 16px 8px; }
   .chart-head { display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
     font-size: 13px; font-weight: 600; color: var(--muted); margin-bottom: 6px; }
+  /* "Showing N selected · show all" note when ticked runs filter the chart. */
+  .chart-filter { display: inline-flex; align-items: center; gap: 8px; font-weight: 500;
+    color: var(--primary); }
+  .chart-clear { border: 0; background: none; color: var(--primary); cursor: pointer;
+    font: inherit; font-weight: 600; text-decoration: underline; padding: 0; }
+  .chart-clear:hover { opacity: .8; }
+  .chart-clear:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; border-radius: 3px; }
   .legend { display: inline-flex; gap: 6px; flex-wrap: wrap; }
   .legend button { display: inline-flex; align-items: center; gap: 5px; border: 0;
     background: none; color: var(--fg); cursor: pointer; font: inherit; font-weight: 500;
@@ -196,6 +203,11 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .board { display: flex; gap: 16px; align-items: stretch; margin-bottom: 18px; }
   .board > .card { flex: 1 1 0; min-width: 0; margin-bottom: 0; }
   .flaky-card { padding: 14px 16px; display: flex; flex-direction: column; }
+  /* Flaky panel controls: a search field + a quarantined-only toggle. */
+  .flk-board-ctrls { display: flex; align-items: center; gap: 12px; margin: 2px 0 10px; }
+  .flk-board-ctrls .case-q { flex: 1 1 auto; max-width: none; height: 30px; }
+  .flk-board-only { display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto;
+    white-space: nowrap; color: var(--muted); font-size: 12.5px; cursor: pointer; }
   .flaky-scroll { flex: 1 1 auto; min-height: 110px; max-height: 132px; overflow-y: auto;
     overscroll-behavior-y: contain; scrollbar-width: thin; }
   .fb-row { display: flex; align-items: center; gap: 10px; padding: 7px 2px;
@@ -204,8 +216,9 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .fb-row:hover { background: var(--surface-2); }
   .fb-main { flex: 1 1 auto; min-width: 0; }
   .fb-node { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .fb-sub { display: block; color: var(--muted); font-size: 11px;
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* dag·task line carries the quarantine badge: the text truncates, the badge stays. */
+  .fb-sub { display: flex; align-items: center; color: var(--muted); font-size: 11px; }
+  .fb-dagtask { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
   .fb-meta { color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; flex: 0 0 auto; }
   .fb-empty { color: var(--muted); font-size: 12.5px; padding: 16px 2px; }
   @media (max-width: 860px) { .board { flex-direction: column; } }
@@ -285,18 +298,20 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .bulk-del:focus-visible, .bulk-close:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
   /* Checkboxes styled like Airflow's (Chakra): rounded square, brand-blue + white tick when on. */
   .sel-cell { width: 1%; white-space: nowrap; padding-right: 0; }
-  .sel-cell input[type="checkbox"], #case-grp {
+  .sel-cell input[type="checkbox"], #case-grp, #flk-qonly, #flk-board-qonly {
     appearance: none; -webkit-appearance: none; margin: 0; width: 16px; height: 16px;
     cursor: pointer; vertical-align: middle; background: var(--surface);
     border: 1px solid var(--border); border-radius: 4px; flex: 0 0 auto;
     display: inline-grid; place-content: center; transition: background .12s, border-color .12s; }
-  .sel-cell input[type="checkbox"]:hover, #case-grp:hover { border-color: var(--primary); }
-  .sel-cell input[type="checkbox"]:focus-visible, #case-grp:focus-visible {
-    outline: 2px solid var(--ring); outline-offset: 1px; }
-  .sel-cell input[type="checkbox"]:checked, #case-grp:checked,
-  .sel-cell input[type="checkbox"]:indeterminate {
+  .sel-cell input[type="checkbox"]:hover, #case-grp:hover, #flk-qonly:hover,
+  #flk-board-qonly:hover { border-color: var(--primary); }
+  .sel-cell input[type="checkbox"]:focus-visible, #case-grp:focus-visible, #flk-qonly:focus-visible,
+  #flk-board-qonly:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
+  .sel-cell input[type="checkbox"]:checked, #case-grp:checked, #flk-qonly:checked,
+  #flk-board-qonly:checked, .sel-cell input[type="checkbox"]:indeterminate {
     background: var(--primary); border-color: var(--primary); }
-  .sel-cell input[type="checkbox"]:checked::after, #case-grp:checked::after {
+  .sel-cell input[type="checkbox"]:checked::after, #case-grp:checked::after, #flk-qonly:checked::after,
+  #flk-board-qonly:checked::after {
     content: ""; width: 4px; height: 8px; border: solid #fff; border-width: 0 2px 2px 0;
     transform: rotate(45deg) translate(-0.5px, -1px); }
   .sel-cell input[type="checkbox"]:indeterminate::after {
@@ -410,6 +425,24 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .hist-row .when { color: var(--muted); }
   .fk-row .fk-meta, .hist-row .dur { color: var(--muted); white-space: nowrap;
     font-variant-numeric: tabular-nums; }
+  /* Test-history node header wraps so a long node id never scrolls horizontally. */
+  .hist-node { overflow-wrap: anywhere; color: var(--muted); margin-bottom: 8px; }
+  /* Flaky-deeper bits: score, trend arrow, quarantine + list badges, modal controls. */
+  .flk-score { color: var(--fg); font-variant-numeric: tabular-nums; }
+  .flk-trend { font-weight: 700; }
+  .flk-trend.up { color: var(--fail); }
+  .flk-trend.down { color: var(--pass); }
+  .flk-trend.flat { color: var(--muted); }
+  /* Quarantine badge: em-sized so it scales to whatever line it sits on, and
+     flex:0 0 auto so it's never clipped by a neighbour's ellipsis. */
+  .flk-q { flex: 0 0 auto; font-size: 0.82em; font-weight: 700; text-transform: uppercase;
+    letter-spacing: .03em; color: #fff; background: var(--fail); border-radius: 4px;
+    padding: 0 5px; line-height: 1.6; margin-left: 6px; vertical-align: middle; }
+  .flk-ctrls { display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    margin: 0 0 12px; font-size: 12.5px; color: var(--muted); }
+  .flk-ctrls label { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+  .flk-ctrls select { height: 30px; color: var(--fg); background: var(--surface-2);
+    border: 1px solid var(--border); border-radius: 8px; padding: 0 8px; }
   .case-hist { background: none; border: 0; color: var(--primary); cursor: pointer;
     font: inherit; font-size: 12px; padding: 0 0 8px; display: inline-flex; align-items: center; gap: 5px; }
   .case-hist svg { width: 14px; height: 14px; }
@@ -527,6 +560,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     <div class="card chart-card" id="chart-card" hidden>
       <div class="chart-head">
         <span data-i18n="history">Recent runs</span>
+        <span class="chart-filter" id="chart-filter" hidden></span>
         <span class="legend" id="legend"></span>
         <span style="flex:1"></span>
         <span class="chart-nav" id="chart-nav"></span>
@@ -538,6 +572,12 @@ _INDEX_HTML = r"""<!DOCTYPE html>
         <span data-i18n="flakyTitle">Flaky tests</span>
         <span style="flex:1"></span>
         <span class="muted" id="flaky-count"></span>
+      </div>
+      <div class="flk-board-ctrls">
+        <input id="flk-board-q" class="case-q" type="text" data-i18n-ph="flkSearch"
+          data-i18n-al="flkSearch" placeholder="filter flaky tests…" />
+        <label class="flk-board-only"><input type="checkbox" id="flk-board-qonly" />
+          <span data-i18n="flkQuarantinedOnly">Quarantined only</span></label>
       </div>
       <div class="flaky-scroll" id="flaky-list"></div>
     </div>
@@ -675,6 +715,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       filterDag: "filter dag_id", filterTask: "filter task_id", filterRun: "filter run_id",
       filterDagAl: "Filter by dag_id", filterTaskAl: "Filter by task_id", filterRunAl: "Filter by run_id",
       history: "Recent runs", copyLink: "Copy link", copied: "Copied",
+      chartSelected: "showing {n} selected", chartShowAll: "show all",
       closeReport: "Close report", ofWord: "of", testsWord: "tests",
       apiDocs: "API docs", linksAl: "Links & documentation", ghItem: "GitHub",
       benchTitle: "Test durations (10s buckets)", uniqueTitle: "Unique tests",
@@ -699,7 +740,15 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       cmp_added: "Added", cmp_removed: "Removed",
       flakyTitle: "Flaky tests", flakyBtn: "Flaky tests",
       flakyBtnAl: "Flaky tests in recent runs", flakyFail: "Failed to load flaky tests: ",
-      noFlaky: "No flaky tests in the recent runs.", flkFlips: "flips", flkFailed: "failed",
+      noFlaky: "No flaky tests in the recent runs.", flkFailed: "failed",
+      flkSearch: "filter flaky tests…", flkNoMatch: "No flaky tests match the filter.",
+      flkWindow: "Analysis window:", flkWinOpt: "last {n} runs",
+      flkWindowTip: "How many recent runs of this dag·task to scan for flakiness",
+      flkQuarantinedOnly: "Quarantined only",
+      flkQuarantine: "quarantine", flkQuarantineTip: "Flaky enough to quarantine",
+      flkScoreTip: "Flakiness: how often the result flips between pass and fail",
+      flkTrendUp: "Flaking more lately", flkTrendDown: "Calming down",
+      flkTrendFlat: "Steady trend",
       historyTitle: "Test history", historyBtn: "History",
       historyFail: "Failed to load history: ", noHistory: "No history for this test.",
       histDidntRun: "did not run",
@@ -724,6 +773,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       filterDag: "фильтр dag_id", filterTask: "фильтр task_id", filterRun: "фильтр run_id",
       filterDagAl: "Фильтр по dag_id", filterTaskAl: "Фильтр по task_id", filterRunAl: "Фильтр по run_id",
       history: "Последние прогоны", copyLink: "Копировать ссылку", copied: "Скопировано",
+      chartSelected: "показаны выбранные: {n}", chartShowAll: "показать все",
       closeReport: "Закрыть отчёт", ofWord: "из", testsWord: "тестов",
       apiDocs: "Документация API", linksAl: "Ссылки и документация", ghItem: "GitHub",
       benchTitle: "Время выполнения тестов (по 10с)", uniqueTitle: "Уникальные тесты",
@@ -748,7 +798,16 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       cmp_added: "Добавлены", cmp_removed: "Удалены",
       flakyTitle: "Нестабильные тесты", flakyBtn: "Нестабильные",
       flakyBtnAl: "Нестабильные тесты за последние прогоны", flakyFail: "Не удалось загрузить: ",
-      noFlaky: "Нестабильных тестов за последние прогоны нет.", flkFlips: "перекл.", flkFailed: "падений",
+      noFlaky: "Нестабильных тестов за последние прогоны нет.", flkFailed: "падений",
+      flkSearch: "поиск нестабильных тестов…",
+      flkNoMatch: "Под фильтр не попал ни один нестабильный тест.",
+      flkWindow: "Окно анализа:", flkWinOpt: "последние {n} прогонов",
+      flkWindowTip: "Сколько последних прогонов этого dag·task сканировать на нестабильность",
+      flkQuarantinedOnly: "Только карантин",
+      flkQuarantine: "карантин", flkQuarantineTip: "Достаточно нестабилен для карантина",
+      flkScoreTip: "Нестабильность: как часто результат скачет между pass и fail",
+      flkTrendUp: "Стал чаще флакать", flkTrendDown: "Стабилизируется",
+      flkTrendFlat: "Тренд ровный",
       historyTitle: "История теста", historyBtn: "История",
       historyFail: "Не удалось загрузить историю: ", noHistory: "Истории по этому тесту нет.",
       histDidntRun: "не запускался",
@@ -1177,11 +1236,19 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   function renderChart() {
     renderLegend();
     var card = document.getElementById("chart-card");
-    // Chronological (oldest -> newest).
-    var data = reports.slice().sort(function (a, b) {
+    // Ticked runs in the list filter the chart to their bars only (empty = all),
+    // so you can pick a few runs and read just their trend.
+    var selActive = selectedIds.size > 0;
+    var data = reports.slice().filter(function (r) {
+      return !selActive || selectedIds.has(r.id);
+    }).sort(function (a, b) {
       return String(a.created_at || "") < String(b.created_at || "") ? -1 : 1;
     });
-    if (data.length < 2) { card.hidden = true; document.getElementById("chart-nav").innerHTML = ""; return; }
+    renderChartFilterNote(selActive, data.length);
+    // A real trend needs >=2 bars; but when the user has picked runs, honour even one.
+    if (data.length < (selActive ? 1 : 2)) {
+      card.hidden = true; document.getElementById("chart-nav").innerHTML = ""; return;
+    }
     card.hidden = false;
 
     var win = data;            // every run; the strip scrolls once past CHART_VISIBLE
@@ -1248,6 +1315,24 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       chartScroll = barsEl.scrollLeft; updateChartArrows(barsEl);
     });
     enableChartDrag(barsEl);
+  }
+
+  function renderChartFilterNote(active, shown) {
+    var note = document.getElementById("chart-filter");
+    if (!note) return;
+    if (!active) { note.hidden = true; note.innerHTML = ""; return; }
+    note.hidden = false;
+    note.innerHTML = esc(t("chartSelected").replace("{n}", shown))
+      + ' <button type="button" class="chart-clear" id="chart-clear">'
+      + esc(t("chartShowAll")) + "</button>";
+    var clr = document.getElementById("chart-clear");
+    if (clr) clr.addEventListener("click", clearSelection);
+  }
+
+  function clearSelection() {
+    selectedIds.clear();
+    listEl.querySelectorAll(".sel").forEach(function (cb) { cb.checked = false; });
+    syncSelAll(); updateBulkBar(); renderChart();
   }
 
   function sortReports() {
@@ -1345,7 +1430,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       cb.addEventListener("change", function () {
         var id = cb.getAttribute("data-id");
         if (cb.checked) selectedIds.add(id); else selectedIds.delete(id);
-        syncSelAll(); updateBulkBar();
+        syncSelAll(); updateBulkBar(); renderChart();  // chart follows the selection
       });
     });
     var selAll = document.getElementById("sel-all");
@@ -1356,7 +1441,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
         if (selAll.checked) selectedIds.add(id); else selectedIds.delete(id);
       });
       selAll.indeterminate = false;
-      updateBulkBar();
+      updateBulkBar(); renderChart();
     });
     syncSelAll(); updateBulkBar();
   }
@@ -1381,11 +1466,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       + '<button type="button" class="bulk-close" id="bulk-clear" aria-label="' + esc(t("clearSel"))
       + '"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"'
       + ' stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg></button>';
-    document.getElementById("bulk-clear").addEventListener("click", function () {
-      selectedIds.clear();
-      listEl.querySelectorAll(".sel").forEach(function (cb) { cb.checked = false; });
-      syncSelAll(); updateBulkBar();
-    });
+    document.getElementById("bulk-clear").addEventListener("click", clearSelection);
     document.getElementById("bulk-del").addEventListener("click", function () {
       var ids = []; selectedIds.forEach(function (id) { ids.push(id); });
       openConfirm(ids, "");
@@ -1456,13 +1537,24 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     if (!box) return;
     var dag = document.getElementById("f-dag").value.trim().toLowerCase();
     var task = document.getElementById("f-task").value.trim().toLowerCase();
+    var qEl = document.getElementById("flk-board-q");
+    var q = qEl ? qEl.value.trim().toLowerCase() : "";
+    var qOnlyEl = document.getElementById("flk-board-qonly");
+    var qOnly = !!(qOnlyEl && qOnlyEl.checked);
     var rows = allFlaky.filter(function (f) {
-      return (!dag || f.dag_id.toLowerCase().indexOf(dag) !== -1)
-        && (!task || f.task_id.toLowerCase().indexOf(task) !== -1);
+      if (dag && f.dag_id.toLowerCase().indexOf(dag) === -1) return false;
+      if (task && f.task_id.toLowerCase().indexOf(task) === -1) return false;
+      if (qOnly && !f.quarantined) return false;
+      if (q && (f.node_id + " " + f.dag_id + " " + f.task_id).toLowerCase().indexOf(q) === -1) {
+        return false;
+      }
+      return true;
     });
     document.getElementById("flaky-count").textContent = rows.length ? String(rows.length) : "";
     if (!rows.length) {
-      box.innerHTML = '<div class="fb-empty">' + esc(t("noFlaky")) + "</div>";
+      // Distinguish "nothing flaky" from "filtered everything out".
+      var msg = allFlaky.length ? "flkNoMatch" : "noFlaky";
+      box.innerHTML = '<div class="fb-empty">' + esc(t(msg)) + "</div>";
       return;
     }
     box.innerHTML = rows.map(function (f) {
@@ -1470,8 +1562,9 @@ _INDEX_HTML = r"""<!DOCTYPE html>
         + '" data-node="' + esc(f.node_id) + '"><span class="ostrip">'
         + (f.recent || []).map(outcomeDot).join("") + "</span>"
         + '<span class="fb-main"><span class="fb-node mono">' + esc(f.node_id) + "</span>"
-        + '<span class="fb-sub">' + esc(f.dag_id + " · " + f.task_id) + "</span></span>"
-        + '<span class="fb-meta">' + f.flips + " " + esc(t("flkFlips")) + "</span></div>";
+        + '<span class="fb-sub"><span class="fb-dagtask">' + esc(f.dag_id + " · " + f.task_id)
+        + "</span>" + quarantineBadge(f) + "</span></span>"
+        + '<span class="fb-meta">' + flakyMeta(f) + "</span></div>";
     }).join("");
     box.querySelectorAll(".fb-row").forEach(function (row) {
       row.addEventListener("click", function () {
@@ -1616,6 +1709,25 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     var col = { passed: "--pass", failed: "--fail", error: "--error", skipped: "--skip" }[o] || "--muted";
     return '<span class="od" style="background:var(' + col + ')" title="'
       + esc(o ? outcomeLabel(o) : t("histDidntRun")) + '"></span>';
+  }
+  // Flaky-deeper renderers, shared by the board and the detail modal.
+  function trendArrow(tr) {
+    var sym = { up: "↑", down: "↓", flat: "→" };
+    var key = { up: "flkTrendUp", down: "flkTrendDown", flat: "flkTrendFlat" };
+    var cls = tr === "up" ? "up" : tr === "down" ? "down" : "flat";
+    return '<span class="flk-trend ' + cls + '" title="' + esc(t(key[tr] || "flkTrendFlat"))
+      + '">' + (sym[tr] || "→") + "</span>";
+  }
+  function flakyMeta(f) {
+    // flakiness score (flip rate, explained on hover) + trend + fail ratio
+    return '<span class="flk-score" title="' + esc(t("flkScoreTip")) + '">'
+      + Math.round((f.score || 0) * 100) + "%</span> " + trendArrow(f.trend)
+      + " · " + f.fails + "/" + f.runs + " " + esc(t("flkFailed"));
+  }
+  function quarantineBadge(f) {
+    return f.quarantined
+      ? '<span class="flk-q" title="' + esc(t("flkQuarantineTip")) + '">' + esc(t("flkQuarantine")) + "</span>"
+      : "";
   }
   // The most-recent earlier run of the same dag·task (for "compare to previous").
   function previousRun(rec) {
@@ -2267,34 +2379,67 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   compareDlg.addEventListener("close", updateParentDim);
   closeOnBackdrop(compareDlg, closeCompare);
 
-  // Flaky tests: which tests in this dag·task both pass and fail over recent runs.
+  // Flaky tests for one dag·task: score/trend/quarantine, a window selector, and a
+  // quarantined-only filter. The controls live in a fixed shell; only the list re-renders.
   var flakyDlg = document.getElementById("flaky");
   var fkBody = document.getElementById("fk-body");
+  var FLK_WINDOWS = [10, 30, 50, 100, 200];
+  var fkState = { dag: null, task: null, window: 30, qOnly: false, rows: [] };
   function openFlaky(dag, task) {
+    fkState.dag = dag; fkState.task = task; fkState.window = 30; fkState.qOnly = false;
     if (typeof flakyDlg.showModal === "function") { if (!flakyDlg.open) flakyDlg.showModal(); }
     else flakyDlg.setAttribute("open", "");
     updateParentDim();
-    fkBody.innerHTML = '<div class="state"><div class="skeleton" style="width:40%;margin:0 auto"></div></div>';
-    var q = new URLSearchParams({ dag_id: dag, task_id: task });
+    fkBody.innerHTML = '<div class="flk-ctrls"><label title="' + esc(t("flkWindowTip")) + '">'
+      + esc(t("flkWindow")) + ' <select id="flk-win">'
+      + FLK_WINDOWS.map(function (w) {
+          return '<option value="' + w + '"' + (w === fkState.window ? " selected" : "") + ">"
+            + esc(t("flkWinOpt").replace("{n}", w)) + "</option>";
+        }).join("")
+      + "</select></label><label><input type=\"checkbox\" id=\"flk-qonly\"> "
+      + esc(t("flkQuarantinedOnly")) + "</label></div><div id=\"flk-list\"></div>";
+    document.getElementById("flk-win").addEventListener("change", function () {
+      fkState.window = +this.value; loadFlakyModal();
+    });
+    document.getElementById("flk-qonly").addEventListener("change", function () {
+      fkState.qOnly = this.checked; fillFlakyRows();
+    });
+    loadFlakyModal();
+  }
+  function loadFlakyModal() {
+    var listEl = document.getElementById("flk-list");
+    if (listEl) {
+      listEl.innerHTML = '<div class="state"><div class="skeleton" style="width:40%;margin:0 auto"></div></div>';
+    }
+    var q = new URLSearchParams({
+      dag_id: fkState.dag, task_id: fkState.task, window: String(fkState.window),
+    });
     fetch(API + "flaky?" + q.toString())
       .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
-      .then(renderFlaky)
+      .then(function (d) { fkState.rows = d.flaky || []; fillFlakyRows(); })
       .catch(function (e) {
-        fkBody.innerHTML = '<div class="state c-fail">' + esc(t("flakyFail") + e.message) + "</div>";
+        var el = document.getElementById("flk-list");
+        if (el) el.innerHTML = '<div class="state c-fail">' + esc(t("flakyFail") + e.message) + "</div>";
       });
   }
-  function closeFlaky() { if (flakyDlg.open) flakyDlg.close(); else flakyDlg.removeAttribute("open"); }
-  function renderFlaky(d) {
-    var rows = d.flaky || [];
-    if (!rows.length) { fkBody.innerHTML = '<div class="state">' + esc(t("noFlaky")) + "</div>"; return; }
-    fkBody.innerHTML = rows.map(function (f) {
-      var meta = f.flips + " " + t("flkFlips") + " · " + f.fails + "/" + f.runs + " " + t("flkFailed");
+  function fillFlakyRows() {
+    var listEl = document.getElementById("flk-list");
+    if (!listEl) return;
+    var rows = fkState.qOnly
+      ? fkState.rows.filter(function (f) { return f.quarantined; })
+      : fkState.rows;
+    if (!rows.length) {
+      listEl.innerHTML = '<div class="state">' + esc(t("noFlaky")) + "</div>";
+      return;
+    }
+    listEl.innerHTML = rows.map(function (f) {
       return '<div class="fk-row"><span class="ostrip">'
         + (f.recent || []).map(outcomeDot).join("") + "</span>"
-        + '<span class="node mono">' + esc(f.node_id) + "</span>"
-        + '<span class="fk-meta">' + esc(meta) + "</span></div>";
+        + '<span class="node mono">' + esc(f.node_id) + quarantineBadge(f) + "</span>"
+        + '<span class="fk-meta">' + flakyMeta(f) + "</span></div>";
     }).join("");
   }
+  function closeFlaky() { if (flakyDlg.open) flakyDlg.close(); else flakyDlg.removeAttribute("open"); }
   document.getElementById("fk-close").addEventListener("click", closeFlaky);
   flakyDlg.addEventListener("close", updateParentDim);
   closeOnBackdrop(flakyDlg, closeFlaky);
@@ -2318,7 +2463,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   function closeHistory() { if (historyDlg.open) historyDlg.close(); else historyDlg.removeAttribute("open"); }
   function renderHistory(d) {
     var rows = d.history || [];
-    var head = '<div class="cbody mono">' + esc(d.node_id) + "</div>";
+    var head = '<div class="hist-node mono">' + esc(d.node_id) + "</div>";
     if (!rows.length) { histBody.innerHTML = head + '<div class="state">' + esc(t("noHistory")) + "</div>"; return; }
     histBody.innerHTML = head + rows.map(function (h) {
       var label = h.outcome ? outcomeLabel(h.outcome) : t("histDidntRun");
@@ -2368,6 +2513,11 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   ["f-dag", "f-task", "f-run"].forEach(function (id) {
     document.getElementById(id).addEventListener("input", applyFilter);
   });
+  // Flaky-panel search + quarantined-only filter: client-side, re-render in place.
+  var flkBoardQ = document.getElementById("flk-board-q");
+  if (flkBoardQ) flkBoardQ.addEventListener("input", renderFlakyBoard);
+  var flkBoardQOnly = document.getElementById("flk-board-qonly");
+  if (flkBoardQOnly) flkBoardQOnly.addEventListener("change", renderFlakyBoard);
   bindSuggest("f-dag", "sg-dag", "dag_id");
   bindSuggest("f-task", "sg-task", "task_id");
   bindSuggest("f-run", "sg-run", "run_id");

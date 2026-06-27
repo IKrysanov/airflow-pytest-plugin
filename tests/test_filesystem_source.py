@@ -411,6 +411,48 @@ def test_test_outcomes_none_on_corrupt_junit(reports_root):
     assert FileSystemReportSource(report_root=reports_root).test_outcomes(ref) is None
 
 
+def test_success_follows_pass_rate_threshold(reports_root, monkeypatch):
+    from airflow_pytest_plugin import config
+
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref, passed=9, failed=1)  # 90% pass, one failure
+    monkeypatch.setattr(config, "get_conf_value", lambda s, k: None)
+
+    # Default threshold (0.85): a 90% run counts as successful despite the failure.
+    monkeypatch.delenv(config.SUCCESS_THRESHOLD_ENV, raising=False)
+    src = FileSystemReportSource(report_root=reports_root)
+    assert src.list_summaries()[0].success is True
+    assert src.get_detail(ref).summary.success is True
+
+    # Raise the bar above 90% -> the same run is no longer successful.
+    monkeypatch.setenv(config.SUCCESS_THRESHOLD_ENV, "0.95")
+    strict = FileSystemReportSource(report_root=reports_root)
+    assert strict.list_summaries()[0].success is False
+    assert strict.get_detail(ref).summary.success is False
+
+
+def test_report_size_zero_for_traversal_or_missing(tmp_path):
+    root = tmp_path / "reports"
+    root.mkdir()
+    src = FileSystemReportSource(report_root=str(root))
+    assert src.report_size(ReportRef("..", ".", ".", 1)) == 0  # escapes root -> 0
+    assert src.report_size(ReportRef("dag", "absent", "task", 1)) == 0  # no dir -> 0
+
+
+def test_report_size_skips_vanished_files(reports_root, monkeypatch):
+    # A file disappearing mid-walk must be skipped, not crash the measurement.
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref, passed=1)
+    src = FileSystemReportSource(report_root=reports_root)
+    assert src.report_size(ref) > 0  # sanity: real bytes before the patch
+
+    def _boom(_path):
+        raise OSError("vanished")
+
+    monkeypatch.setattr("os.path.getsize", _boom)
+    assert src.report_size(ref) == 0  # every file skipped -> 0, no exception
+
+
 def test_base_source_optional_capabilities_default_none():
     from airflow_pytest_plugin.sources.base import ReportSource
 
@@ -428,3 +470,4 @@ def test_base_source_optional_capabilities_default_none():
     ref = ReportRef("d", "r", "t", 1)
     assert m.allure_archive(ref) is None
     assert m.test_outcomes(ref) is None
+    assert m.report_size(ref) == 0  # size policy stays inert for such sources

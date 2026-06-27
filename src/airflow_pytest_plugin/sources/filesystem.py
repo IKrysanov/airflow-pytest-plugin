@@ -29,9 +29,15 @@ from typing import Any
 
 from airflow_pytest_operator import JUnitResultParser
 
-from ..config import get_reports_root, get_scan_cache_ttl
+from ..config import get_reports_root, get_scan_cache_ttl, get_success_threshold
 from ..layout import ALLURE_DIRNAME, META_FILENAME, REPORT_FILENAME, ReportLayout
-from ..models import CaseView, ReportDetail, ReportRef, ReportSummary
+from ..models import (
+    CaseView,
+    ReportDetail,
+    ReportRef,
+    ReportSummary,
+    run_succeeds,
+)
 from .base import ReportSource
 
 try:  # prefer the hardened parser when present (matches the operator)
@@ -86,11 +92,12 @@ class FileSystemReportSource(ReportSource):
         if not root.is_dir():
             return []
         out: list[ReportSummary] = []
+        threshold = get_success_threshold()  # resolve once per scan
         for meta_file in root.rglob(META_FILENAME):
             meta = self._load_meta(meta_file)
             if meta is None:
                 continue
-            summary = self._summary_from_meta(meta)
+            summary = self._summary_from_meta(meta, threshold)
             if summary is not None:
                 out.append(summary)
         # Newest first: ISO-8601 created_at sorts chronologically; missing sorts last.
@@ -143,9 +150,10 @@ class FileSystemReportSource(ReportSource):
         if not os.path.exists(report_path):
             return None
 
-        # Prefer the stored summary (exact exit_code/success); fall back to parsed XML.
+        # Prefer the stored counts; success is (re)derived from the pass-rate threshold.
+        threshold = get_success_threshold()
         meta = self._load_meta(Path(os.path.join(report_dir, META_FILENAME)))
-        summary = self._summary_from_meta(meta) if meta is not None else None
+        summary = self._summary_from_meta(meta, threshold) if meta is not None else None
 
         try:
             result = self._parser.parse(report_path)
@@ -162,7 +170,9 @@ class FileSystemReportSource(ReportSource):
                 skipped=result.skipped,
                 errors=result.errors,
                 duration=result.duration,
-                success=result.success,
+                success=run_succeeds(
+                    result.passed, result.failed, result.errors, threshold
+                ),
                 created_at=None,
             )
 
@@ -227,6 +237,20 @@ class FileSystemReportSource(ReportSource):
         self._invalidate_scan()  # the deleted run must drop out of the list at once
         _log.info("Deleted report %s", target)
         return True
+
+    def report_size(self, ref: ReportRef) -> int:
+        """Total bytes of the report's directory (``0`` if it resolves nowhere)."""
+        target = self._safe_dir(ref)
+        if target is None or not os.path.isdir(target):
+            return 0
+        total = 0
+        for base, _dirs, names in os.walk(target):
+            for name in names:
+                try:
+                    total += os.path.getsize(os.path.join(base, name))
+                except OSError:  # a file vanished mid-walk; skip it
+                    continue
+        return total
 
     def _safe_dir(self, ref: ReportRef) -> str | None:
         """The report dir for ``ref`` if it resolves under the root, else ``None``.
@@ -327,7 +351,9 @@ class FileSystemReportSource(ReportSource):
         return data
 
     @staticmethod
-    def _summary_from_meta(meta: dict[str, Any]) -> ReportSummary | None:
+    def _summary_from_meta(
+        meta: dict[str, Any], threshold: float
+    ) -> ReportSummary | None:
         try:
             ref = ReportRef(
                 dag_id=str(meta["dag_id"]),
@@ -341,15 +367,19 @@ class FileSystemReportSource(ReportSource):
             return None
 
         summary = meta.get("summary") or {}
+        passed = int(summary.get("passed", 0))
+        failed = int(summary.get("failed", 0))
+        errors = int(summary.get("errors", 0))
         return ReportSummary(
             ref=ref,
             total=int(summary.get("total", 0)),
-            passed=int(summary.get("passed", 0)),
-            failed=int(summary.get("failed", 0)),
+            passed=passed,
+            failed=failed,
             skipped=int(summary.get("skipped", 0)),
-            errors=int(summary.get("errors", 0)),
+            errors=errors,
             duration=float(summary.get("duration", 0.0)),
-            success=bool(summary.get("success", False)),
+            # success is reader-derived from the pass-rate threshold, not the stored flag.
+            success=run_succeeds(passed, failed, errors, threshold),
             created_at=_opt_str(meta.get("created_at")),
             logical_date=_opt_str(meta.get("logical_date")),
             has_allure=bool(meta.get("allure")),

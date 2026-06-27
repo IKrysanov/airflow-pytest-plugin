@@ -22,6 +22,7 @@ from .config import get_reports_root
 from .layout import ReportLayout
 from .models import CaseView, ReportDetail, ReportRef, ReportSummary
 from .producer import ArchivingResultParser
+from .retention import RetentionPolicy, RetentionResult, prune_reports
 from .sources import FileSystemReportSource, ReportSource
 from .version import __version__ as __version__
 
@@ -38,6 +39,9 @@ __all__ = [
     "ReportDetail",
     "CaseView",
     "ReportLayout",
+    "RetentionPolicy",
+    "RetentionResult",
+    "prune_reports",
     "get_reports_root",
     "create_app",
     "__version__",

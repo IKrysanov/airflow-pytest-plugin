@@ -49,3 +49,26 @@ def test_summary_to_dict_includes_has_allure():
     assert base.to_dict()["has_allure"] is False
     with_allure = ReportSummary(ref, 1, 1, 0, 0, 0, 0.1, True, has_allure=True)
     assert with_allure.to_dict()["has_allure"] is True
+
+
+def test_run_succeeds_pass_rate_threshold():
+    from airflow_pytest_plugin.models import run_succeeds
+
+    # 85% pass over executed tests is the boundary at the default 0.85.
+    assert run_succeeds(passed=17, failed=3, errors=0, threshold=0.85) is True  # 0.85
+    assert run_succeeds(passed=16, failed=4, errors=0, threshold=0.85) is False  # 0.80
+    # Skipped tests are excluded from the rate (denominator = executed only).
+    assert run_succeeds(passed=8, failed=0, errors=0, threshold=0.85) is True
+    # Errors count against the rate just like failures.
+    assert run_succeeds(passed=9, failed=0, errors=1, threshold=0.85) is True  # 0.90
+    assert run_succeeds(passed=8, failed=0, errors=2, threshold=0.85) is False  # 0.80
+
+
+def test_run_succeeds_edges():
+    from airflow_pytest_plugin.models import run_succeeds
+
+    # threshold 1.0 == strict "no failures or errors" (the legacy behaviour).
+    assert run_succeeds(10, 0, 0, 1.0) is True
+    assert run_succeeds(10, 1, 0, 1.0) is False
+    # nothing executed (empty run / all skipped) is a pass.
+    assert run_succeeds(0, 0, 0, 0.85) is True

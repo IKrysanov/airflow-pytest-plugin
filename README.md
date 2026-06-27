@@ -54,9 +54,10 @@ It has two halves that share one on-disk layout:
 ## Screenshots
 
 **Overview** — the run list with the historical chart (per-status legend
-toggles, run numbers, and a carousel beyond 30 runs) beside a **flaky-tests
-panel**, KPI cards (including a clickable **unique tests** count), and Airflow-
-matched colours and font:
+toggles, run numbers, and a carousel beyond 30 runs; **tick runs in the list to
+filter the chart to just their trend**) beside a **flaky-tests panel** (with its
+own search and a quarantined-only toggle), KPI cards (including a clickable
+**unique tests** count), and Airflow-matched colours and font:
 
 ![Pytest Reports — overview](https://raw.githubusercontent.com/IKrysanov/airflow-pytest-plugin/main/docs/screenshots/overview.png)
 
@@ -68,9 +69,10 @@ output on expand:
 ![Pytest Reports — a single run](https://raw.githubusercontent.com/IKrysanov/airflow-pytest-plugin/main/docs/screenshots/detail.png)
 
 **Flaky tests & comparison** — from a run, *Flaky tests* lists the tests that
-both pass and fail across recent runs (with a recent-outcome strip), and
-*Compare to previous* diffs it against the prior run; expanding a case offers its
-full **history**:
+both pass and fail across recent runs, each with a recent-outcome strip, a
+**flakiness score**, a **trend** arrow, and a **quarantine** badge, over a
+configurable analysis window; *Compare to previous* diffs it against the prior
+run; expanding a case offers its full **history**:
 
 ![Pytest Reports — flaky tests](https://raw.githubusercontent.com/IKrysanov/airflow-pytest-plugin/main/docs/screenshots/flaky.png)
 
@@ -185,7 +187,7 @@ runtime. Endpoints (relative to the mount):
 | `GET /api/reports/{report_id}` | one report with per-case rows |
 | `GET /api/failures?dag_id=&run_id=&task_id=` | failed/errored cases across the visible runs |
 | `GET /api/compare?base=&head=` | per-test diff between two runs (newly failed / fixed / …) |
-| `GET /api/flaky?dag_id=&task_id=&window=` | tests that both pass and fail over recent runs |
+| `GET /api/flaky?dag_id=&task_id=&window=` | flaky tests with score, trend, and a quarantine flag |
 | `GET /api/test-history?dag_id=&task_id=&node_id=&limit=` | one test's outcome per run |
 | `GET /api/unique-tests?dag_id=&task_id=&run_id=&full=` | distinct test count (+ list when `full`) |
 | `DELETE /api/reports/{report_id}` | delete a report (RBAC-gated) |
@@ -251,6 +253,13 @@ Download them from a report's detail view, or `GET
 | built-in default | `/opt/airflow/pytest-reports` | fallback |
 | `AIRFLOW_PYTEST_PLUGIN_ENABLE` (env) | `True` | reader on/off — see below |
 | `AIRFLOW_PYTEST_SCAN_CACHE_TTL` (env) | `2.0` | seconds a directory scan is reused (`0` disables) |
+| `AIRFLOW_PYTEST_RETENTION_MAX_AGE_DAYS` (env/cfg) | — | delete runs older than N days |
+| `AIRFLOW_PYTEST_RETENTION_MAX_RUNS` (env/cfg) | — | keep at most N newest runs per dag·task |
+| `AIRFLOW_PYTEST_RETENTION_MAX_TOTAL_MB` (env/cfg) | — | total report-tree budget in MB |
+| `AIRFLOW_PYTEST_FLAKY_WINDOW` (env/cfg) | `30` | default recent runs the flaky detector scans |
+| `AIRFLOW_PYTEST_FLAKY_QUARANTINE_SCORE` (env/cfg) | `0.5` | flakiness score (0–1) that flags a test for quarantine |
+| `AIRFLOW_PYTEST_FLAKY_MIN_SCORE` (env/cfg) | `0.1` | flakiness score (0–1) below which a test is not counted as flaky |
+| `AIRFLOW_PYTEST_SUCCESS_THRESHOLD` (env/cfg) | `0.85` | pass-rate (0–1) over executed tests at/above which a run counts as successful (*Passing runs*); `1.0` = strict, zero failures/errors |
 
 **Enable / disable the reader.** Set `AIRFLOW_PYTEST_PLUGIN_ENABLE` to a falsey
 value (`0`, `false`, `no`, `off`) to stop the plugin registering its UI and API
@@ -270,6 +279,34 @@ single scan for `AIRFLOW_PYTEST_SCAN_CACHE_TTL` seconds (default `2.0`; deletes
 invalidate it immediately). New runs therefore appear within a couple of seconds (or
 on **Refresh**); set it to `0` for no caching, or higher on a very large tree.
 
+## Retention (auto-cleanup)
+
+Reports accumulate forever unless you prune them. Set any of the
+`AIRFLOW_PYTEST_RETENTION_*` knobs above (all opt-in; unset = keep everything) and
+schedule `prune_reports` from a maintenance DAG:
+
+```python
+from airflow import DAG
+from airflow.providers.standard.operators.python import PythonOperator
+from airflow_pytest_plugin import prune_reports
+
+with DAG("pytest_reports_retention", schedule="@daily", catchup=False, ...):
+    PythonOperator(task_id="prune", python_callable=prune_reports)
+```
+
+Each knob is a dimension and they combine as a union — a run is deleted if **any**
+applies:
+
+- **age** — older than `…_MAX_AGE_DAYS`;
+- **count** — beyond the newest `…_MAX_RUNS` of its dag·task;
+- **size** — oldest-first until the tree fits `…_MAX_TOTAL_MB`.
+
+The **newest run of each dag·task is always kept**, so a task's latest result never
+disappears. `prune_reports(dry_run=True)` reports what *would* go without deleting
+(its `RetentionResult` carries `deleted`, `freed_bytes`, `scanned`). Cleanup is
+scheduler-driven — the plugin never deletes on its own. For a custom policy, build a
+`RetentionPolicy(...)` and pass it (`prune_reports(policy)`).
+
 ## Architecture (SOLID)
 
 Mirrors the operator's layering — each piece has one reason to change:
@@ -280,6 +317,7 @@ Mirrors the operator's layering — each piece has one reason to change:
 | `producer.ArchivingResultParser` | write JUnit XML + `meta.json` (extends the operator's parser) |
 | `sources.ReportSource` / `FileSystemReportSource` | read/index reports behind an interface (Dependency Inversion) |
 | `web.create_app` | map HTTP onto a `ReportSource` — knows nothing about the filesystem |
+| `retention` | pure `select_expired` decision + a `prune` orchestrator over any `ReportSource` |
 | `plugin.PytestReportsPlugin` | register the app with Airflow |
 | `compat` | the only module that imports Airflow; version differences resolved once |
 | `models` | JSON-serializable view types; the web layer never sees operator types |

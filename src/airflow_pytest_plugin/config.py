@@ -66,6 +66,104 @@ def get_scan_cache_ttl() -> float:
     return ttl if ttl >= 0 else DEFAULT_SCAN_TTL
 
 
+#: Retention knobs (all opt-in; unset = keep everything). Each reads its env var,
+#: then the matching ``[pytest_reports]`` cfg key. Non-positive/invalid -> unset.
+RETENTION_MAX_AGE_DAYS_ENV = "AIRFLOW_PYTEST_RETENTION_MAX_AGE_DAYS"
+RETENTION_MAX_RUNS_ENV = "AIRFLOW_PYTEST_RETENTION_MAX_RUNS"
+RETENTION_MAX_TOTAL_MB_ENV = "AIRFLOW_PYTEST_RETENTION_MAX_TOTAL_MB"
+
+
+def _positive_int_setting(env_var: str, conf_key: str) -> int | None:
+    raw = os.environ.get(env_var)
+    if raw is None or not raw.strip():
+        raw = get_conf_value(CONF_SECTION, conf_key)
+    if raw is None or not str(raw).strip():
+        return None
+    try:
+        value = int(str(raw).strip())
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def get_retention_max_age_days() -> int | None:
+    """Delete runs older than this many days (``None`` = no age limit)."""
+    return _positive_int_setting(RETENTION_MAX_AGE_DAYS_ENV, "retention_max_age_days")
+
+
+def get_retention_max_runs() -> int | None:
+    """Keep at most this many newest runs per dag·task (``None`` = unlimited)."""
+    return _positive_int_setting(RETENTION_MAX_RUNS_ENV, "retention_max_runs")
+
+
+def get_retention_max_total_mb() -> int | None:
+    """Total report-tree budget in MB (``None`` = unlimited)."""
+    return _positive_int_setting(RETENTION_MAX_TOTAL_MB_ENV, "retention_max_total_mb")
+
+
+#: Flaky-detector defaults (overridable per request via the ``window`` query param).
+FLAKY_WINDOW_ENV = "AIRFLOW_PYTEST_FLAKY_WINDOW"
+DEFAULT_FLAKY_WINDOW = 30
+FLAKY_QUARANTINE_SCORE_ENV = "AIRFLOW_PYTEST_FLAKY_QUARANTINE_SCORE"
+DEFAULT_FLAKY_QUARANTINE_SCORE = 0.5
+#: Flakiness-score floor: below it a test is too steady to count as flaky, so a lone
+#: blip in a long history (a near-zero flip rate) drops off the list.
+FLAKY_MIN_SCORE_ENV = "AIRFLOW_PYTEST_FLAKY_MIN_SCORE"
+DEFAULT_FLAKY_MIN_SCORE = 0.1
+
+
+def get_flaky_window() -> int:
+    """Default number of recent runs the flaky detector looks at per dag·task."""
+    return (
+        _positive_int_setting(FLAKY_WINDOW_ENV, "flaky_window") or DEFAULT_FLAKY_WINDOW
+    )
+
+
+def _unit_float_setting(env_var: str, conf_key: str, default: float) -> float:
+    """A 0–1 float from env, then cfg; default on missing/invalid/out-of-range."""
+    raw = os.environ.get(env_var)
+    if raw is None or not raw.strip():
+        raw = get_conf_value(CONF_SECTION, conf_key)
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        value = float(str(raw).strip())
+    except ValueError:
+        return default
+    return value if 0.0 <= value <= 1.0 else default
+
+
+def get_flaky_quarantine_score() -> float:
+    """Flakiness score (0–1) at/above which a test is flagged for quarantine."""
+    return _unit_float_setting(
+        FLAKY_QUARANTINE_SCORE_ENV,
+        "flaky_quarantine_score",
+        DEFAULT_FLAKY_QUARANTINE_SCORE,
+    )
+
+
+def get_flaky_min_score() -> float:
+    """Flakiness score (0–1) below which a test is NOT counted as flaky."""
+    return _unit_float_setting(
+        FLAKY_MIN_SCORE_ENV, "flaky_min_score", DEFAULT_FLAKY_MIN_SCORE
+    )
+
+
+#: Pass-rate (0–1) at/above which a run counts as successful ("Passing runs"). The
+#: rate is over executed tests, so a run can carry a few failures and still pass.
+#: At 1.0 a run is successful only with zero failures/errors (the strict default of
+#: older versions). 0.85 is a common "good enough" bar (ISTQB defines no fixed number).
+SUCCESS_THRESHOLD_ENV = "AIRFLOW_PYTEST_SUCCESS_THRESHOLD"
+DEFAULT_SUCCESS_THRESHOLD = 0.85
+
+
+def get_success_threshold() -> float:
+    """Pass-rate (0–1) at/above which a run counts as successful."""
+    return _unit_float_setting(
+        SUCCESS_THRESHOLD_ENV, "success_threshold", DEFAULT_SUCCESS_THRESHOLD
+    )
+
+
 def get_reports_root() -> str:
     """Resolve the report root directory (absolute path)."""
     env = os.environ.get(ENV_VAR)
