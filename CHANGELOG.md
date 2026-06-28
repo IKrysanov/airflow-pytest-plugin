@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-06-28
+
+### Added
+- **Group the run list by dag·task (on by default)** — a checkbox over the list
+  (like the run detail's *group by module*) folds the runs into collapsible dag·task
+  groups under a **sortable** dag / task / runs / pass-% / avg-time / status / when
+  header that **reorders the groups** (and, for run columns, the runs too); uncheck
+  it for the flat, paginated list. Each group shows its run count, pass-rate, average
+  duration and last status, and expands to its own **sortable** full column header +
+  runs (first 100) — and that header sorts **only its own group**, independently. A
+  group's checkbox selects all its runs (even while collapsed; *select all* ticks
+  every group), which **focuses the history chart on that group**.
+- **`GET /api/groups`** — runs aggregated by dag·task (count, pass-rate, average
+  duration, newest run's status/time), RBAC-filtered with optional `dag_id` /
+  `task_id`. Lets grouped views and dashboards read group stats without fetching
+  every run (the basis for scaling past in-browser grouping).
+
+### Changed
+- **Swagger / OpenAPI tidied** — every JSON endpoint now documents a real example
+  response (instead of a bare `string`) and the status codes it can return (`400`
+  malformed token, `403` RBAC, `404` not found), so `GET /api/docs` is accurate.
+- The top dag/task/run filters are **debounced** (one re-render after typing settles,
+  not per keystroke) and reset to page 1 / newest as intended.
+
+### Fixed
+- **Responsive board on narrow screens** — the recent-runs chart and flaky panel no
+  longer collapse to a sliver when stacked; each sizes to its content.
+- The grouped **DAG** column header now sits over the dag name (was shifted left by
+  the expander chevron).
+
 ## [0.3.1] - 2026-06-27
 
 ### Added
@@ -157,7 +187,8 @@ the Airflow 3 web UI.
 - CI/CD: lint, type-check, unit (py3.10–3.13) + Airflow 3 integration matrices,
   CodeQL, OpenSSF Scorecard, DCO, and Trusted-Publishing release workflows.
 
-[Unreleased]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.2.0...v0.2.1

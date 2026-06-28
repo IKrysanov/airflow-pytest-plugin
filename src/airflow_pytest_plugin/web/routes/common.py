@@ -51,3 +51,38 @@ def ref_from_token(token: str) -> ReportRef:
         return ReportRef.from_token(token)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+# -- OpenAPI helpers: real example payloads + status codes for Swagger --------
+# Endpoints return a raw JSONResponse, so FastAPI can't infer a schema (Swagger shows
+# an empty "string"). These attach a concrete example to the 200 and document the
+# error codes each route can return.
+
+
+def ok(example: Any, description: str = "Successful response") -> dict[int | str, Any]:
+    """A 200 response documented with a concrete JSON ``example``."""
+    return {
+        200: {
+            "description": description,
+            "content": {"application/json": {"example": example}},
+        }
+    }
+
+
+def _err(detail: str) -> dict[str, Any]:
+    return {"content": {"application/json": {"example": {"detail": detail}}}}
+
+
+#: Reusable error responses (FastAPI's HTTPException body is ``{"detail": "..."}``).
+ERR_400: dict[int | str, Any] = {
+    400: {"description": "Malformed report token.", **_err("malformed report token")}
+}
+ERR_403: dict[int | str, Any] = {
+    403: {
+        "description": "Forbidden — not authorized for this dag (RBAC).",
+        **_err("not authorized"),
+    }
+}
+ERR_404: dict[int | str, Any] = {
+    404: {"description": "Not found.", **_err("report not found")}
+}

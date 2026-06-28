@@ -147,6 +147,24 @@ def test_index_has_feature_markers(client):
         "trend-line",
         "trend-thresh",
         "trend-on",
+        'id="list-grp"',
+        "groupReports",
+        "listGroup",
+        "lgrp",
+        "gsel",
+        "grp-runs",
+        "syncGroupChecks",
+        "groupVal",
+        "groupMore",
+        "gHeadCell",
+        "gsort",
+        "groupArrow",
+        "headCells",
+        "cPassRate",
+        "rsort",
+        "groupRunSort",
+        "runComparator",
+        "cAvgDur",
         "fillCases",
         'id="case-q"',
         'id="links-btn"',
@@ -191,6 +209,7 @@ def test_openapi_and_docs_serve(client):
     doc = spec.json()
     paths = doc["paths"]
     assert "/api/flaky" in paths and "/api/test-history" in paths
+    assert "/api/groups" in paths and paths["/api/groups"]["get"]["tags"] == ["reports"]
     # Routes are grouped into the documented sections; the UI assets stay out of it.
     assert [t["name"] for t in doc["tags"]] == [
         "monitoring",
@@ -205,6 +224,24 @@ def test_openapi_and_docs_serve(client):
     assert paths["/api/version"]["get"]["tags"] == ["monitoring"]
     assert "/icon.svg" not in paths and "/" not in paths  # icons + viewer hidden
     assert paths["/api/flaky"]["get"]["summary"]  # every method has a summary
+
+    # Responses are documented with a real JSON example (not a bare "string") ...
+    def ex(path, method):
+        return paths[path][method]["responses"]["200"]["content"]["application/json"][
+            "example"
+        ]
+
+    assert "reports" in ex("/api/reports", "get")
+    assert ex("/api/groups", "get")["groups"][0]["avg_duration"] is not None
+    assert "flaky" in ex("/api/flaky", "get")
+    # ... and the error status codes each route can return are declared.
+    for path, method in [
+        ("/api/reports/{report_id}", "get"),
+        ("/api/reports/{report_id}", "delete"),
+        ("/api/compare", "get"),
+    ]:
+        codes = set(paths[path][method]["responses"])
+        assert {"400", "403", "404"} <= codes, (path, method, codes)
 
 
 def test_icon_routes(client):
@@ -233,6 +270,63 @@ def test_reports_success_reflects_pass_rate_threshold(reports_root):
     assert r["failed"] == 1 and r["success"] is True
     # The threshold is echoed so the chart can draw the pass-rate gridline.
     assert body["success_threshold"] == 0.85
+
+
+def test_summarize_groups_aggregates_by_dag_task():
+    from airflow_pytest_plugin.models import ReportRef, ReportSummary
+    from airflow_pytest_plugin.web.routes.reports import summarize_groups
+
+    def mk(dag, task, run, created, *, success, errors=0, duration=0.1):
+        return ReportSummary(
+            ReportRef(dag, run, task, 1),
+            1,
+            1 if success else 0,
+            0 if success else 1,
+            0,
+            errors,
+            duration,
+            success,
+            created_at=created,
+        )
+
+    groups = summarize_groups(
+        [
+            mk("d", "t", "r1", "2026-06-01T00:00:00+00:00", success=True, duration=2.0),
+            mk(
+                "d", "t", "r2", "2026-06-03T00:00:00+00:00", success=False, duration=4.0
+            ),  # newest of d·t
+            mk("d", "u", "r3", "2026-06-02T00:00:00+00:00", success=True),
+            mk("d", "e", "r4", "2026-05-01T00:00:00+00:00", success=False, errors=1),
+        ]
+    )
+    by = {(g["dag_id"], g["task_id"]): g for g in groups}
+    assert by[("d", "t")]["runs"] == 2 and by[("d", "t")]["passed"] == 1
+    assert by[("d", "t")]["pass_rate"] == 0.5
+    assert by[("d", "t")]["avg_duration"] == 3.0  # (2.0 + 4.0) / 2
+    assert by[("d", "t")]["last_status"] == "failed"  # newest run (r2) failed
+    assert (
+        by[("d", "u")]["pass_rate"] == 1.0 and by[("d", "u")]["last_status"] == "passed"
+    )
+    assert by[("d", "e")]["last_status"] == "error"  # newest run errored
+    # Ordered by most-recent activity (d·t Jun 3, d·u Jun 2, d·e May 1).
+    assert [(g["dag_id"], g["task_id"]) for g in groups] == [
+        ("d", "t"),
+        ("d", "u"),
+        ("d", "e"),
+    ]
+
+
+def test_groups_endpoint_and_rbac(reports_root):
+    write_report(reports_root, ReportRef("dagA", "r1", "taskX", 1), passed=2)
+    write_report(reports_root, ReportRef("dagA", "r2", "taskX", 1), passed=1, failed=1)
+    write_report(reports_root, ReportRef("dagB", "r3", "taskY", 1), passed=3)
+    body = TestClient(make_app(reports_root)).get("/api/groups").json()
+    by = {(g["dag_id"], g["task_id"]): g for g in body["groups"]}
+    assert body["total"] == 2
+    assert by[("dagA", "taskX")]["runs"] == 2 and by[("dagB", "taskY")]["runs"] == 1
+    # RBAC: a reader denied dagB sees only its permitted group.
+    c = TestClient(make_app(reports_root, read_authorizer=lambda dag, u: dag == "dagA"))
+    assert {g["dag_id"] for g in c.get("/api/groups").json()["groups"]} == {"dagA"}
 
 
 def test_detail_endpoint_round_trips_token(client):

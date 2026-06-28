@@ -23,7 +23,7 @@ from fastapi.responses import JSONResponse
 
 from ...compat import airflow_auth_available
 from ...version import __version__
-from .common import RouteDeps
+from .common import RouteDeps, ok
 
 TAG = "monitoring"
 _DIST_NAME = "airflow-pytest-plugin"
@@ -34,7 +34,20 @@ def build_router(deps: RouteDeps) -> APIRouter:
     router = APIRouter(tags=[TAG])
     src = deps.src
 
-    @router.get("/api/health", summary="Health & readiness")
+    @router.get(
+        "/api/health",
+        summary="Health & readiness",
+        responses=ok(
+            {
+                "status": "ok",
+                "ready": True,
+                "reports_root": "/opt/airflow/pytest-reports",
+                "reports_root_exists": True,
+                "auth": "airflow",
+                "secure_xml": True,
+            }
+        ),
+    )
     def health() -> JSONResponse:
         """Liveness + readiness of the reader. No parameters, no report reads, no auth.
 
@@ -67,7 +80,11 @@ def build_router(deps: RouteDeps) -> APIRouter:
             }
         )
 
-    @router.get("/api/version", summary="Build info")
+    @router.get(
+        "/api/version",
+        summary="Build info",
+        responses=ok({"name": _DIST_NAME, "version": __version__}),
+    )
     def version() -> JSONResponse:
         """The plugin's distribution name and version (from package metadata)."""
         return JSONResponse({"name": _DIST_NAME, "version": __version__})

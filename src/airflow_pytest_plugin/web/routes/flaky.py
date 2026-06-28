@@ -26,7 +26,7 @@ from ...config import (
     get_flaky_quarantine_score,
     get_flaky_window,
 )
-from .common import FAIL_OUTCOMES, RouteDeps
+from .common import FAIL_OUTCOMES, RouteDeps, ok
 
 TAG = "flaky"
 
@@ -102,7 +102,33 @@ def build_router(deps: RouteDeps) -> APIRouter:
     read_auth = deps.read_auth
     user_dep = deps.user_dep
 
-    @router.get("/api/flaky", summary="Flaky tests")
+    @router.get(
+        "/api/flaky",
+        summary="Flaky tests",
+        responses=ok(
+            {
+                "flaky": [
+                    {
+                        "dag_id": "api_gateway",
+                        "task_id": "integration_tests",
+                        "node_id": "tests/api.py::test_auth",
+                        "runs": 8,
+                        "fails": 4,
+                        "flips": 7,
+                        "score": 1.0,
+                        "trend": "flat",
+                        "quarantined": True,
+                        "recent": ["passed", "failed", "passed", "failed"],
+                    }
+                ],
+                "total": 1,
+                "capped": False,
+                "window": 30,
+                "quarantine_score": 0.5,
+                "min_score": 0.1,
+            }
+        ),
+    )
     def flaky(
         dag_id: str | None = None,
         task_id: str | None = None,

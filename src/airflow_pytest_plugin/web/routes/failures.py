@@ -21,7 +21,7 @@ from typing import Any
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 
-from .common import RouteDeps
+from .common import RouteDeps, ok
 
 TAG = "failures"
 
@@ -36,7 +36,27 @@ def build_router(deps: RouteDeps) -> APIRouter:
     read_auth = deps.read_auth
     user_dep = deps.user_dep
 
-    @router.get("/api/failures", summary="Failed cases across runs")
+    @router.get(
+        "/api/failures",
+        summary="Failed cases across runs",
+        responses=ok(
+            {
+                "failures": [
+                    {
+                        "id": "YXBpX2dhdGV3YXl8...",
+                        "dag_id": "api_gateway",
+                        "task_id": "integration_tests",
+                        "run_id": "scheduled__2026-06-20",
+                        "created_at": "2026-06-20T07:00:00+00:00",
+                        "node_id": "tests/api.py::test_auth",
+                        "outcome": "failed",
+                    }
+                ],
+                "total": 1,
+                "capped": False,
+            }
+        ),
+    )
     def failures(
         dag_id: str | None = None,
         run_id: str | None = None,
