@@ -225,6 +225,24 @@ def test_openapi_and_docs_serve(client):
     assert "/icon.svg" not in paths and "/" not in paths  # icons + viewer hidden
     assert paths["/api/flaky"]["get"]["summary"]  # every method has a summary
 
+    # Responses are documented with a real JSON example (not a bare "string") ...
+    def ex(path, method):
+        return paths[path][method]["responses"]["200"]["content"]["application/json"][
+            "example"
+        ]
+
+    assert "reports" in ex("/api/reports", "get")
+    assert ex("/api/groups", "get")["groups"][0]["avg_duration"] is not None
+    assert "flaky" in ex("/api/flaky", "get")
+    # ... and the error status codes each route can return are declared.
+    for path, method in [
+        ("/api/reports/{report_id}", "get"),
+        ("/api/reports/{report_id}", "delete"),
+        ("/api/compare", "get"),
+    ]:
+        codes = set(paths[path][method]["responses"])
+        assert {"400", "403", "404"} <= codes, (path, method, codes)
+
 
 def test_icon_routes(client):
     for path in ("/icon.svg", "/icon-dark.svg"):

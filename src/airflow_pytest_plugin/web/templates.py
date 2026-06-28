@@ -245,7 +245,12 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .fb-dagtask { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
   .fb-meta { color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; flex: 0 0 auto; }
   .fb-empty { color: var(--muted); font-size: 12.5px; padding: 16px 2px; }
-  @media (max-width: 860px) { .board { flex-direction: column; } }
+  /* Stacked board: cards size to their content (the row layout's flex:1 1 0 would
+     collapse them to a sliver in a column, hiding the chart/flaky behind overflow). */
+  @media (max-width: 860px) {
+    .board { flex-direction: column; }
+    .board > .card { flex: 0 0 auto; }
+  }
   /* Unique-tests list: one wrapping column, so a long node id never forces a
      horizontal scrollbar (the dialog body scrolls vertically). */
   .uq-row { padding: 9px 4px; border-bottom: 1px solid var(--border); cursor: pointer;
@@ -423,7 +428,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .case-table tr.case.clickable:hover > td:first-child,
   .case-table tr.case[aria-expanded="true"] > td:first-child { background: var(--surface-2); }
   .case-table thead th:first-child { z-index: 3; }
-  .chev { display: inline-flex; color: var(--muted); transition: transform .15s; }
+  .chev { display: inline-flex; width: 16px; justify-content: center; color: var(--muted);
+    transition: transform .15s; }
   .case[aria-expanded="true"] .chev { transform: rotate(90deg); }
   .case-exp > td { padding: 0 12px 12px; border-bottom: 1px solid var(--border); }
   .tb { margin: 0; padding: 2px 0 6px 12px; border-left: 2px solid var(--border);
@@ -488,6 +494,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   #list .table-wrap > table { width: 100%; }
   tr.lgrp > td { background: var(--surface-2); font-weight: 600; cursor: pointer; user-select: none; }
   tr.lgrp .chev { transition: transform .15s; }
+  /* Align the grouped "DAG" header over the dag name (clears the chevron's footprint). */
+  th.gcol-dag { padding-left: 32px; }
   /* A group's runs sit in their own full sub-table, marked by a left accent rather
      than an indent gap (which looked off). */
   tr.grp-runs > td { padding: 0; border-left: 2px solid var(--primary); background: var(--surface); }
@@ -917,6 +925,10 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
       return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
     });
+  }
+  function debounce(fn, ms) {
+    var timer = null;
+    return function () { clearTimeout(timer); timer = setTimeout(fn, ms); };
   }
   function fmtDur(s) { return (Number(s) || 0).toFixed(2) + "s"; }
   function fmtTime(s) {
@@ -1519,10 +1531,10 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     return '<th class="sel-cell"></th>' + cells + "<th></th>";
   }
   // A group-level column header (reorders the groups; uses the separate groupSort).
-  function gHeadCell(key, label) {
+  function gHeadCell(key, label, cls) {
     var asc = groupSort.key === key ? (groupSort.dir === 1 ? "ascending" : "descending") : "none";
-    return '<th class="gsort" data-key="' + key + '" aria-sort="' + asc + '">'
-      + esc(t(label)) + groupArrow(key) + "</th>";
+    return '<th class="gsort' + (cls ? " " + cls : "") + '" data-key="' + key
+      + '" aria-sort="' + asc + '">' + esc(t(label)) + groupArrow(key) + "</th>";
   }
   function groupArrow(key) {
     if (groupSort.key !== key) return "";
@@ -1574,7 +1586,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       // The top header (gsort) reorders the GROUPS -- and, for run columns, the runs
       // too (handled in the click). Each opened group's own header (rsort) sorts only
       // that group's runs (groupRunSort override, else the global run sort).
-      theadInner = selAllTh + gHeadCell("dag_id", "cDag") + gHeadCell("task_id", "cTask")
+      theadInner = selAllTh + gHeadCell("dag_id", "cDag", "gcol-dag")
+        + gHeadCell("task_id", "cTask")
         + gHeadCell("runs", "cRuns") + gHeadCell("pass_rate", "cPassRate")
         + gHeadCell("avg_dur", "cAvgDur") + gHeadCell("status", "cStatus")
         + gHeadCell("created_at", "cWhen");
@@ -1617,7 +1630,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
 
     var lg = document.getElementById("list-grp");
     if (lg) lg.addEventListener("change", function () {
-      listGroup = lg.checked; listExpanded = {}; listPage = 0; renderList();  // start folded
+      // Start the (re)entered view clean: folded, no stale per-group sort overrides.
+      listGroup = lg.checked; listExpanded = {}; groupRunSort = {}; listPage = 0; renderList();
     });
     listEl.querySelectorAll("th.sortable").forEach(function (th) {
       th.addEventListener("click", function () {
@@ -2797,8 +2811,13 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   document.addEventListener("pointermove", chartDragMove);
   document.addEventListener("pointerup", chartDragEnd);
   document.addEventListener("pointercancel", chartDragEnd);
+  // Debounce the top filters: each keystroke otherwise re-renders the whole page
+  // (chart + list + KPIs + flaky) -- costly on large datasets. Call with no arg so it
+  // resets to page 1 / newest (binding the listener directly passes the Event as the
+  // keepPage flag, which wrongly preserved the page).
+  var debouncedFilter = debounce(function () { applyFilter(); }, 150);
   ["f-dag", "f-task", "f-run"].forEach(function (id) {
-    document.getElementById(id).addEventListener("input", applyFilter);
+    document.getElementById(id).addEventListener("input", debouncedFilter);
   });
   // Flaky-panel search + quarantined-only filter: client-side, re-render in place.
   var flkBoardQ = document.getElementById("flk-board-q");

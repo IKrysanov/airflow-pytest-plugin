@@ -22,6 +22,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `task_id`. Lets grouped views and dashboards read group stats without fetching
   every run (the basis for scaling past in-browser grouping).
 
+### Changed
+- **Swagger / OpenAPI tidied** — every JSON endpoint now documents a real example
+  response (instead of a bare `string`) and the status codes it can return (`400`
+  malformed token, `403` RBAC, `404` not found), so `GET /api/docs` is accurate.
+- The top dag/task/run filters are **debounced** (one re-render after typing settles,
+  not per keystroke) and reset to page 1 / newest as intended.
+
+### Fixed
+- **Responsive board on narrow screens** — the recent-runs chart and flaky panel no
+  longer collapse to a sliver when stacked; each sizes to its content.
+- The grouped **DAG** column header now sits over the dag name (was shifted left by
+  the expander chevron).
+
 ## [0.3.1] - 2026-06-27
 
 ### Added

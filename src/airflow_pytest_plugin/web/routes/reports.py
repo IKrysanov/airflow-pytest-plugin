@@ -22,13 +22,51 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse, Response
 
 from ...config import get_success_threshold
-from .common import RouteDeps, ref_from_token
+from .common import ERR_400, ERR_403, ERR_404, RouteDeps, ok, ref_from_token
 
 TAG = "reports"
 
 #: Cap on how many (newest) runs /api/unique-tests reads per-test maps from, so the
 #: KPI can't trigger an unbounded scan of every archived run on each filter change.
 _UNIQUE_SCAN_CAP = 1000
+
+# -- OpenAPI examples (illustrative; Swagger shows these instead of a bare "string") --
+_EX_SUMMARY = {
+    "id": "ZXRsX2RhaWx5fHNjaGVkdWxlZF8yMDI2LTA2LTEwfHVuaXRfdGVzdHN8MXwtMQ",
+    "dag_id": "etl_daily",
+    "run_id": "scheduled__2026-06-10",
+    "task_id": "unit_tests",
+    "try_number": 1,
+    "map_index": -1,
+    "total": 4,
+    "passed": 3,
+    "failed": 1,
+    "skipped": 0,
+    "errors": 0,
+    "duration": 1.2,
+    "success": False,
+    "created_at": "2026-06-10T23:00:00+00:00",
+    "logical_date": None,
+    "has_allure": False,
+}
+_EX_CASE = {
+    "node_id": "tests/test_etl.py::test_load",
+    "name": "test_load",
+    "classname": "tests/test_etl.py",
+    "outcome": "failed",
+    "time": 0.3,
+    "message": "AssertionError: row count mismatch",
+}
+_EX_GROUP = {
+    "dag_id": "api_gateway",
+    "task_id": "integration_tests",
+    "runs": 8,
+    "passed": 2,
+    "pass_rate": 0.25,
+    "avg_duration": 1.6,
+    "last_status": "failed",
+    "last_created_at": "2026-06-20T07:00:00+00:00",
+}
 
 
 def summarize_groups(summaries: list[Any]) -> list[dict[str, Any]]:
@@ -79,7 +117,11 @@ def build_router(deps: RouteDeps) -> APIRouter:
     delete_auth = deps.delete_auth
     user_dep = deps.user_dep
 
-    @router.get("/api/reports", summary="List runs")
+    @router.get(
+        "/api/reports",
+        summary="List runs",
+        responses=ok({"reports": [_EX_SUMMARY], "success_threshold": 0.85}),
+    )
     def list_reports(
         dag_id: str | None = None,
         run_id: str | None = None,
@@ -102,7 +144,11 @@ def build_router(deps: RouteDeps) -> APIRouter:
             }
         )
 
-    @router.get("/api/groups", summary="Run groups by dag·task")
+    @router.get(
+        "/api/groups",
+        summary="Run groups by dag·task",
+        responses=ok({"groups": [_EX_GROUP], "total": 1}),
+    )
     def groups(
         dag_id: str | None = None,
         task_id: str | None = None,
@@ -123,7 +169,16 @@ def build_router(deps: RouteDeps) -> APIRouter:
         items = summarize_groups(visible)
         return JSONResponse({"groups": items, "total": len(items)})
 
-    @router.get("/api/reports/{report_id}", summary="Get a run")
+    @router.get(
+        "/api/reports/{report_id}",
+        summary="Get a run",
+        responses={
+            **ok({**_EX_SUMMARY, "cases": [_EX_CASE]}),
+            **ERR_400,
+            **ERR_403,
+            **ERR_404,
+        },
+    )
     def get_report(
         report_id: str,
         user: Any = Depends(user_dep),  # noqa: B008 - FastAPI dependency idiom
@@ -143,7 +198,11 @@ def build_router(deps: RouteDeps) -> APIRouter:
             raise HTTPException(status_code=404, detail="report not found")
         return JSONResponse(detail.to_dict())
 
-    @router.delete("/api/reports/{report_id}", summary="Delete a run")
+    @router.delete(
+        "/api/reports/{report_id}",
+        summary="Delete a run",
+        responses={**ok({"deleted": True}), **ERR_400, **ERR_403, **ERR_404},
+    )
     def delete_report(
         report_id: str,
         user: Any = Depends(user_dep),  # noqa: B008 - FastAPI dependency idiom
@@ -165,7 +224,17 @@ def build_router(deps: RouteDeps) -> APIRouter:
         return JSONResponse({"deleted": True})
 
     @router.get(
-        "/api/reports/{report_id}/allure.zip", summary="Download Allure results"
+        "/api/reports/{report_id}/allure.zip",
+        summary="Download Allure results",
+        responses={
+            200: {
+                "description": "Allure results archive.",
+                "content": {"application/zip": {}},
+            },
+            **ERR_400,
+            **ERR_403,
+            **ERR_404,
+        },
     )
     def allure_zip(
         report_id: str,
@@ -193,7 +262,34 @@ def build_router(deps: RouteDeps) -> APIRouter:
             },
         )
 
-    @router.get("/api/test-history", summary="Test history")
+    @router.get(
+        "/api/test-history",
+        summary="Test history",
+        responses={
+            **ok(
+                {
+                    "node_id": "tests/test_etl.py::test_load",
+                    "dag_id": "etl_daily",
+                    "task_id": "unit_tests",
+                    "history": [
+                        {
+                            "run_id": "scheduled__2026-06-13",
+                            "created_at": "2026-06-13T23:00:00+00:00",
+                            "outcome": "passed",
+                            "duration": 0.3,
+                        },
+                        {
+                            "run_id": "scheduled__2026-06-12",
+                            "created_at": "2026-06-12T23:00:00+00:00",
+                            "outcome": "failed",
+                            "duration": 0.31,
+                        },
+                    ],
+                }
+            ),
+            **ERR_403,
+        },
+    )
     def test_history(
         dag_id: str,
         task_id: str,
@@ -239,7 +335,23 @@ def build_router(deps: RouteDeps) -> APIRouter:
             }
         )
 
-    @router.get("/api/unique-tests", summary="Unique tests")
+    @router.get(
+        "/api/unique-tests",
+        summary="Unique tests",
+        responses=ok(
+            {
+                "count": 189,
+                "capped": False,
+                "tests": [
+                    {
+                        "node_id": "tests/test_etl.py::test_load",
+                        "dag_id": "etl_daily",
+                        "task_id": "unit_tests",
+                    },
+                ],
+            }
+        ),
+    )
     def unique_tests(
         dag_id: str | None = None,
         task_id: str | None = None,

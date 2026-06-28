@@ -21,7 +21,15 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 
-from .common import FAIL_OUTCOMES, RouteDeps, ref_from_token
+from .common import (
+    ERR_400,
+    ERR_403,
+    ERR_404,
+    FAIL_OUTCOMES,
+    RouteDeps,
+    ok,
+    ref_from_token,
+)
 
 TAG = "compare"
 
@@ -66,7 +74,39 @@ def build_router(deps: RouteDeps) -> APIRouter:
     read_auth = deps.read_auth
     user_dep = deps.user_dep
 
-    @router.get("/api/compare", summary="Compare two runs")
+    @router.get(
+        "/api/compare",
+        summary="Compare two runs",
+        responses={
+            **ok(
+                {
+                    "newly_failed": [
+                        {
+                            "node_id": "tests/api.py::test_auth",
+                            "base": "passed",
+                            "head": "failed",
+                        }
+                    ],
+                    "fixed": [],
+                    "still_failing": [],
+                    "added": [],
+                    "removed": [
+                        {"node_id": "tests/api.py::test_legacy", "outcome": "passed"}
+                    ],
+                    "counts": {
+                        "newly_failed": 1,
+                        "fixed": 0,
+                        "still_failing": 0,
+                        "added": 0,
+                        "removed": 1,
+                    },
+                }
+            ),
+            **ERR_400,
+            **ERR_403,
+            **ERR_404,
+        },
+    )
     def compare(
         base: str,
         head: str,
