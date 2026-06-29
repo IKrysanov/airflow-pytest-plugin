@@ -80,9 +80,21 @@ run; expanding a case offers its full **history**:
 
 ![Pytest Reports — flaky tests](https://raw.githubusercontent.com/IKrysanov/airflow-pytest-plugin/main/docs/screenshots/flaky.png)
 
+**Slow tests & duration regressions** — the *Slowdowns* KPI opens a panel of tests
+whose **execution time got slower** (recent-half average vs the older half, over a
+configurable window) alongside the **slowest tests** by average duration. A test
+that speeds back up drops off the list. Inside a run, the case table sorts by
+execution time (slowest first) so the heaviest tests surface immediately.
+
+![Pytest Reports — slow tests & regressions](https://raw.githubusercontent.com/IKrysanov/airflow-pytest-plugin/main/docs/screenshots/slow.png)
+
 **Unique tests & failures** — the *Unique tests* KPI opens the searchable,
-paginated catalogue of every distinct test; the *Failures* KPI lists every
-failed/errored case across the visible runs — a row jumps to that run:
+paginated catalogue of every distinct test (each with its runs / pass-fail-error-skip
+counts / average time); the *Failures* KPI shows what's broken **now** — failures in each
+dag·task's latest run, so the count shrinks as tests are fixed — grouped into **clusters
+by normalized error** (biggest first) so common root causes surface instead of
+per-failure spam. Expand a cluster to its tests, or open the same clusters scoped to one
+run via the detail's *Error clusters* button:
 
 ![Pytest Reports — unique tests](https://raw.githubusercontent.com/IKrysanov/airflow-pytest-plugin/main/docs/screenshots/unique.png)
 
@@ -190,11 +202,13 @@ runtime. Endpoints (relative to the mount):
 | `GET /api/reports?dag_id=&run_id=` | summaries, newest first |
 | `GET /api/reports/{report_id}` | one report with per-case rows |
 | `GET /api/groups?dag_id=&task_id=` | runs aggregated by dag·task (count, pass-rate, avg duration, last status) |
-| `GET /api/failures?dag_id=&run_id=&task_id=` | failed/errored cases across the visible runs |
+| `GET /api/failures?dag_id=&run_id=&task_id=&latest=` | failed/errored cases — each dag·task's latest run by default (`latest=0` for full history) |
+| `GET /api/failure-clusters?dag_id=&run_id=&task_id=&latest=` | failures grouped by normalized error signature (biggest first); latest-run-only by default |
 | `GET /api/compare?base=&head=` | per-test diff between two runs (newly failed / fixed / …) |
 | `GET /api/flaky?dag_id=&task_id=&window=` | flaky tests with score, trend, and a quarantine flag |
+| `GET /api/slow?dag_id=&task_id=&window=` | duration regressions (tests whose execution time got slower) + the slowest tests by average |
 | `GET /api/test-history?dag_id=&task_id=&node_id=&limit=` | one test's outcome per run |
-| `GET /api/unique-tests?dag_id=&task_id=&run_id=&full=` | distinct test count (+ list when `full`) |
+| `GET /api/unique-tests?dag_id=&task_id=&run_id=&full=` | distinct test count (+ when `full`, each test's runs / passed / failed / errors / skipped / avg duration) |
 | `DELETE /api/reports/{report_id}` | delete a report (RBAC-gated) |
 | `GET /api/reports/{report_id}/allure.zip` | raw Allure results as a zip (if any) |
 | `GET /api/health` | liveness + readiness: `status`, `ready`, `reports_root`(+`_exists`), `auth`, `secure_xml` |
@@ -264,6 +278,8 @@ Download them from a report's detail view, or `GET
 | `AIRFLOW_PYTEST_FLAKY_WINDOW` (env/cfg) | `30` | default recent runs the flaky detector scans |
 | `AIRFLOW_PYTEST_FLAKY_QUARANTINE_SCORE` (env/cfg) | `0.5` | flakiness score (0–1) that flags a test for quarantine |
 | `AIRFLOW_PYTEST_FLAKY_MIN_SCORE` (env/cfg) | `0.1` | flakiness score (0–1) below which a test is not counted as flaky |
+| `AIRFLOW_PYTEST_SLOW_FACTOR` (env/cfg) | `1.3` | how much slower (recent-half avg ÷ older half, ≥1) a test must get to count as a duration regression |
+| `AIRFLOW_PYTEST_SLOW_MIN_DELTA` (env/cfg) | `0.5` | minimum absolute slowdown in seconds for a regression to register (filters jittery fast tests) |
 | `AIRFLOW_PYTEST_SUCCESS_THRESHOLD` (env/cfg) | `0.85` | pass-rate (0–1) over executed tests at/above which a run counts as successful (*Passing runs*); `1.0` = strict, zero failures/errors |
 
 **Enable / disable the reader.** Set `AIRFLOW_PYTEST_PLUGIN_ENABLE` to a falsey

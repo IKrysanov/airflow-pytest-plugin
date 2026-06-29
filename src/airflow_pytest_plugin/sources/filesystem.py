@@ -19,6 +19,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+import math
 import os
 import shutil
 import threading
@@ -101,7 +102,17 @@ class FileSystemReportSource(ReportSource):
             if summary is not None:
                 out.append(summary)
         # Newest first: ISO-8601 created_at sorts chronologically; missing sorts last.
-        out.sort(key=lambda s: s.created_at or "", reverse=True)
+        # Tiebreak deterministically (try_number, run_id, map_index) so that on equal or
+        # missing created_at a stable "latest" run is chosen (e.g. a retry wins its try).
+        out.sort(
+            key=lambda s: (
+                s.created_at or "",
+                s.ref.try_number,
+                s.ref.run_id,
+                s.ref.map_index,
+            ),
+            reverse=True,
+        )
         return out
 
     def _all_summaries(self) -> list[ReportSummary]:
@@ -206,6 +217,10 @@ class FileSystemReportSource(ReportSource):
                         if len(row) > 2 and isinstance(row[2], int | float)
                         else 0.0
                     )
+                    # Guard NaN/Infinity from a corrupt meta so they can't reach a
+                    # JSON response (json.dumps would emit non-spec NaN/Infinity).
+                    if not math.isfinite(dur):
+                        dur = 0.0
                     out[str(row[0])] = {"outcome": str(row[1]), "duration": dur}
             return out
         # Older archive without the per-test map: parse junit.xml on demand.
@@ -217,12 +232,13 @@ class FileSystemReportSource(ReportSource):
         except Exception:
             _log.exception("Failed to parse JUnit report %s", report_path)
             return None
+
+        def _dur(c: Any) -> float:
+            d = float(getattr(c, "time", 0.0) or 0.0)
+            return d if math.isfinite(d) else 0.0
+
         return {
-            c.node_id: {
-                "outcome": c.outcome,
-                "duration": float(getattr(c, "time", 0.0) or 0.0),
-            }
-            for c in result.cases
+            c.node_id: {"outcome": c.outcome, "duration": _dur(c)} for c in result.cases
         }
 
     def delete(self, ref: ReportRef) -> bool:

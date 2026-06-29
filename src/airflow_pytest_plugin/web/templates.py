@@ -26,24 +26,28 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   /* Palette tracks Airflow 3's Chakra theme; page bg re-read live from parent when embedded. */
   :root {
     --bg: #ffffff; --surface: #ffffff; --surface-2: #f4f4f5;
+    --surface-glass: #ffffffc7;  /* translucent surface so a chip doesn't fully hide data */
     --fg: #18181b; --muted: #52525b; --border: #e4e4e7;
     --primary: #017cee; --on-primary: #ffffff; --ring: #017cee40;
     --pass: #008000; --fail: #ff0000; --skip: #ff69b4; --error: #9370db;
     --pass-bg: #0080001a; --fail-bg: #ff00001a; --skip-bg: #ff69b41f; --error-bg: #9370db1f;
     --trend: #0891b2;  /* cyan pass-rate trend line (darker for contrast on white) */
-    --thresh: #d97706;  /* amber success-threshold gridline -- distinct from the line */
+    --thresh: #d97706;  /* amber success-threshold (label text -- must stay readable) */
+    --thresh-soft: #d9770659;  /* muted amber for the gridline so it recedes behind data */
     --shadow: 0 1px 2px #0000000d, 0 1px 3px #00000014;
     /* Tooltip inverts the page: dark bubble on the light theme. */
     --tip-bg: #18181b; --tip-fg: #fafafa; --tip-border: #3f3f46;
   }
   html[data-theme="dark"] {
     --bg: #07121e; --surface: #1c2a3a; --surface-2: #243651;
+    --surface-glass: #1c2a3ac7;  /* translucent surface so a chip doesn't fully hide data */
     --fg: #e6edf3; --muted: #94a3b8; --border: #2c4262;
     --primary: #4ba3f5; --on-primary: #07121e; --ring: #017cee66;
     --pass: #2ecc71; --fail: #ff6b6b; --skip: #ff8ecb; --error: #b39ddb;
     --pass-bg: #2ecc711f; --fail-bg: #ff6b6b1f; --skip-bg: #ff8ecb1f; --error-bg: #b39ddb1f;
     --trend: #22d3ee;  /* cyan pass-rate trend line (brighter on the navy theme) */
-    --thresh: #fbbf24;  /* amber success-threshold gridline */
+    --thresh: #fbbf24;  /* amber success-threshold (label text -- must stay readable) */
+    --thresh-soft: #fbbf2459;  /* muted amber for the gridline so it recedes behind data */
     --shadow: 0 1px 3px #00000040, 0 2px 8px #00000033;
     /* ...and a white bubble on the dark theme. */
     --tip-bg: #fafafa; --tip-fg: #18181b; --tip-border: #d4d4d8;
@@ -147,6 +151,22 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .chart-card { margin-bottom: 18px; padding: 14px 16px 8px; }
   .chart-head { display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
     font-size: 13px; font-weight: 600; color: var(--muted); margin-bottom: 6px; }
+  /* Runs chart header in two fixed rows so controls don't reflow/jump on resize:
+     row 1 = title + legend (+reset); row 2 = trend toggle (left) + carousel arrows (right). */
+  .chart-head-stack { flex-direction: column; align-items: stretch; gap: 8px; }
+  .chart-head-stack .chart-head-row { display: flex; align-items: center; gap: 12px;
+    flex-wrap: wrap; min-width: 0; }
+  /* Right cluster (window range + carousel arrows) hugs the right edge, and drops to
+     its own line on narrow widths instead of overflowing -- fully adaptive. */
+  .chart-meta-right { margin-left: auto; display: inline-flex; align-items: center;
+    gap: 8px; min-width: 0; }
+  /* Visible-window range "#48-#76 / 76" and average pass rate "avg 92%": quiet,
+     tabular figures so the numbers don't jiggle while scrolling. */
+  .chart-range, .chart-avg { font-size: 12px; font-weight: 500; color: var(--muted);
+    white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .chart-range b { color: var(--fg); font-weight: 600; }
+  .chart-avg b { color: var(--fg); font-weight: 700; }
+  .chart-avg.below b { color: var(--fail); }  /* window dips under the success threshold */
   /* "Showing N selected · show all" note when ticked runs filter the chart. */
   .chart-filter { display: inline-flex; align-items: center; gap: 8px; font-weight: 500;
     color: var(--primary); }
@@ -154,6 +174,10 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     font: inherit; font-weight: 600; text-decoration: underline; padding: 0; }
   .chart-clear:hover { opacity: .8; }
   .chart-clear:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; border-radius: 3px; }
+  /* "scoped to the selected group(s)" chip on the flaky panel -- mirrors the chart's
+     selection so picking a group filters BOTH the chart and the flaky list. */
+  .flk-scope { font-size: 11px; font-weight: 600; color: var(--primary);
+    background: var(--ring); padding: 1px 8px; border-radius: 999px; }
   /* Pass-rate trend: checkbox toggle + the cyan line/dots/threshold overlay. */
   .trend-toggle { display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
     font-weight: 500; white-space: nowrap; color: var(--muted); }
@@ -163,11 +187,20 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     stroke-linejoin: round; stroke-linecap: round; }
   .trend-dot { fill: var(--trend); stroke: var(--surface); stroke-width: 1.5;
     pointer-events: auto; cursor: pointer; }
+  /* Stretches of the pass-rate line below the success threshold turn red (signal). */
+  .trend-line.trend-danger { stroke: var(--fail); }
+  .trend-dot.trend-dot-bad { fill: var(--fail); }
+  /* A quiet reference line: thin, muted amber so it sits behind the bars + trend line
+     (the data), not over them. The small % chip stays readable in full amber. */
   .trend-thresh { position: absolute; left: 0; right: 0; pointer-events: none;
-    border-top: 2px dashed var(--thresh); }
+    border-top: 1px dashed var(--thresh-soft); }
+  /* Glass chip: translucent + blurred so it never fully hides a trend dot behind it,
+     yet the % text stays crisp (only the backdrop is blurred). pointer-events:none on
+     the parent already lets dot clicks pass through. */
   .trend-thresh span { position: absolute; right: 2px; top: -9px; font-size: 10px;
-    font-weight: 700; color: var(--thresh); background: var(--surface); padding: 0 4px;
-    border-radius: 3px; box-shadow: 0 0 0 1px var(--thresh); }
+    font-weight: 600; color: var(--thresh); background: var(--surface-glass);
+    -webkit-backdrop-filter: blur(2px); backdrop-filter: blur(2px); padding: 0 5px;
+    border-radius: 4px; box-shadow: 0 0 0 1px var(--thresh-soft); }
   .trend-thresh.label-below span { top: 3px; }  /* high threshold -> label under the line */
   .legend { display: inline-flex; gap: 6px; flex-wrap: wrap; }
   .legend button { display: inline-flex; align-items: center; gap: 5px; border: 0;
@@ -176,6 +209,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .legend button:hover { background: var(--surface-2); }
   .legend button:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
   .legend button.off { opacity: .4; text-decoration: line-through; }
+  .legend .leg-reset { color: var(--primary); font-size: 12px; }
   .legend i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
   /* Bars are absolutely placed at integer x/width (one gradient element each), so
      edges land on whole pixels -> crisp, no anti-aliased colour halo.
@@ -258,6 +292,13 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .uq-row:last-child { border-bottom: 0; }
   .uq-row:hover { background: var(--surface-2); }
   .uq-row:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
+  .uq-node { display: block; }
+  /* Per-test stats line under the node id: runs, avg time, per-outcome counts. */
+  .uq-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px;
+    margin-top: 5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .uq-meta .uq-tot { font-weight: 600; color: var(--fg); }
+  .uq-meta .uq-st { display: inline-flex; align-items: center; gap: 4px; }
+  .uq-meta .od { width: 9px; height: 9px; border-radius: 2px; }
 
   /* Test-duration histogram inside a run: 10s buckets, drag/scroll carousel. */
   .bench-card { margin: 16px 0 4px; padding: 12px 14px 10px; }
@@ -390,7 +431,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   dialog[open] { display: flex; flex-direction: column; }
   /* Popups opened from inside a run sit inset within it -- narrower/shorter than the
      detail dialog so they never touch its borders. */
-  #flaky, #history, #compare { max-width: min(680px, 84vw); max-height: 82vh; }
+  #flaky, #history, #compare, #failures { max-width: min(680px, 84vw); max-height: 82vh; }
   dialog::backdrop { background: rgba(0, 0, 0, 0.5); }
   .dlg-head { display: flex; align-items: center; gap: 10px; padding: 16px 20px;
     border-bottom: 1px solid var(--border); flex: 0 0 auto; background: var(--surface);
@@ -475,6 +516,49 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .flk-ctrls label { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
   .flk-ctrls select { height: 30px; color: var(--fg); background: var(--surface-2);
     border: 1px solid var(--border); border-radius: 8px; padding: 0 8px; }
+  /* Slow/regression modal: two sections (got-slower, slowest) of node·loc·metric rows. */
+  .slow-sec { margin-bottom: 18px; }
+  .slow-sec h3 { font-size: 13px; font-weight: 650; margin: 0 0 6px;
+    display: flex; align-items: center; gap: 6px; }
+  .slow-row { display: flex; align-items: baseline; gap: 10px; padding: 9px 0;
+    border-bottom: 1px solid var(--border); font-size: 12.5px; }
+  .slow-row:last-child { border-bottom: 0; }
+  .slow-row .node { flex: 1 1 auto; overflow-wrap: anywhere; }
+  .slow-loc { flex: 0 1 auto; white-space: nowrap; overflow: hidden;
+    text-overflow: ellipsis; max-width: 38%; }
+  .slow-meta { flex: 0 0 auto; color: var(--muted); white-space: nowrap;
+    font-variant-numeric: tabular-nums; }
+  .slow-meta b { color: var(--fg); }
+  .slow-up, .slow-ratio { color: var(--fail); font-weight: 700; }
+  /* Error clusters: a count·signature row that expands to its failing tests. */
+  .cl-row { display: flex; align-items: center; gap: 10px; padding: 10px 4px; cursor: pointer;
+    border-bottom: 1px solid var(--border); font-size: 12.5px; }
+  .cl-row:hover { background: var(--surface-2); }
+  .cl-row:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
+  .cl-count { flex: 0 0 auto; min-width: 38px; font-weight: 700; color: var(--fail);
+    font-variant-numeric: tabular-nums; }
+  .cl-sig { flex: 1 1 auto; overflow-wrap: anywhere; }
+  .cl-dots { flex: 0 0 auto; display: inline-flex; gap: 3px; }
+  .cl-dots .od, .cl-item .od { width: 9px; height: 9px; border-radius: 2px; }
+  .cl-row .chev { flex: 0 0 auto; transition: transform .15s; }
+  .cl-row[aria-expanded="true"] .chev { transform: rotate(90deg); }
+  /* Tests inside an expanded cluster: clearly separated rows that highlight on hover
+     and read as links (mono in primary) so it's obvious they open the test. */
+  /* Nested under a cluster: a left accent (like the run list's expanded groups), not a
+     big indent gap. */
+  .cl-items { border-left: 2px solid var(--primary); margin: 0 0 6px; }
+  .cl-item { display: flex; align-items: center; gap: 8px; padding: 7px 8px 7px 12px;
+    cursor: pointer; font-size: 12px; overflow-wrap: anywhere;
+    border-bottom: 1px solid var(--border); }
+  .cl-item:last-child { border-bottom: 0; }
+  .cl-item:hover { background: var(--surface-2); }
+  .cl-item:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
+  .cl-item .mono { color: var(--primary); }
+  .cl-item .muted { margin-left: auto; white-space: nowrap; }
+  /* Sortable case-table headers reuse the run-list's th.sortable + .arrow styling;
+     TIME right-aligns over its values and defaults to slowest-first. */
+  .case-table th.sortable { white-space: nowrap; user-select: none; }
+  .case-table th.right { text-align: right; }
   .case-hist { background: none; border: 0; color: var(--primary); cursor: pointer;
     font: inherit; font-size: 12px; padding: 0 0 8px; display: inline-flex; align-items: center; gap: 5px; }
   .case-hist svg { width: 14px; height: 14px; }
@@ -559,6 +643,12 @@ _INDEX_HTML = r"""<!DOCTYPE html>
              autocomplete="off" role="combobox" aria-autocomplete="list" aria-expanded="false" />
       <div class="suggest" id="sg-run" role="listbox" hidden></div>
     </span>
+    <button id="f-clear" class="btn icon-btn" type="button" data-i18n-al="clearFilters" hidden>
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M18 6 6 18M6 6l12 12"/>
+      </svg>
+    </button>
     <span class="menu-wrap">
       <button id="links-btn" class="btn" type="button" data-i18n-al="linksAl"
               aria-haspopup="true" aria-expanded="false">
@@ -603,20 +693,28 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   <div class="kpis" id="kpis" hidden></div>
   <div class="board" id="board" hidden>
     <div class="card chart-card" id="chart-card" hidden>
-      <div class="chart-head">
-        <span data-i18n="history">Recent runs</span>
-        <span class="chart-filter" id="chart-filter" hidden></span>
-        <span class="legend" id="legend"></span>
-        <span style="flex:1"></span>
-        <label class="trend-toggle"><input type="checkbox" id="trend-toggle" />
-          <span data-i18n="trendToggle">Pass-rate trend</span></label>
-        <span class="chart-nav" id="chart-nav"></span>
+      <div class="chart-head chart-head-stack">
+        <div class="chart-head-row">
+          <span data-i18n="history">Recent runs</span>
+          <span class="chart-filter" id="chart-filter" hidden></span>
+          <span class="legend" id="legend"></span>
+        </div>
+        <div class="chart-head-row chart-head-row2">
+          <label class="trend-toggle"><input type="checkbox" id="trend-toggle" />
+            <span data-i18n="trendToggle">Pass-rate trend</span></label>
+          <span class="chart-avg" id="chart-avg" hidden></span>
+          <span class="chart-meta-right">
+            <span class="chart-range" id="chart-range"></span>
+            <span class="chart-nav" id="chart-nav"></span>
+          </span>
+        </div>
       </div>
       <div id="chart"></div>
     </div>
     <div class="card flaky-card" id="flaky-card">
       <div class="chart-head">
         <span data-i18n="flakyTitle">Flaky tests</span>
+        <span class="flk-scope" id="flk-scope" hidden></span>
         <span style="flex:1"></span>
         <span class="muted" id="flaky-count"></span>
       </div>
@@ -735,6 +833,20 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   <div class="dlg-body" id="fk-body"></div>
 </dialog>
 
+<dialog id="slow" aria-labelledby="sl-title">
+  <div class="dlg-head">
+    <h2 id="sl-title" data-i18n="slowTitle">Slow tests &amp; regressions</h2>
+    <span class="grow" style="flex:1"></span>
+    <button id="sl-close" class="btn icon-btn" type="button" data-i18n-al="closeReport">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M18 6 6 18M6 6l12 12"/>
+      </svg>
+    </button>
+  </div>
+  <div class="dlg-body" id="sl-body"></div>
+</dialog>
+
 <dialog id="history" aria-labelledby="hist-title">
   <div class="dlg-head">
     <h2 id="hist-title" data-i18n="historyTitle">Test history</h2>
@@ -763,14 +875,17 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       filterDagAl: "Filter by dag_id", filterTaskAl: "Filter by task_id", filterRunAl: "Filter by run_id",
       history: "Recent runs", copyLink: "Copy link", copied: "Copied",
       chartSelected: "showing {n} selected", chartShowAll: "show all",
+      legendReset: "Reset filter", clearFilters: "Clear filters",
       trendToggle: "Pass-rate trend", passRate: "pass rate",
       closeReport: "Close report", ofWord: "of", testsWord: "tests",
+      avgWord: "avg", uqRuns: "Total runs",
       apiDocs: "API docs", linksAl: "Links & documentation", ghItem: "GitHub",
       benchTitle: "Test durations (10s buckets)", uniqueTitle: "Unique tests",
       cId: "ID", cStatus: "Status", cDag: "DAG", cTask: "Task", cRun: "Run", cTry: "Try",
       cTotal: "Total", cPass: "Pass", cFail: "Fail", cErr: "Err", cSkip: "Skip",
       cDuration: "Duration", cWhen: "When", cRuns: "Runs", cPassRate: "Pass %", cAvgDur: "Avg time",
       kRuns: "Runs", kPassingRuns: "Passing runs", kTests: "Unique tests", kFailures: "Failures",
+      kFailuresTip: "Tests failing in the latest run of each dag·task (drops off when fixed)",
       kPassed: "Passed", kFailed: "Failed", kErrors: "Errors", kSkipped: "Skipped",
       sPass: "PASS", sFail: "FAIL", sError: "ERROR", success: "success",
       passed: "passed", failed: "failed", error: "error", skipped: "skipped", all: "all",
@@ -780,7 +895,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       noMatch: "No reports match the current filter.",
       noReports: "No reports found yet. Run a PytestOperator task with ArchivingResultParser to populate this view.",
       noCases: "No matching cases.", tryWord: "try",
-      failuresTitle: "Failed tests", noFailures: "No failed tests.",
+      failuresTitle: "Failures by error", noFailures: "No failed tests.",
+      clBtn: "Error clusters", clBtnAl: "Error clusters in this run",
       compareTitle: "Compare", comparePrev: "Compare to previous",
       comparePrevAl: "Compare to the previous run", compareFail: "Failed to compare: ",
       compareNoChange: "No differences from the previous run.",
@@ -790,6 +906,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       flakyBtnAl: "Flaky tests in recent runs", flakyFail: "Failed to load flaky tests: ",
       noFlaky: "No flaky tests in the recent runs.", flkFailed: "failed",
       flkSearch: "filter flaky tests…", flkNoMatch: "No flaky tests match the filter.",
+      flkSelScope: "selected groups", flkNoSel: "No flaky tests in the selected groups.",
       flkWindow: "Analysis window:", flkWinOpt: "last {n} runs",
       flkWindowTip: "How many recent runs of this dag·task to scan for flakiness",
       flkQuarantinedOnly: "Quarantined only",
@@ -797,6 +914,12 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       flkScoreTip: "Flakiness: how often the result flips between pass and fail",
       flkTrendUp: "Flaking more lately", flkTrendDown: "Calming down",
       flkTrendFlat: "Steady trend",
+      slowTitle: "Test execution time — slowdowns & slowest", kSlow: "Slowdowns",
+      slowKpiTip: "Tests whose execution time got slower in recent runs",
+      slowFail: "Failed to load slow tests: ",
+      slowRegressing: "Got slower (execution time)", slowSlowest: "Slowest tests (avg time)",
+      slowNoneReg: "No tests have slowed down in the recent runs.",
+      slowNoData: "Not enough run history yet.",
       historyTitle: "Test history", historyBtn: "History",
       historyFail: "Failed to load history: ", noHistory: "No history for this test.",
       histDidntRun: "did not run",
@@ -816,6 +939,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       selectRow: "Select row", selectAll: "Select all",
       forbidden: "You don't have permission to delete this report (it requires permission to trigger the DAG).",
       older: "Older runs", newer: "Newer runs",
+      avgPass: "avg", avgPassTip: "Average pass rate across the {n} runs in view",
+      visibleRuns: "Showing runs #{a}–#{b} of {n}",
       prevPage: "Previous page", nextPage: "Next page", page: "Page",
     },
     ru: {
@@ -824,14 +949,17 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       filterDagAl: "Фильтр по dag_id", filterTaskAl: "Фильтр по task_id", filterRunAl: "Фильтр по run_id",
       history: "Последние прогоны", copyLink: "Копировать ссылку", copied: "Скопировано",
       chartSelected: "показаны выбранные: {n}", chartShowAll: "показать все",
+      legendReset: "Сброс фильтра", clearFilters: "Сбросить фильтры",
       trendToggle: "Тренд прохождения", passRate: "доля прохождения",
       closeReport: "Закрыть отчёт", ofWord: "из", testsWord: "тестов",
+      avgWord: "сред.", uqRuns: "Всего прогонов",
       apiDocs: "Документация API", linksAl: "Ссылки и документация", ghItem: "GitHub",
       benchTitle: "Время выполнения тестов (по 10с)", uniqueTitle: "Уникальные тесты",
       cId: "ID", cStatus: "Статус", cDag: "DAG", cTask: "Задача", cRun: "Запуск", cTry: "Попытка",
       cTotal: "Всего", cPass: "Усп", cFail: "Пров", cErr: "Ошиб", cSkip: "Проп",
       cDuration: "Время", cWhen: "Когда", cRuns: "Прогоны", cPassRate: "Проход %", cAvgDur: "Ср. время",
       kRuns: "Прогонов", kPassingRuns: "Успешных прогонов", kTests: "Уникальные тесты", kFailures: "Падений",
+      kFailuresTip: "Тесты, падающие в последнем прогоне каждого dag·task (уходят после починки)",
       kPassed: "Пройдено", kFailed: "Провалено", kErrors: "Ошибки", kSkipped: "Пропущено",
       sPass: "OK", sFail: "СБОЙ", sError: "ОШИБКА", success: "успех",
       passed: "пройден", failed: "провален", error: "ошибка", skipped: "пропущен", all: "все",
@@ -841,7 +969,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       noMatch: "Нет отчётов под текущий фильтр.",
       noReports: "Отчётов пока нет. Запусти задачу PytestOperator с ArchivingResultParser, чтобы они появились здесь.",
       noCases: "Нет подходящих тестов.", tryWord: "попытка",
-      failuresTitle: "Проваленные тесты", noFailures: "Проваленных тестов нет.",
+      failuresTitle: "Падения по ошибкам", noFailures: "Проваленных тестов нет.",
+      clBtn: "Кластеры ошибок", clBtnAl: "Кластеры ошибок в этом прогоне",
       compareTitle: "Сравнение", comparePrev: "Сравнить с предыдущим",
       comparePrevAl: "Сравнить с предыдущим прогоном", compareFail: "Не удалось сравнить: ",
       compareNoChange: "Отличий от предыдущего прогона нет.",
@@ -852,6 +981,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       noFlaky: "Нестабильных тестов за последние прогоны нет.", flkFailed: "падений",
       flkSearch: "поиск нестабильных тестов…",
       flkNoMatch: "Под фильтр не попал ни один нестабильный тест.",
+      flkSelScope: "выбранные группы",
+      flkNoSel: "В выбранных группах нет нестабильных тестов.",
       flkWindow: "Окно анализа:", flkWinOpt: "последние {n} прогонов",
       flkWindowTip: "Сколько последних прогонов этого dag·task сканировать на нестабильность",
       flkQuarantinedOnly: "Только карантин",
@@ -859,6 +990,12 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       flkScoreTip: "Нестабильность: как часто результат скачет между pass и fail",
       flkTrendUp: "Стал чаще флакать", flkTrendDown: "Стабилизируется",
       flkTrendFlat: "Тренд ровный",
+      slowTitle: "Время выполнения тестов — замедления и самые медленные", kSlow: "Замедления",
+      slowKpiTip: "Тесты, чьё время выполнения выросло за последние прогоны",
+      slowFail: "Не удалось загрузить медленные тесты: ",
+      slowRegressing: "Стали медленнее (время выполнения)", slowSlowest: "Самые медленные (среднее время)",
+      slowNoneReg: "За последние прогоны тесты не замедлялись.",
+      slowNoData: "Пока мало истории прогонов.",
       historyTitle: "История теста", historyBtn: "История",
       historyFail: "Не удалось загрузить историю: ", noHistory: "Истории по этому тесту нет.",
       histDidntRun: "не запускался",
@@ -878,6 +1015,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       selectRow: "Выбрать строку", selectAll: "Выбрать все",
       forbidden: "Нет прав на удаление этого отчёта (нужно право запускать DAG).",
       older: "Старее", newer: "Новее",
+      avgPass: "ср.", avgPassTip: "Средняя доля прохождения по {n} прогонам в окне",
+      visibleRuns: "Показаны прогоны #{a}–#{b} из {n}",
       prevPage: "Предыдущая страница", nextPage: "Следующая страница", page: "Страница",
     },
   };
@@ -937,6 +1076,10 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     try { return isNaN(d) ? esc(s) : d.toLocaleString(LOCALE); } catch (e) { return esc(s); }
   }
   function statusOf(r) { return r.success ? "pass" : (r.errors > 0 ? "error" : "fail"); }
+  // A run's overall status maps to a chart-legend key; toggling that legend status off
+  // hides the run from the list below (the chart keeps the bar, dimming the segment).
+  var STATUS_KEY = { pass: "passed", fail: "failed", error: "error" };
+  function statusShown(r) { return chartSel[STATUS_KEY[statusOf(r)]] !== false; }
   function statusLabel(kind) { return { pass: t("sPass"), fail: t("sFail"), error: t("sError") }[kind]; }
   function badge(kind, text) {
     return '<span class="badge b-' + kind + '">' + ICONS[kind] + esc(text) + "</span>";
@@ -1099,6 +1242,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   // Distinct test count, fetched from the backend (the list summaries have only totals);
   // null until the first response. Refreshed (debounced) whenever the filter changes.
   var uniqueTests = null, uniqueTestsList = [], uniqTimer = null, uniqSeq = 0;
+  // Slowdowns KPI + modal cache. slowSeq guards the KPI fetch, slowModalSeq the modal's.
+  var slowCount = null, slowData = null, slowSeq = 0, slowModalSeq = 0, slowFailed = false, slowTimer = null;
   function uniqueQuery(extra) {
     var q = new URLSearchParams();
     var dag = document.getElementById("f-dag").value.trim();
@@ -1125,18 +1270,43 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     if (!reports.length) { kpisEl.hidden = true; kpisEl.innerHTML = ""; return; }
     var runs = reports.length;
     var ok = reports.filter(function (r) { return r.success; }).length;
-    var failures = reports.reduce(function (a, r) { return a + r.failed + r.errors; }, 0);
+    // "Failures" = what's broken NOW: failed+errors in the latest run of each dag·task,
+    // so the count shrinks as tests get fixed (not every failure ever archived).
+    var latestRun = {};
+    reports.forEach(function (r) {
+      var k = r.dag_id + "|" + r.task_id;
+      if (!latestRun[k] || String(r.created_at || "") > String(latestRun[k].created_at || "")) {
+        latestRun[k] = r;
+      }
+    });
+    // Selecting group(s) scopes the Failures + Slowdowns KPIs to those dag·tasks (like
+    // the flaky panel) -- failures are recomputed from the latest run of the picked
+    // dag·tasks; slowdowns are counted from the loaded regressed list, scoped the same.
+    var sk = selKeySet();
+    var failures = Object.keys(latestRun).reduce(function (a, k) {
+      if (sk && !sk[k]) return a;
+      return a + (latestRun[k].failed || 0) + (latestRun[k].errors || 0);
+    }, 0);
+    var slowShown = slowCount;
+    if (sk && slowData && slowData.regressed) {
+      slowShown = slowData.regressed.filter(function (x) {
+        return sk[x.dag_id + "|" + x.task_id];
+      }).length;
+    }
     var cards = [
       { label: t("kRuns"), value: runs },
       { label: t("kPassingRuns"), value: ok + " / " + runs, cls: ok === runs ? "c-pass" : "" },
       { label: t("kTests"), value: uniqueTests == null ? "…" : uniqueTests,
         id: "kpi-unique", click: uniqueTests > 0 },
       { label: t("kFailures"), value: failures, cls: failures ? "c-fail" : "c-pass",
-        id: "kpi-failures", click: failures > 0 },
+        id: "kpi-failures", click: failures > 0, tip: t("kFailuresTip") },
+      { label: t("kSlow"), value: slowShown == null ? (slowFailed ? "—" : "…") : slowShown,
+        cls: slowShown ? "c-fail" : "", id: "kpi-slow", click: true, tip: t("slowKpiTip") },
     ];
     kpisEl.hidden = false;
     kpisEl.innerHTML = cards.map(function (c) {
       var attrs = (c.id ? ' id="' + c.id + '"' : "")
+        + (c.tip ? ' title="' + esc(c.tip) + '"' : "")
         + (c.click ? ' role="button" tabindex="0"' : "");
       return '<div class="kpi' + (c.click ? " clickable" : "") + '"' + attrs
         + '><div class="label">' + esc(c.label) + '</div>'
@@ -1156,20 +1326,46 @@ _INDEX_HTML = r"""<!DOCTYPE html>
         if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openUnique(); }
       });
     }
+    var sk = document.getElementById("kpi-slow");
+    if (sk) {
+      sk.addEventListener("click", openSlow);
+      sk.addEventListener("keydown", function (e) {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openSlow(); }
+      });
+    }
   }
 
   function renderLegend() {
     var leg = document.getElementById("legend");
+    var allOn = ORDER.every(function (o) { return chartSel[o[0]]; });
     leg.innerHTML = ORDER.map(function (o) {
       return '<button type="button" class="' + (chartSel[o[0]] ? "" : "off")
         + '" data-status="' + o[0] + '" aria-pressed="' + !!chartSel[o[0]] + '">'
         + '<i style="background:' + o[2] + '"></i>' + esc(t(o[0])) + "</button>";
-    }).join("");
+    }).join("")
+      + (allOn ? ""  // reset appears only once a status is hidden
+        : '<button type="button" class="leg-reset" data-reset="1">'
+          + esc(t("legendReset")) + "</button>");
     leg.querySelectorAll("button").forEach(function (b) {
       b.addEventListener("click", function () {
-        var s = b.getAttribute("data-status");
-        chartSel[s] = !chartSel[s];
-        renderChart();
+        if (b.getAttribute("data-reset")) {
+          ORDER.forEach(function (o) { chartSel[o[0]] = true; });  // clear the focus
+        } else {
+          // "Focus" model: clicking a status shows ONLY it (others off); click more to
+          // add/remove; emptying the selection falls back to "all shown".
+          var s = b.getAttribute("data-status");
+          if (ORDER.every(function (o) { return chartSel[o[0]]; })) {
+            ORDER.forEach(function (o) { chartSel[o[0]] = o[0] === s; });
+          } else {
+            chartSel[s] = !chartSel[s];
+            if (ORDER.every(function (o) { return !chartSel[o[0]]; })) {
+              ORDER.forEach(function (o) { chartSel[o[0]] = true; });
+            }
+          }
+        }
+        renderLegend();   // refresh selection state + the reset button
+        renderChart();    // bars show only the selected statuses
+        renderList();     // and the list shows only those runs
       });
     });
   }
@@ -1210,6 +1406,44 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     var max = barsEl.scrollWidth - barsEl.clientWidth;
     ol.disabled = barsEl.scrollLeft <= 1;          // older = left; disabled at the oldest end
     ne.disabled = barsEl.scrollLeft >= max - 1;    // newer = right; disabled at the newest end
+  }
+  // The visible-window context next to the arrows: which runs are on screen ("#48-#76
+  // of 76") and, when the trend is on, their average pass rate. Recomputed on scroll
+  // from scrollLeft (bars are evenly spaced at `slot`), so it tracks the carousel live.
+  function updateChartMeta(barsEl, win, slot) {
+    var rEl = document.getElementById("chart-range"), aEl = document.getElementById("chart-avg");
+    var count = win.length;
+    if (!count || !slot) return;                       // nothing to show / not laid out yet
+    var vw = barsEl.clientWidth || 0, sl = barsEl.scrollLeft;
+    var first = Math.ceil(sl / slot - 0.5);            // first bar whose centre is in view
+    var last = Math.floor((sl + vw) / slot - 0.5);     // last such bar
+    // Clamp BOTH ends into [0, count-1]: before layout settles clientWidth can read 0,
+    // which pushes `first` to `count` and indexes past the array (win[first] undefined).
+    first = Math.max(0, Math.min(first, count - 1));
+    last = Math.max(0, Math.min(last, count - 1));
+    if (last < first) last = first;
+    if (rEl) {
+      rEl.innerHTML = "<b>#" + win[first].seq + "–#" + win[last].seq + "</b> / " + count;
+      rEl.title = t("visibleRuns").replace("{a}", win[first].seq)
+        .replace("{b}", win[last].seq).replace("{n}", count);
+    }
+    if (aEl) {
+      var sum = 0, k = 0;
+      if (passTrend) {
+        for (var i = first; i <= last; i++) {
+          var tot = win[i].total || 0;
+          if (tot > 0) { sum += (win[i].passed || 0) / tot; k++; }
+        }
+      }
+      if (k === 0) { aEl.hidden = true; }
+      else {
+        var avg = sum / k;
+        aEl.hidden = false;
+        aEl.innerHTML = esc(t("avgPass")) + " <b>" + Math.round(avg * 100) + "%</b>";
+        aEl.classList.toggle("below", avg < successThreshold);
+        aEl.title = t("avgPassTip").replace("{n}", k);
+      }
+    }
   }
 
   // Mouse drag-to-pan. Touch/trackpad use the element's native horizontal scroll.
@@ -1311,7 +1545,10 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     renderChartFilterNote(selActive, data.length);
     // A real trend needs >=2 bars; but when the user has picked runs, honour even one.
     if (data.length < (selActive ? 1 : 2)) {
-      card.hidden = true; document.getElementById("chart-nav").innerHTML = ""; return;
+      card.hidden = true; document.getElementById("chart-nav").innerHTML = "";
+      var rEl0 = document.getElementById("chart-range"); if (rEl0) rEl0.innerHTML = "";
+      var aEl0 = document.getElementById("chart-avg"); if (aEl0) aEl0.hidden = true;
+      return;
     }
     card.hidden = false;
 
@@ -1376,8 +1613,9 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     barsEl.scrollLeft = (chartScroll == null) ? barsEl.scrollWidth
       : Math.min(chartScroll, barsEl.scrollWidth);
     renderChartNav(barsEl, stripW > vw + 1);
+    updateChartMeta(barsEl, win, slot);
     barsEl.addEventListener("scroll", function () {
-      chartScroll = barsEl.scrollLeft; updateChartArrows(barsEl);
+      chartScroll = barsEl.scrollLeft; updateChartArrows(barsEl); updateChartMeta(barsEl, win, slot);
     });
     enableChartDrag(barsEl);
   }
@@ -1400,16 +1638,35 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       var rate = (r.passed || 0) / tot;
       pts.push({ x: slot * (i + 0.5), y: yOf(rate), r: r, rate: rate });
     });
-    var poly = pts.map(function (p) { return p.x.toFixed(1) + "," + p.y.toFixed(1); }).join(" ");
+    var thy = yOf(successThreshold);  // the orange success line, in pixels
     var dots = pts.map(function (p) {
-      return '<circle class="trend-dot" cx="' + p.x.toFixed(1) + '" cy="' + p.y.toFixed(1)
+      var bad = p.rate < successThreshold;  // below the line = failing run
+      return '<circle class="trend-dot' + (bad ? " trend-dot-bad" : "") + '" cx="'
+        + p.x.toFixed(1) + '" cy="' + p.y.toFixed(1)
         + '" r="3.2" data-id="' + esc(p.r.id) + '"></circle>';
     }).join("");
-    var line = pts.length > 1
-      ? '<polyline class="trend-line" points="' + esc(poly) + '"></polyline>' : "";
+    // Draw the line as segments so the stretch below the success threshold turns red.
+    // A segment straddling the line is split at the crossing point so the colour flips
+    // exactly where it crosses.
+    function trendSeg(x1, y1, x2, y2, bad) {
+      return '<line class="trend-line' + (bad ? " trend-danger" : "") + '" x1="' + x1.toFixed(1)
+        + '" y1="' + y1.toFixed(1) + '" x2="' + x2.toFixed(1) + '" y2="' + y2.toFixed(1) + '"></line>';
+    }
+    var segs = "";
+    for (var si = 0; si < pts.length - 1; si++) {
+      var a = pts[si], b = pts[si + 1];
+      var aBad = a.rate < successThreshold, bBad = b.rate < successThreshold;
+      if (aBad === bBad) {
+        segs += trendSeg(a.x, a.y, b.x, b.y, aBad);
+      } else {  // one point each side: split at y = threshold (a.y !== b.y here)
+        var f = (thy - a.y) / (b.y - a.y);
+        var xc = a.x + (b.x - a.x) * f;
+        segs += trendSeg(a.x, a.y, xc, thy, aBad) + trendSeg(xc, thy, b.x, b.y, bBad);
+      }
+    }
     strip.insertAdjacentHTML("beforeend",
       '<svg class="trend-svg" width="' + stripW + '" height="' + (strip.clientHeight || 128)
-      + '" aria-hidden="true">' + line + dots + "</svg>");
+      + '" aria-hidden="true">' + segs + dots + "</svg>");
     strip.querySelectorAll(".trend-dot").forEach(function (dot, i) {
       var p = pts[i];
       dot.addEventListener("click", function () { if (!chartDragged) openDetail(p.r.id); });
@@ -1419,7 +1676,6 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       });
     });
     // Dashed threshold gridline, pinned (lives in #chart, outside the scrolling strip).
-    var thy = yOf(successThreshold);
     var th = document.createElement("div");
     // Near the top (a high threshold) the label flips below the line so it isn't clipped.
     th.className = "trend-thresh" + (thy < 14 ? " label-below" : "");
@@ -1443,7 +1699,9 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   function clearSelection() {
     selectedIds.clear();
     listEl.querySelectorAll(".sel").forEach(function (cb) { cb.checked = false; });
-    syncSelAll(); updateBulkBar(); renderChart();
+    // Also reset the group-header checkboxes (checked + indeterminate) -- otherwise a
+    // ticked group stays ticked after "show all" even though its runs are deselected.
+    syncSelAll(); syncGroupChecks(); updateBulkBar(); renderChart(); renderFlakyBoard(); renderKpis();
   }
 
   // Comparator for a given run-sort state {key, dir} -- reused by the flat list and
@@ -1576,6 +1834,13 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       return;
     }
     sortReports();
+    // Legend status toggles also filter the list (chart keeps the bars).
+    var shown = reports.filter(statusShown);
+    if (!shown.length) {
+      listEl.innerHTML = '<div class="state">' + esc(t("noMatch")) + "</div>";
+      updateBulkBar();
+      return;
+    }
     var ctrls = '<div class="list-ctrls"><label class="list-grp-lbl"><input type="checkbox" id="list-grp"'
       + (listGroup ? " checked" : "") + "> " + esc(t("listGroup")) + "</label></div>";
     var selAllTh = '<th class="sel-cell"><input type="checkbox" id="sel-all" aria-label="'
@@ -1591,7 +1856,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
         + gHeadCell("runs", "cRuns") + gHeadCell("pass_rate", "cPassRate")
         + gHeadCell("avg_dur", "cAvgDur") + gHeadCell("status", "cStatus")
         + gHeadCell("created_at", "cWhen");
-      var groups = groupReports(reports);
+      var groups = groupReports(shown);
       groups.forEach(function (g) { keyMap[g.key] = g; });
       groups.sort(function (a, b) {
         var x = groupVal(a), y = groupVal(b);
@@ -1614,9 +1879,9 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       }).join("");
     } else {
       theadInner = selAllTh + headCells() + "<th></th>";
-      pages = Math.ceil(reports.length / PAGE_SIZE);
+      pages = Math.ceil(shown.length / PAGE_SIZE);
       listPage = Math.max(0, Math.min(listPage, pages - 1));
-      body = renderRows(reports.slice(listPage * PAGE_SIZE, listPage * PAGE_SIZE + PAGE_SIZE));
+      body = renderRows(shown.slice(listPage * PAGE_SIZE, listPage * PAGE_SIZE + PAGE_SIZE));
       pager = pages > 1
         ? '<div class="pager"><button type="button" class="nav-btn" id="pg-prev"'
             + (listPage <= 0 ? " disabled" : "") + ' aria-label="' + esc(t("prevPage")) + '">‹</button>'
@@ -1680,7 +1945,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
         g.runs.forEach(function (r) {
           if (cb.checked) selectedIds.add(r.id); else selectedIds.delete(r.id);
         });
-        renderChart(); renderList(); updateBulkBar();
+        renderChart(); renderList(); updateBulkBar(); renderFlakyBoard(); renderKpis();
       });
     });
     listEl.querySelectorAll(".row-del").forEach(function (b) {
@@ -1701,7 +1966,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       cb.addEventListener("change", function () {
         var id = cb.getAttribute("data-id");
         if (cb.checked) selectedIds.add(id); else selectedIds.delete(id);
-        syncSelAll(); syncGroupChecks(); updateBulkBar(); renderChart();  // chart follows
+        syncSelAll(); syncGroupChecks(); updateBulkBar(); renderChart(); renderFlakyBoard(); renderKpis();
       });
     });
     var selAll = document.getElementById("sel-all");
@@ -1721,7 +1986,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
         });
       }
       selAll.indeterminate = false;
-      updateBulkBar(); renderChart();
+      updateBulkBar(); renderChart(); renderFlakyBoard(); renderKpis();
     });
     syncSelAll(); updateBulkBar();
   }
@@ -1820,6 +2085,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     var dag = document.getElementById("f-dag").value.trim();
     var task = document.getElementById("f-task").value.trim();
     var run = document.getElementById("f-run").value.trim();
+    var fc = document.getElementById("f-clear");  // reset button: only when a filter is set
+    if (fc) fc.hidden = !(dag || task || run);
     reports = allReports.filter(function (r) {
       return matchesIn(r.dag_id, dag) && matchesIn(r.task_id, task) && matchesIn(r.run_id, run);
     });
@@ -1829,6 +2096,18 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     document.getElementById("board").hidden = allReports.length === 0;
     renderKpis(); renderChart(); renderList(); renderFlakyBoard();
     refreshUniqueTests();
+    refreshSlow();
+  }
+  // The dag·task keys ("dag|task") of the runs the user has ticked, or null if nothing
+  // is selected. Selecting a group (or runs) scopes the chart AND the flaky/failures/slow
+  // boards to those dag·tasks -- one pick narrows the whole dashboard.
+  function selKeySet() {
+    if (!selectedIds.size) return null;
+    var m = {};
+    reports.forEach(function (r) {
+      if (selectedIds.has(r.id)) m[r.dag_id + "|" + r.task_id] = 1;
+    });
+    return m;
   }
   // Flaky panel on the main board: global flaky tests, filtered client-side by the
   // dag/task search; a row opens that test's history.
@@ -1842,7 +2121,14 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     var q = qEl ? qEl.value.trim().toLowerCase() : "";
     var qOnlyEl = document.getElementById("flk-board-qonly");
     var qOnly = !!(qOnlyEl && qOnlyEl.checked);
+    var selKeys = selKeySet();
+    var scope = document.getElementById("flk-scope");
+    if (scope) {
+      scope.hidden = !selKeys;
+      if (selKeys) scope.textContent = t("flkSelScope");
+    }
     var rows = allFlaky.filter(function (f) {
+      if (selKeys && !selKeys[f.dag_id + "|" + f.task_id]) return false;
       if (dag && f.dag_id.toLowerCase().indexOf(dag) === -1) return false;
       if (task && f.task_id.toLowerCase().indexOf(task) === -1) return false;
       if (qOnly && !f.quarantined) return false;
@@ -1853,8 +2139,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     });
     document.getElementById("flaky-count").textContent = rows.length ? String(rows.length) : "";
     if (!rows.length) {
-      // Distinguish "nothing flaky" from "filtered everything out".
-      var msg = allFlaky.length ? "flkNoMatch" : "noFlaky";
+      // Distinguish "nothing flaky" / "selection has none" / "filtered everything out".
+      var msg = !allFlaky.length ? "noFlaky" : selKeys ? "flkNoSel" : "flkNoMatch";
       box.innerHTML = '<div class="fb-empty">' + esc(t(msg)) + "</div>";
       return;
     }
@@ -1879,6 +2165,31 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       .then(function (r) { return r.ok ? r.json() : { flaky: [] }; })
       .then(function (d) { allFlaky = d.flaky || []; renderFlakyBoard(); })
       .catch(function () { allFlaky = []; renderFlakyBoard(); });
+  }
+  // Duration-regression scan honouring the top dag/task/run filters (like the other
+  // KPIs): feeds the "Slowdowns" count and primes the modal so its first open is instant.
+  function slowQuery(win) {
+    var q = uniqueQuery();  // dag_id / task_id / run_id from the top filter bar
+    return win ? (q ? q + "&" : "") + "window=" + encodeURIComponent(win) : q;
+  }
+  function loadSlow() {
+    var my = ++slowSeq;
+    fetch(API + "slow?" + slowQuery())
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) {
+        if (my !== slowSeq) return;
+        slowData = d; slowCount = d ? d.total_regressed : null; slowFailed = !d; renderKpis();
+      })
+      .catch(function () { if (my === slowSeq) { slowData = null; slowFailed = true; renderKpis(); } });
+  }
+  // Debounced refresh on filter changes, mirroring refreshUniqueTests; also keeps an
+  // open modal in sync with the filter.
+  function refreshSlow() {
+    clearTimeout(slowTimer);
+    slowTimer = setTimeout(function () {
+      loadSlow();
+      if (slowDlg.open) loadSlowModal();
+    }, 250);
   }
   var suggestVals = { dag_id: [], task_id: [], run_id: [] };
   function populateSuggestions() {
@@ -1939,6 +2250,10 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   var dBody = document.getElementById("d-body");
   var dTitle = document.getElementById("d-title");
   var detail = null, filter = "all", lastFocus = null, currentId = null;
+  // The run's case table sorts by execution time, slowest first by default; the
+  // TEST / TIME headers toggle. (Top-slowest & regressions across runs live on the
+  // main page only -- a single run has no "slower than usual" context.)
+  var caseSort = { key: "time", dir: "desc" };
 
   function outcomeLabel(o) { return t(o) || o; }
 
@@ -1953,21 +2268,23 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     // Gap between slices, > the round cap diameter so the caps never touch (single slice = no gap).
     var nSeg = segs.filter(function (s) { return (s[2] || 0) > 0; }).length;
     var GAP = nSeg > 1 ? SW + 5 : 0;
-    var off = 0, parts = "";
+    // Lay slices out by their actual footprint (drawn + GAP) within the gapped arc, not by
+    // their raw proportion: this keeps a full GAP between every drawn segment, so when a
+    // share is ~0% its rounded cap stays a clear dot and two tiny slices can't overlap.
+    var avail = total > 0 ? C - nSeg * GAP : C;
+    var cursor = 0, parts = "";
     segs.forEach(function (s) {
       var v = s[2] || 0;
       if (total <= 0 || v <= 0) return;
-      var len = (v / total) * C;
       var pct = Math.round((v / total) * 100);
       var lit = filter === "all" || filter === s[0];
-      // Inset each slice by half the gap on both sides; round caps then sit clear of neighbours.
-      var drawn = Math.max(len - GAP, 0.1);
+      var drawn = Math.max((v / total) * avail, 0.1);  // a tiny share -> a rounded dot
       parts += '<circle class="dseg" data-status="' + s[0] + '" data-count="' + v
         + '" data-pct="' + pct + '" cx="60" cy="60" r="50" '
         + 'fill="none" stroke="' + s[1] + '" stroke-width="' + SW + '" stroke-dasharray="'
         + drawn.toFixed(2) + " " + (C - drawn).toFixed(2) + '" stroke-dashoffset="'
-        + (-(off + GAP / 2)).toFixed(2) + '" opacity="' + (lit ? 1 : 0.3) + '"></circle>';
-      off += len;
+        + (-(cursor + GAP / 2)).toFixed(2) + '" opacity="' + (lit ? 1 : 0.3) + '"></circle>';
+      cursor += drawn + GAP;
     });
     var pct = total > 0 ? Math.round((m.passed / total) * 100) : null;
     var ofN = esc(t("ofWord")) + " " + total;
@@ -2004,6 +2321,13 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       + '<path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z"/></svg>';
     out += '<button type="button" class="af-link" id="flk-btn" data-i18n-al="flakyBtnAl">'
       + zap + esc(t("flakyBtn")) + "</button>";
+    if ((m.failed || 0) + (m.errors || 0) > 0) {
+      var lst = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"'
+        + ' stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+        + '<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>';
+      out += '<button type="button" class="af-link" id="cl-btn" data-i18n-al="clBtnAl">'
+        + lst + esc(t("clBtn")) + "</button>";
+    }
     return out + "</div>";
   }
   function outcomeDot(o) {
@@ -2119,17 +2443,20 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       if ((filter === "all" || c.outcome === filter)
           && (!q || c.node_id.toLowerCase().indexOf(q) !== -1)) sel.push({ c: c, i: idx });
     });
+    sel.sort(caseCmp);  // slowest-first by default; groups inherit this order
     if (!sel.length) {
       tb.innerHTML = '<tr><td colspan="4"><div class="state">' + esc(t("noCases")) + "</div></td></tr>";
       return;
     }
     if (caseGroup) {
       var groups = {};
+      var order = [];  // module order follows the active sort (first appearance in sel)
       sel.forEach(function (o) {
         var mod = caseModule(o.c.node_id);
-        (groups[mod] = groups[mod] || []).push(o);
+        if (groups[mod]) groups[mod].push(o);
+        else { groups[mod] = [o]; order.push(mod); }
       });
-      tb.innerHTML = Object.keys(groups).sort().map(function (mod) {
+      tb.innerHTML = order.map(function (mod) {
         var coll = !!caseCollapsed[mod];
         var rot = coll ? "" : ' style="transform:rotate(90deg)"';
         var hd = '<tr class="grp" data-mod="' + esc(mod) + '"><td colspan="4">'
@@ -2243,10 +2570,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       + esc(t("caseSearch")) + '" autocomplete="off">'
       + '<label class="case-grp-lbl"><input type="checkbox" id="case-grp"> '
       + esc(t("caseGroup")) + "</label></div>"
-      + '<div class="card table-wrap case-table"><table><thead><tr>'
-      + "<th>" + esc(t("hOutcome")) + "</th><th>" + esc(t("hTest"))
-      + '</th><th class="right">' + esc(t("hTime")) + "</th><th></th>"
-      + "</tr></thead><tbody></tbody></table></div>";
+      + '<div class="card table-wrap case-table"><table>'
+      + '<thead><tr id="case-head"></tr></thead><tbody></tbody></table></div>';
 
     dBody.querySelectorAll(".pill").forEach(function (p) {
       p.addEventListener("click", function () { setOutcomeFilter(p.getAttribute("data-f")); });
@@ -2261,6 +2586,20 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     if (cmpBtn && prev && rec) cmpBtn.addEventListener("click", function () { openCompare(prev, rec); });
     var flkBtn = document.getElementById("flk-btn");
     if (flkBtn) flkBtn.addEventListener("click", function () { openFlaky(m.dag_id, m.task_id); });
+    // Per-run error clusters: a clear toolbar button opens the clusters modal scoped to
+    // this run; a cluster's test jumps to its history.
+    var clBtn = document.getElementById("cl-btn");
+    if (clBtn) clBtn.addEventListener("click", function () {
+      // latest=0: cluster THIS run's failures (run_id-scoped), not "the dag·task's
+      // latest run" — the opened run may be an older one (deep-link / history).
+      var qs = "?" + new URLSearchParams(
+        { dag_id: m.dag_id, task_id: m.task_id, run_id: m.run_id, latest: "0" }
+      ).toString();
+      openClusters(qs, rec && rec.seq ? "#" + rec.seq : "", function (it) {
+        closeFailures();
+        openHistory(it.dag_id, it.task_id, it.node_id);
+      });
+    });
     dBody.querySelectorAll(".dseg").forEach(function (seg) {
       seg.addEventListener("click", function () {
         var s = seg.getAttribute("data-status");
@@ -2278,13 +2617,57 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     var grp = document.getElementById("case-grp");
     grp.checked = caseGroup;
     grp.addEventListener("change", function () { caseGroup = grp.checked; fillCases(); });
+    renderCaseHead();
     fillBench();
     fillCases();
+  }
+  // Sortable case-table header: OUTCOME (plain) + TEST + TIME. TIME starts descending
+  // so the slowest cases in the run surface first; clicking a header toggles direction.
+  // Same ↑/↓ arrow + th.sortable styling as the run-list header on the main page.
+  function caseHeadCell(key, label, cls) {
+    var on = caseSort.key === key;
+    var aria = on ? (caseSort.dir === "asc" ? "ascending" : "descending") : "none";
+    var ar = on ? '<span class="arrow">' + (caseSort.dir === "asc" ? "↑" : "↓") + "</span>" : "";
+    return '<th class="sortable' + (cls ? " " + cls : "") + '" data-key="' + key
+      + '" role="button" tabindex="0" aria-sort="' + aria + '">' + esc(label) + ar + "</th>";
+  }
+  function renderCaseHead() {
+    var head = document.getElementById("case-head");
+    if (!head) return;
+    head.innerHTML = "<th>" + esc(t("hOutcome")) + "</th>"
+      + caseHeadCell("node", t("hTest"), "")
+      + caseHeadCell("time", t("hTime"), "right") + "<th></th>";
+    head.querySelectorAll("th.sortable").forEach(function (th) {
+      var fn = function () {
+        var k = th.getAttribute("data-key");
+        if (caseSort.key === k) caseSort.dir = caseSort.dir === "asc" ? "desc" : "asc";
+        else caseSort = { key: k, dir: k === "time" ? "desc" : "asc" };
+        renderCaseHead(); fillCases();
+      };
+      th.addEventListener("click", fn);
+      th.addEventListener("keydown", function (e) {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fn(); }
+      });
+    });
+  }
+  // Compares two {c, i} case entries by the active sort (time numeric / node string),
+  // with a stable tiebreak so equal rows keep a deterministic order.
+  function caseCmp(a, b) {
+    var dir = caseSort.dir === "asc" ? 1 : -1;
+    if (caseSort.key === "time") {
+      var d = (+a.c.time || 0) - (+b.c.time || 0);
+      if (d) return d > 0 ? dir : -dir;
+    } else if (a.c.node_id !== b.c.node_id) {
+      return (a.c.node_id < b.c.node_id ? -1 : 1) * dir;
+    }
+    if (a.c.node_id !== b.c.node_id) return a.c.node_id < b.c.node_id ? -1 : 1;
+    return a.i - b.i;
   }
 
   function openDetail(id) {
     filter = "all"; currentId = id;
     caseQuery = ""; caseGroup = false; caseCollapsed = {};
+    caseSort = { key: "time", dir: "desc" };
     lastFocus = document.activeElement;
     document.getElementById("d-copied").hidden = true;
     dBody.innerHTML = '<div class="state"><div class="skeleton" style="width:40%;margin:0 auto"></div></div>';
@@ -2376,7 +2759,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     setParentDim((dlg && dlg.open) || (confirmDlg && confirmDlg.open)
       || (failuresDlg && failuresDlg.open) || (compareDlg && compareDlg.open)
       || (flakyDlg && flakyDlg.open) || (historyDlg && historyDlg.open)
-      || (uniqueDlg && uniqueDlg.open));
+      || (uniqueDlg && uniqueDlg.open) || (slowDlg && slowDlg.open));
   }
 
   // Copy a deep-link to this report.
@@ -2469,12 +2852,61 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   confirmDlg.addEventListener("close", updateParentDim);
   closeOnBackdrop(confirmDlg, closeConfirm);
 
-  // Failed-tests modal: clicking the FAILURES KPI lists every failed/errored case
-  // across the visible runs, paginated client-side at FAIL_PAGE per page.
+  // Failures modal: clicking the FAILURES KPI groups every failed/errored case across
+  // the visible runs into clusters by normalized error (see /api/failure-clusters), so
+  // common root causes surface instead of per-failure spam.
   var failuresDlg = document.getElementById("failures");
   var flBody = document.getElementById("fl-body");
-  var FAIL_PAGE = 100;
-  var failuresData = [], failPage = 0, failCapped = false;
+
+  // Renders error clusters into `box`; each cluster expands to its failing tests, and a
+  // test click calls onItem(test). Shared by the global modal and the per-run panel.
+  function renderClusters(box, clusters, onItem) {
+    if (!clusters || !clusters.length) {
+      box.innerHTML = '<div class="state">' + esc(t("noFailures")) + "</div>";
+      return;
+    }
+    box.innerHTML = clusters.map(function (c, i) {
+      var dots = (c.outcomes || []).map(outcomeDot).join("");
+      var head = '<div class="cl-row" tabindex="0" role="button" aria-expanded="false" data-i="' + i + '">'
+        + '<span class="cl-count">' + (c.count || 0) + "×</span>"
+        + '<span class="cl-sig mono">' + esc(c.signature || c.sample || "?") + "</span>"
+        + '<span class="cl-dots">' + dots + '</span><span class="chev">' + CHEV + "</span></div>";
+      var items = (c.tests || []).map(function (it) {
+        return '<div class="cl-item" tabindex="0" role="button" data-id="' + esc(it.id)
+          + '" data-node="' + esc(it.node_id) + '" data-dag="' + esc(it.dag_id)
+          + '" data-task="' + esc(it.task_id) + '" data-outcome="' + esc(it.outcome) + '">'
+          + outcomeDot(it.outcome) + '<span class="mono">' + esc(it.node_id) + "</span>"
+          + '<span class="muted">' + esc(it.dag_id) + "·" + esc(it.task_id) + "</span></div>";
+      }).join("");
+      return head + '<div class="cl-items" data-items="' + i + '" hidden>' + items + "</div>";
+    }).join("");
+    box.querySelectorAll(".cl-row").forEach(function (row) {
+      var toggle = function () {
+        var its = box.querySelector('.cl-items[data-items="' + row.getAttribute("data-i") + '"]');
+        var open = row.getAttribute("aria-expanded") === "true";
+        row.setAttribute("aria-expanded", String(!open));
+        if (its) its.hidden = open;
+      };
+      row.addEventListener("click", toggle);
+      row.addEventListener("keydown", function (e) {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); }
+      });
+    });
+    box.querySelectorAll(".cl-item").forEach(function (el) {
+      var act = function (e) {
+        e.stopPropagation();
+        onItem({
+          id: el.getAttribute("data-id"), node_id: el.getAttribute("data-node"),
+          dag_id: el.getAttribute("data-dag"), task_id: el.getAttribute("data-task"),
+          outcome: el.getAttribute("data-outcome"),
+        });
+      };
+      el.addEventListener("click", act);
+      el.addEventListener("keydown", function (e) {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); act(e); }
+      });
+    });
+  }
 
   function filterQuery() {
     var q = new URLSearchParams();
@@ -2487,67 +2919,53 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     var s = q.toString();
     return s ? "?" + s : "";
   }
-  function openFailures() {
+  // Opens the failures dialog and loads clusters for the given query scope. ``onItem``
+  // handles a click on a test inside a cluster. Used globally (KPI) and per-run (detail).
+  // Narrow server-built clusters to the picked dag·task group(s): keep only the matching
+  // tests, recompute the per-cluster count, drop emptied clusters, re-sort biggest-first.
+  function scopeClusters(clusters, keys) {
+    var out = [];
+    (clusters || []).forEach(function (c) {
+      var tests = (c.tests || []).filter(function (tt) { return keys[tt.dag_id + "|" + tt.task_id]; });
+      if (tests.length) {
+        out.push({ signature: c.signature, sample: c.sample, outcomes: c.outcomes,
+          count: tests.length, tests: tests });
+      }
+    });
+    out.sort(function (a, b) { return b.count - a.count; });
+    return out;
+  }
+  function openClusters(qs, subtitle, onItem, scopeKeys) {
     if (typeof failuresDlg.showModal === "function") { if (!failuresDlg.open) failuresDlg.showModal(); }
     else failuresDlg.setAttribute("open", "");
     updateParentDim();
+    document.getElementById("fl-title").textContent =
+      t("failuresTitle") + (subtitle ? " · " + subtitle : "");
     flBody.innerHTML = '<div class="state"><div class="skeleton" style="width:40%;margin:0 auto"></div></div>';
-    fetch(API + "failures" + filterQuery())
+    fetch(API + "failure-clusters" + qs)
       .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
       .then(function (d) {
-        failuresData = d.failures || []; failCapped = !!d.capped; failPage = 0; renderFailures();
+        var clusters = d.clusters || [];
+        if (scopeKeys) clusters = scopeClusters(clusters, scopeKeys);
+        var cap = (d.capped && !scopeKeys)
+          ? '<div class="state muted">' + esc(t("failCapped").replace("{n}", d.total)) + "</div>" : "";
+        flBody.innerHTML = '<div id="cl-list"></div>' + cap;
+        renderClusters(document.getElementById("cl-list"), clusters, onItem);
       })
       .catch(function (e) {
         flBody.innerHTML = '<div class="state c-fail">' + esc(t("failuresFail") + e.message) + "</div>";
       });
   }
+  function openFailures() {
+    var sk = selKeySet();
+    openClusters(filterQuery(), sk ? t("flkSelScope") : "", function (it) {
+      openDetail(it.id);      // resets filter to "all"...
+      filter = it.outcome;    // ...then land on the failing cases
+      closeFailures();
+    }, sk);
+  }
   function closeFailures() {
     if (failuresDlg.open) failuresDlg.close(); else failuresDlg.removeAttribute("open");
-  }
-  function renderFailures() {
-    if (!failuresData.length) {
-      flBody.innerHTML = '<div class="state">' + esc(t("noFailures")) + "</div>";
-      return;
-    }
-    var pages = Math.ceil(failuresData.length / FAIL_PAGE);
-    failPage = Math.max(0, Math.min(failPage, pages - 1));
-    var slice = failuresData.slice(failPage * FAIL_PAGE, failPage * FAIL_PAGE + FAIL_PAGE);
-    var rows = slice.map(function (f) {
-      var kind = f.outcome === "error" ? "error" : "fail";
-      var rec = reports.filter(function (x) { return x.id === f.id; })[0];
-      var run = esc(f.dag_id) + " · " + esc(f.task_id) + (rec && rec.seq ? " · #" + rec.seq : "");
-      return '<tr class="case clickable" tabindex="0" data-id="' + esc(f.id)
-        + '" data-outcome="' + esc(f.outcome) + '">'
-        + "<td>" + badge(kind, outcomeLabel(f.outcome)) + "</td>"
-        + '<td><span class="case-node mono">' + esc(f.node_id) + "</span></td>"
-        + '<td class="muted">' + run + "</td></tr>";
-    }).join("");
-    var cap = failCapped
-      ? '<div class="state muted">' + esc(t("failCapped").replace("{n}", failuresData.length)) + "</div>" : "";
-    var pager = pages > 1
-      ? '<div class="pager"><button type="button" class="nav-btn" id="fl-prev"'
-          + (failPage <= 0 ? " disabled" : "") + ' aria-label="' + esc(t("prevPage")) + '">‹</button>'
-        + "<span>" + esc(t("page")) + " " + (failPage + 1) + " / " + pages + "</span>"
-        + '<button type="button" class="nav-btn" id="fl-next"'
-          + (failPage >= pages - 1 ? " disabled" : "") + ' aria-label="' + esc(t("nextPage")) + '">›</button></div>'
-      : "";
-    flBody.innerHTML = '<div class="card table-wrap case-table"><table><thead><tr>'
-      + "<th>" + esc(t("hOutcome")) + "</th><th>" + esc(t("hTest")) + "</th><th>"
-      + esc(t("cRun")) + "</th></tr></thead><tbody>" + rows + "</tbody></table></div>" + cap + pager;
-    flBody.querySelectorAll(".case").forEach(function (tr) {
-      var open = function () {
-        openDetail(tr.getAttribute("data-id"));      // resets filter to "all"...
-        filter = tr.getAttribute("data-outcome");    // ...then land on the failing cases
-        closeFailures();
-      };
-      tr.addEventListener("click", open);
-      tr.addEventListener("keydown", function (e) {
-        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); }
-      });
-    });
-    var p = document.getElementById("fl-prev"), n = document.getElementById("fl-next");
-    if (p) p.addEventListener("click", function () { if (failPage > 0) { failPage--; renderFailures(); } });
-    if (n) n.addEventListener("click", function () { if (failPage < pages - 1) { failPage++; renderFailures(); } });
   }
   document.getElementById("fl-close").addEventListener("click", closeFailures);
   failuresDlg.addEventListener("close", updateParentDim);
@@ -2591,6 +3009,24 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   function closeUnique() {
     if (uniqueDlg.open) uniqueDlg.close(); else uniqueDlg.removeAttribute("open");
   }
+  // Per-test stats line in the catalogue: total runs, average time, and per-outcome
+  // counts (only the non-zero ones, each a coloured dot + count) -- all from /api/slow's
+  // sibling scan in /api/unique-tests, so no extra request.
+  function uqStats(x) {
+    if (x.runs == null) return "";  // tolerate an older API without stats
+    var parts = [
+      '<span class="uq-tot" title="' + esc(t("uqRuns")) + '">' + (x.runs || 0) + "×</span>",
+      '<span class="uq-avg">' + esc(t("avgWord")) + " " + esc(fmtDur(x.avg_duration || 0)) + "</span>",
+    ];
+    [["passed", x.passed], ["failed", x.failed], ["error", x.errors], ["skipped", x.skipped]]
+      .forEach(function (o) {
+        if (o[1]) {
+          parts.push('<span class="uq-st" title="' + esc(outcomeLabel(o[0])) + '">'
+            + outcomeDot(o[0]) + o[1] + "</span>");
+        }
+      });
+    return '<span class="uq-meta">' + parts.join("") + "</span>";
+  }
   function fillUnique() {
     var listEl = document.getElementById("uq-list");
     if (!listEl) return;
@@ -2605,7 +3041,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       ? slice.map(function (x) {
           return '<div class="uq-row" tabindex="0" role="button" data-dag="' + esc(x.dag_id)
             + '" data-task="' + esc(x.task_id) + '" data-node="' + esc(x.node_id) + '">'
-            + '<span class="mono">' + esc(x.node_id) + "</span></div>";
+            + '<span class="mono uq-node">' + esc(x.node_id) + "</span>" + uqStats(x) + "</div>";
         }).join("")
       : '<div class="state">' + esc(t("noCases")) + "</div>";
     listEl.querySelectorAll(".uq-row").forEach(function (row) {
@@ -2686,6 +3122,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   var fkBody = document.getElementById("fk-body");
   var FLK_WINDOWS = [10, 30, 50, 100, 200];
   var fkState = { dag: null, task: null, window: 30, qOnly: false, rows: [] };
+  var flkSeq = 0;  // guards against a stale window's response overwriting a newer one
   function openFlaky(dag, task) {
     fkState.dag = dag; fkState.task = task; fkState.window = 30; fkState.qOnly = false;
     if (typeof flakyDlg.showModal === "function") { if (!flakyDlg.open) flakyDlg.showModal(); }
@@ -2715,10 +3152,12 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     var q = new URLSearchParams({
       dag_id: fkState.dag, task_id: fkState.task, window: String(fkState.window),
     });
+    var my = ++flkSeq;  // ignore a stale window's response landing after a newer one
     fetch(API + "flaky?" + q.toString())
       .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
-      .then(function (d) { fkState.rows = d.flaky || []; fillFlakyRows(); })
+      .then(function (d) { if (my !== flkSeq) return; fkState.rows = d.flaky || []; fillFlakyRows(); })
       .catch(function (e) {
+        if (my !== flkSeq) return;
         var el = document.getElementById("flk-list");
         if (el) el.innerHTML = '<div class="state c-fail">' + esc(t("flakyFail") + e.message) + "</div>";
       });
@@ -2744,6 +3183,91 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   document.getElementById("fk-close").addEventListener("click", closeFlaky);
   flakyDlg.addEventListener("close", updateParentDim);
   closeOnBackdrop(flakyDlg, closeFlaky);
+
+  // Slow tests & duration regressions across all dag·tasks: a "got slower" section
+  // (recent-half avg vs older half) plus a slowest-by-average leaderboard. One window
+  // selector; the global scan primes the first open so it's instant.
+  var slowDlg = document.getElementById("slow");
+  var slBody = document.getElementById("sl-body");
+  var slowState = { window: 0, data: null };
+  function slowLoc(x) {
+    return '<span class="slow-loc muted">' + esc(x.dag_id) + "·" + esc(x.task_id) + "</span>";
+  }
+  function slowRowReg(x) {
+    return '<div class="slow-row"><span class="node mono">' + esc(x.node_id) + "</span>"
+      + slowLoc(x) + '<span class="slow-meta"><span class="slow-up">▲</span> '
+      + esc(fmtDur(x.old_avg)) + " → <b>" + esc(fmtDur(x.new_avg)) + "</b>"
+      + (x.ratio ? ' <span class="slow-ratio">×' + x.ratio + "</span>" : "") + "</span></div>";
+  }
+  function slowRowAvg(x) {
+    return '<div class="slow-row"><span class="node mono">' + esc(x.node_id) + "</span>"
+      + slowLoc(x) + '<span class="slow-meta"><b>' + esc(fmtDur(x.avg)) + "</b>"
+      + (x.regressed ? ' <span class="slow-up" title="' + esc(t("slowRegressing")) + '">▲</span>' : "")
+      + "</span></div>";
+  }
+  function openSlow() {
+    if (!slowState.window) slowState.window = (slowData && slowData.window) || 30;
+    if (typeof slowDlg.showModal === "function") { if (!slowDlg.open) slowDlg.showModal(); }
+    else slowDlg.setAttribute("open", "");
+    updateParentDim();
+    slBody.innerHTML = '<div class="flk-ctrls"><label title="' + esc(t("flkWindowTip")) + '">'
+      + esc(t("flkWindow")) + ' <select id="sl-win">'
+      + FLK_WINDOWS.map(function (w) {
+          return '<option value="' + w + '"' + (w === slowState.window ? " selected" : "") + ">"
+            + esc(t("flkWinOpt").replace("{n}", w)) + "</option>";
+        }).join("")
+      + "</select></label></div><div id=\"sl-list\"></div>";
+    document.getElementById("sl-win").addEventListener("change", function () {
+      slowState.window = +this.value; loadSlowModal();
+    });
+    if (slowData && slowData.window === slowState.window) {
+      slowState.data = slowData; fillSlow();
+    } else {
+      loadSlowModal();
+    }
+  }
+  function loadSlowModal() {
+    var listEl = document.getElementById("sl-list");
+    if (listEl) {
+      listEl.innerHTML = '<div class="state"><div class="skeleton" style="width:40%;margin:0 auto"></div></div>';
+    }
+    var my = ++slowModalSeq;  // ignore a stale window/filter response after a newer one
+    fetch(API + "slow?" + slowQuery(slowState.window))
+      .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+      .then(function (d) { if (my !== slowModalSeq) return; slowState.data = d; fillSlow(); })
+      .catch(function (e) {
+        if (my !== slowModalSeq) return;
+        var el = document.getElementById("sl-list");
+        if (el) el.innerHTML = '<div class="state c-fail">' + esc(t("slowFail") + e.message) + "</div>";
+      });
+  }
+  function fillSlow() {
+    var listEl = document.getElementById("sl-list");
+    if (!listEl || !slowState.data) return;
+    var d = slowState.data, reg = d.regressed || [], slowest = d.slowest || [];
+    // Scope to the picked dag·task group(s), like the flaky panel + the KPI count.
+    var sk = selKeySet();
+    if (sk) {
+      var inSel = function (x) { return sk[x.dag_id + "|" + x.task_id]; };
+      reg = reg.filter(inSel); slowest = slowest.filter(inSel);
+    }
+    var title = document.getElementById("sl-title");
+    if (title) title.textContent = t("slowTitle") + (sk ? " · " + t("flkSelScope") : "");
+    listEl.innerHTML =
+      '<div class="slow-sec"><h3><span class="slow-up">▲</span> ' + esc(t("slowRegressing"))
+        + " (" + reg.length + ")</h3>"
+      + (reg.length ? reg.map(slowRowReg).join("")
+          : '<div class="state">' + esc(t("slowNoneReg")) + "</div>")
+      + "</div><div class=\"slow-sec\"><h3>" + esc(t("slowSlowest"))
+        + " (" + slowest.length + ")</h3>"
+      + (slowest.length ? slowest.map(slowRowAvg).join("")
+          : '<div class="state">' + esc(t("slowNoData")) + "</div>")
+      + "</div>";
+  }
+  function closeSlow() { if (slowDlg.open) slowDlg.close(); else slowDlg.removeAttribute("open"); }
+  document.getElementById("sl-close").addEventListener("click", closeSlow);
+  slowDlg.addEventListener("close", updateParentDim);
+  closeOnBackdrop(slowDlg, closeSlow);
 
   // Test history: one test's outcome + duration across the runs of its dag·task.
   var historyDlg = document.getElementById("history");
@@ -2831,6 +3355,11 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   bindSuggest("f-dag", "sg-dag", "dag_id");
   bindSuggest("f-task", "sg-task", "task_id");
   bindSuggest("f-run", "sg-run", "run_id");
+  var fClear = document.getElementById("f-clear");
+  if (fClear) fClear.addEventListener("click", function () {
+    ["f-dag", "f-task", "f-run"].forEach(function (id) { document.getElementById(id).value = ""; });
+    applyFilter();  // re-filters + hides this button
+  });
   // Re-render the chart on resize so bars re-snap to the new pixel grid.
   var _rsTimer;
   window.addEventListener("resize", function () {

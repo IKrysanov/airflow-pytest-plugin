@@ -60,6 +60,14 @@ dev = [
     "mypy>=1.8",
     "ruff>=0.4",
 ]
+# Playwright UI regression suite (tests/ui, marker `ui`). Opt-in: heavy (real browser),
+# run locally + in a dedicated CI job. After install: `playwright install chromium`.
+ui-test = [
+    "pytest>=7.0",
+    "pytest-playwright>=0.5",
+    "fastapi>=0.110",
+    "uvicorn>=0.23",        # the standalone dev server the UI tests drive
+]
 
 [project.urls]
 Homepage = "https://github.com/IKrysanov/airflow-pytest-plugin"
@@ -83,6 +91,15 @@ include = ["src", "tests", "examples", "README.md", "LICENSE"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+# UI (Playwright) tests are opt-in and excluded by default so the unit suite stays fast
+# and browser-free. Run them explicitly: `pytest -m ui` (standalone dev server) or
+# `pytest -m ui_airflow` (embedded in a real Airflow api-server). Both need the
+# `ui-test` extra + browsers; `ui_airflow` also needs Airflow installed.
+addopts = ["-m", "not ui and not ui_airflow"]
+markers = [
+    "ui: Playwright UI regression test (opt-in; needs the 'ui-test' extra + browsers)",
+    "ui_airflow: Playwright UI test against a real Airflow api-server with the plugin embedded",
+]
 
 [tool.coverage.run]
 branch = true
