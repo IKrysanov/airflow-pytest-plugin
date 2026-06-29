@@ -20,6 +20,13 @@ from dataclasses import dataclass
 
 import pytest
 
+# The Playwright UI suite (tests/ui) needs the optional `ui-test` extra. When it's absent,
+# skip that directory entirely so the default unit run collects cleanly without browsers.
+try:  # pragma: no cover - environment-dependent
+    import playwright  # noqa: F401
+except Exception:  # pragma: no cover
+    collect_ignore_glob = ["ui/*"]
+
 from airflow_pytest_plugin.layout import ALLURE_DIRNAME, META_FILENAME, ReportLayout
 from airflow_pytest_plugin.models import ReportRef
 

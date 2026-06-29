@@ -21,7 +21,12 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse, Response
 
-from ...config import get_success_threshold
+from ...config import (
+    get_flaky_window,
+    get_slow_factor,
+    get_slow_min_delta,
+    get_success_threshold,
+)
 from .common import ERR_400, ERR_403, ERR_404, RouteDeps, ok, ref_from_token
 
 TAG = "reports"
@@ -29,6 +34,13 @@ TAG = "reports"
 #: Cap on how many (newest) runs /api/unique-tests reads per-test maps from, so the
 #: KPI can't trigger an unbounded scan of every archived run on each filter change.
 _UNIQUE_SCAN_CAP = 1000
+
+#: Caps on /api/slow output: regressions list and the slowest leaderboard.
+_SLOW_CAP = 1000
+_SLOW_TOP = 50
+#: Safety cap on how many run-meta files /api/slow reads per request (whole groups are
+#: skipped once exceeded; ``capped`` flags it), so a broad scan can't read every archive.
+_SLOW_SCAN_CAP = 2000
 
 # -- OpenAPI examples (illustrative; Swagger shows these instead of a bare "string") --
 _EX_SUMMARY = {
@@ -66,6 +78,18 @@ _EX_GROUP = {
     "avg_duration": 1.6,
     "last_status": "failed",
     "last_created_at": "2026-06-20T07:00:00+00:00",
+}
+_EX_SLOW = {
+    "dag_id": "api_gateway",
+    "task_id": "integration_tests",
+    "node_id": "tests/api.py::test_bulk_import",
+    "runs": 8,
+    "avg": 4.1,
+    "last": 6.2,
+    "old_avg": 2.0,
+    "new_avg": 6.1,
+    "ratio": 3.05,
+    "regressed": True,
 }
 
 
@@ -107,6 +131,46 @@ def summarize_groups(summaries: list[Any]) -> list[dict[str, Any]]:
         )
     out.sort(key=lambda g: g["last_created_at"] or "", reverse=True)
     return out
+
+
+def slow_stats(
+    durations: list[float], *, factor: float, min_delta: float
+) -> dict[str, Any]:
+    """Duration stats for one test's run history (oldest→newest), pure.
+
+    Always reports ``avg`` and ``last`` so the caller can rank the slowest tests. A
+    test counts as a regression (``regressed``) only with at least four runs, when the
+    recent half's average duration is both ``factor``× the older half's AND at least
+    ``min_delta`` seconds slower — the absolute floor keeps fast tests with jittery
+    ratios off the list. ``ratio`` is recent÷older (``None`` until enough runs, or when
+    the older half averaged 0 — an "appeared from nothing" jump). ``durations`` holds
+    only the runs where the test actually appeared, so the split-half compares the test
+    to itself; an intermittently-run test is split over appearances, not calendar slots.
+    """
+    n = len(durations)
+    avg = sum(durations) / n if n else 0.0
+    last = durations[-1] if n else 0.0
+    old_avg: float | None = None
+    new_avg: float | None = None
+    ratio: float | None = None
+    regressed = False
+    if n >= 4:
+        mid = n // 2
+        older, newer = durations[:mid], durations[mid:]
+        old_avg = sum(older) / len(older)
+        new_avg = sum(newer) / len(newer)
+        if old_avg > 0:
+            ratio = round(new_avg / old_avg, 2)
+        regressed = new_avg >= old_avg * factor and (new_avg - old_avg) >= min_delta
+    return {
+        "runs": n,
+        "avg": round(avg, 3),
+        "last": round(last, 3),
+        "old_avg": round(old_avg, 3) if old_avg is not None else None,
+        "new_avg": round(new_avg, 3) if new_avg is not None else None,
+        "ratio": ratio,
+        "regressed": regressed,
+    }
 
 
 def build_router(deps: RouteDeps) -> APIRouter:
@@ -168,6 +232,97 @@ def build_router(deps: RouteDeps) -> APIRouter:
         ]
         items = summarize_groups(visible)
         return JSONResponse({"groups": items, "total": len(items)})
+
+    @router.get(
+        "/api/slow",
+        summary="Slow tests & duration regressions",
+        responses=ok(
+            {
+                "regressed": [_EX_SLOW],
+                "slowest": [_EX_SLOW],
+                "total_regressed": 1,
+                "capped": False,
+                "window": 30,
+                "factor": 1.3,
+                "min_delta": 0.5,
+            }
+        ),
+    )
+    def slow(
+        dag_id: str | None = None,
+        task_id: str | None = None,
+        window: int | None = None,
+        run_id: str | None = None,
+        user: Any = Depends(user_dep),  # noqa: B008 - FastAPI dependency idiom
+    ) -> JSONResponse:
+        """Slowest tests and duration regressions across the last ``window`` runs.
+
+        Groups readable runs by dag·task, takes each group's most recent ``window``
+        (default = the flaky window; clamped 2–200), and per test builds a duration
+        sequence. ``regressed`` lists tests that got slower (recent-half avg ≥
+        ``factor``× the older half AND ≥ ``min_delta`` s), sorted worst-ratio first;
+        ``slowest`` is the top ``50`` by average duration (single-run / zero-time tests
+        are skipped so it means *reliably* slow). A test that speeds back up drops off
+        ``regressed`` (its recent half is no longer slower). Optional ``dag_id`` /
+        ``task_id`` / ``run_id`` narrow by substring (mirroring the run list);
+        RBAC-filtered. At most ``2000`` run-meta files are read per request; ``capped``
+        flags that some groups were skipped.
+        """
+        chosen = window if window is not None else get_flaky_window()
+        win = max(2, min(chosen, 200))
+        factor = get_slow_factor()
+        min_delta = get_slow_min_delta()
+        task_q = (task_id or "").lower()
+
+        groups: dict[tuple[str, str], list[Any]] = {}
+        for s in src.list_summaries(dag_id=dag_id, run_id=run_id):
+            if task_q and task_q not in s.ref.task_id.lower():
+                continue
+            if not read_auth(s.ref.dag_id, user):
+                continue
+            groups.setdefault((s.ref.dag_id, s.ref.task_id), []).append(s)
+
+        regressed: list[dict[str, Any]] = []
+        slowest: list[dict[str, Any]] = []
+        scanned = 0
+        capped = False
+        for (dag, task), summaries in groups.items():
+            if scanned >= _SLOW_SCAN_CAP:  # skip whole groups past the read budget
+                capped = True
+                break
+            summaries.sort(key=lambda s: s.created_at or "", reverse=True)
+            window_runs = summaries[:win]
+            scanned += len(window_runs)
+            seqs: dict[str, list[float]] = {}
+            for s in reversed(window_runs):  # oldest -> newest
+                for node, info in (src.test_outcomes(s.ref) or {}).items():
+                    seqs.setdefault(node, []).append(float(info.get("duration") or 0.0))
+            for node, durs in seqs.items():
+                stats = slow_stats(durs, factor=factor, min_delta=min_delta)
+                item = {"dag_id": dag, "task_id": task, "node_id": node, **stats}
+                if stats["regressed"]:
+                    regressed.append(item)
+                # Leaderboard wants reliably-slow tests: skip single-run / zero-time noise.
+                if stats["runs"] >= 2 and stats["avg"] > 0:
+                    slowest.append(item)
+
+        def _ratio_key(x: dict[str, Any]) -> float:
+            r = x["ratio"]  # None = was ~0s, now slow -> infinite increase, rank first
+            return float("inf") if r is None else r
+
+        regressed.sort(key=lambda x: (-_ratio_key(x), -(x["new_avg"] or 0)))
+        slowest.sort(key=lambda x: (-x["avg"], x["node_id"]))
+        return JSONResponse(
+            {
+                "regressed": regressed[:_SLOW_CAP],
+                "slowest": slowest[:_SLOW_TOP],
+                "total_regressed": len(regressed),
+                "capped": capped,
+                "window": win,
+                "factor": factor,
+                "min_delta": min_delta,
+            }
+        )
 
     @router.get(
         "/api/reports/{report_id}",
@@ -347,6 +502,12 @@ def build_router(deps: RouteDeps) -> APIRouter:
                         "node_id": "tests/test_etl.py::test_load",
                         "dag_id": "etl_daily",
                         "task_id": "unit_tests",
+                        "runs": 12,
+                        "passed": 10,
+                        "failed": 1,
+                        "errors": 0,
+                        "skipped": 1,
+                        "avg_duration": 0.42,
                     },
                 ],
             }
@@ -363,11 +524,13 @@ def build_router(deps: RouteDeps) -> APIRouter:
 
         Powers the *Unique tests* KPI. Reads at most the ``1000`` newest runs so the
         count stays cheap (``capped`` flags truncation). The body carries the full,
-        sorted catalogue (each test with a representative dag·task) only when
-        ``full`` is set — i.e. when the user actually opens the list.
+        sorted catalogue only when ``full`` is set — i.e. when the user opens the list —
+        with per-test stats aggregated from the SAME scan (no extra I/O): ``runs`` (total
+        appearances), per-outcome counts (``passed`` / ``failed`` / ``errors`` /
+        ``skipped``) and ``avg_duration`` over those runs.
         """
         task_q = (task_id or "").lower()
-        seen: dict[str, tuple[str, str]] = {}  # node_id -> (dag, task) first seen
+        seen: dict[str, dict[str, Any]] = {}  # node_id -> first-seen identity + tallies
         scanned = 0
         capped = False
         for s in src.list_summaries(dag_id=dag_id, run_id=run_id):  # newest first
@@ -379,13 +542,47 @@ def build_router(deps: RouteDeps) -> APIRouter:
                 capped = True
                 break
             scanned += 1
-            for node in src.test_outcomes(s.ref) or {}:
-                seen.setdefault(node, (s.ref.dag_id, s.ref.task_id))
+            for node, info in (src.test_outcomes(s.ref) or {}).items():
+                st = seen.get(node)
+                if st is None:
+                    st = seen[node] = {
+                        "dag_id": s.ref.dag_id,
+                        "task_id": s.ref.task_id,
+                        "runs": 0,
+                        "passed": 0,
+                        "failed": 0,
+                        "errors": 0,
+                        "skipped": 0,
+                        "_dur": 0.0,
+                    }
+                st["runs"] += 1
+                outcome = info.get("outcome")
+                if outcome == "passed":
+                    st["passed"] += 1
+                elif outcome == "failed":
+                    st["failed"] += 1
+                elif outcome == "error":
+                    st["errors"] += 1
+                elif outcome == "skipped":
+                    st["skipped"] += 1
+                st["_dur"] += float(info.get("duration") or 0.0)
         body: dict[str, Any] = {"count": len(seen), "capped": capped}
         if full:
             body["tests"] = [
-                {"node_id": n, "dag_id": d, "task_id": ta}
-                for n, (d, ta) in sorted(seen.items())
+                {
+                    "node_id": n,
+                    "dag_id": st["dag_id"],
+                    "task_id": st["task_id"],
+                    "runs": st["runs"],
+                    "passed": st["passed"],
+                    "failed": st["failed"],
+                    "errors": st["errors"],
+                    "skipped": st["skipped"],
+                    "avg_duration": round(st["_dur"] / st["runs"], 3)
+                    if st["runs"]
+                    else 0.0,
+                }
+                for n, st in sorted(seen.items())
             ]
         return JSONResponse(body)
 

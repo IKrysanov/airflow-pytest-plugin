@@ -107,3 +107,46 @@ jobs:
           python -c "from airflow_pytest_plugin.plugin import PytestReportsPlugin as P; assert P.fastapi_apps, 'FastAPI app not registered'; print('plugin registers', [a['url_prefix'] for a in P.fastapi_apps])"
       - name: Run the suite against real Airflow
         run: pytest -q
+
+  # Playwright UI regression tests: boot the standalone dev server against a seeded
+  # report tree and drive a real browser. Opt-in suite (marker `ui`) — its own job so
+  # the unit matrix stays fast and browser-free.
+  ui:
+    name: UI regression (Playwright)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: "3.12"
+      - name: Install package + UI test deps
+        # Hash-pinned lock (Scorecard Pinned-Dependencies); regenerate per its header.
+        run: |
+          python -m pip install --require-hashes -r requirements/ui.txt
+          python -m pip install -e . --no-deps
+      - name: Install Playwright browser
+        run: python -m playwright install --with-deps chromium
+      - name: Run UI tests
+        run: pytest -m ui tests/ui
+
+  # Integration UI: boot a REAL Airflow 3 api-server with the plugin mounted and drive
+  # Playwright against the embedded app (/pytest-reports/). Proves the plugin registers,
+  # mounts and serves the working UI under Airflow's own runtime + auth manager. Airflow
+  # is pinned via its official constraints (same approach as the `integration` job).
+  ui-airflow:
+    name: UI embedded in Airflow (Playwright)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: "3.12"
+      - name: Install Airflow + plugin + UI test deps
+        run: |
+          C="https://raw.githubusercontent.com/apache/airflow/constraints-3.2.1/constraints-3.12.txt"
+          pip install "apache-airflow==3.2.1" --constraint "${C}"
+          pip install -e ".[web,ui-test]"
+      - name: Install Playwright browser
+        run: python -m playwright install --with-deps chromium
+      - name: Run embedded UI tests
+        run: pytest -m ui_airflow tests/ui

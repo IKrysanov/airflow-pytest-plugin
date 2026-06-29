@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 
 from .compat import get_conf_value
@@ -149,6 +150,49 @@ def get_flaky_min_score() -> float:
     )
 
 
+#: Duration-regression detector. A test is flagged "slower" when its recent-half
+#: average duration is at least ``SLOW_FACTOR``× its older-half average AND the
+#: absolute increase clears ``SLOW_MIN_DELTA`` seconds (the delta filters noise on
+#: fast tests, where a tiny jitter can still beat the ratio). Shares the flaky window.
+SLOW_FACTOR_ENV = "AIRFLOW_PYTEST_SLOW_FACTOR"
+DEFAULT_SLOW_FACTOR = 1.3
+SLOW_MIN_DELTA_ENV = "AIRFLOW_PYTEST_SLOW_MIN_DELTA"
+DEFAULT_SLOW_MIN_DELTA = 0.5
+
+
+def _positive_float_setting(
+    env_var: str, conf_key: str, default: float, *, minimum: float
+) -> float:
+    """A float ≥ ``minimum`` from env, then cfg; default on missing/invalid/below."""
+    raw = os.environ.get(env_var)
+    if raw is None or not raw.strip():
+        raw = get_conf_value(CONF_SECTION, conf_key)
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        value = float(str(raw).strip())
+    except ValueError:
+        return default
+    # Reject NaN/inf: they'd serialize to non-spec JSON ("NaN"/"Infinity") downstream.
+    if not math.isfinite(value):
+        return default
+    return value if value >= minimum else default
+
+
+def get_slow_factor() -> float:
+    """Multiplier a test's recent-half avg duration must reach to count as a regression."""
+    return _positive_float_setting(
+        SLOW_FACTOR_ENV, "slow_factor", DEFAULT_SLOW_FACTOR, minimum=1.0
+    )
+
+
+def get_slow_min_delta() -> float:
+    """Minimum absolute slowdown (seconds) for a duration regression to register."""
+    return _positive_float_setting(
+        SLOW_MIN_DELTA_ENV, "slow_min_delta", DEFAULT_SLOW_MIN_DELTA, minimum=0.0
+    )
+
+
 #: Pass-rate (0–1) at/above which a run counts as successful ("Passing runs"). The
 #: rate is over executed tests, so a run can carry a few failures and still pass.
 #: At 1.0 a run is successful only with zero failures/errors (the strict default of
@@ -162,6 +206,20 @@ def get_success_threshold() -> float:
     return _unit_float_setting(
         SUCCESS_THRESHOLD_ENV, "success_threshold", DEFAULT_SUCCESS_THRESHOLD
     )
+
+
+#: Opt-in bearer token for the Prometheus ``/api/metrics`` endpoint. Secure-by-default:
+#: unset = the endpoint is DISABLED (404). When set, a scrape must send
+#: ``Authorization: Bearer <token>``. Reads the env var, then the cfg key.
+METRICS_TOKEN_ENV = "AIRFLOW_PYTEST_METRICS_TOKEN"
+
+
+def get_metrics_token() -> str | None:
+    """The metrics scrape token, or ``None`` when the endpoint should stay disabled."""
+    raw = os.environ.get(METRICS_TOKEN_ENV)
+    if raw is None or not raw.strip():
+        raw = get_conf_value(CONF_SECTION, "metrics_token")
+    return raw.strip() if raw and raw.strip() else None
 
 
 def get_reports_root() -> str:

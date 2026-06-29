@@ -7,6 +7,98 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-29
+
+### Added
+- **Prometheus metrics** — `GET /api/metrics` exposes per-dag·task gauges from each
+  dag·task's latest run (`airflow_pytest_latest_*{dag_id,task_id}`) plus globals
+  (`airflow_pytest_up` / `runs` / `dagtasks` / `latest_failures` / `build_info`) in the
+  Prometheus text format — all gauges (no `_total` suffix), values at full precision (no
+  scientific-notation rounding), no new dependency. **Secure by default:**
+  disabled unless `AIRFLOW_PYTEST_METRICS_TOKEN` is set, then requires
+  `Authorization: Bearer <token>` (constant-time compare; label values escaped). The token
+  is declared as a bearer security scheme, so Swagger's *Authorize* box sends it correctly.
+  **Load-cheap:** one cached scan, summary-derived (no per-run reads), cardinality-capped
+  at 2000 series. See the *Prometheus metrics* README section.
+- **Slow tests & duration regressions** — a new *Slowdowns* KPI opens a panel
+  listing tests whose **execution time got slower** (recent-half average duration vs
+  the older half, over a configurable window) and the **slowest tests** by average
+  duration. A test that speeds back up drops off the list. Inside a run, the case
+  table now sorts by execution time (slowest first).
+- **`GET /api/slow`** — duration regressions (`regressed`) and the slowest tests
+  (`slowest`) across the last `window` runs of each dag·task, RBAC-filtered.
+- **`AIRFLOW_PYTEST_SLOW_FACTOR`** (default `1.3`) and
+  **`AIRFLOW_PYTEST_SLOW_MIN_DELTA`** (default `0.5` s) — tune how much slower, in
+  ratio and absolute seconds, a test must get before it counts as a regression.
+- **Per-test stats in the *Unique tests* catalogue** — each test now shows its total
+  runs, average execution time and per-outcome counts (passed / failed / errors /
+  skipped), aggregated by `GET /api/unique-tests?full=1` from the same scan (no extra
+  cost).
+- **Error clustering** — the *Failures* KPI now groups failed/errored cases into
+  clusters by a normalized error signature (numbers / hex / UUIDs masked), biggest
+  cluster first, so common root causes surface instead of a flat per-failure list; each
+  cluster expands to its tests (clickable). The run detail gets an *Error clusters*
+  button opening the same clusters scoped to that run. New `GET /api/failure-clusters`
+  (filters + RBAC mirror `/api/failures`).
+- **Runs-chart window context** — the runs chart now shows which runs are on screen
+  (e.g. *#48–#76 / 76*, updating live as you scroll the carousel) next to the arrows, and,
+  when the trend is on, the **average pass rate of the visible window** (e.g. *avg 92%*,
+  tinted red when it dips below the success threshold) next to the toggle.
+
+### Changed
+- **Failures now reflect current state** — the *Failures* KPI and the failures/clusters
+  endpoints count only each dag·task's **latest** run, so a fixed test drops off once its
+  next run is green (the list shrinks as code improves) instead of listing every failure
+  ever archived. Pass `latest=0` to `/api/failures` or `/api/failure-clusters` for the
+  full history.
+- **Chart legend is now a status filter (focus, not hide)** — clicking a status in the
+  legend (e.g. *passed*) shows **only** that status in the chart and the run list below
+  (grouped or flat); click more statuses to add them, and a *Reset filter* button clears
+  the selection back to all.
+- **UI polish** — a *Clear filters* button next to the dag/task/run filters (shown only
+  when a filter is set); error-cluster expansions use the run-list's left-accent style
+  (no oversized indent); the in-run *Error clusters* modal opens inset like the other
+  run popups instead of spanning the run window; the pass-rate **success-threshold line**
+  is now a muted, thin gridline (a `--thresh-soft` token) so it recedes behind the data
+  instead of competing with it; its `%` label is a translucent glass chip (a
+  `--surface-glass` token + backdrop blur) that never fully hides a trend dot behind it
+  while the text stays readable; the runs-chart header is now laid out in two fixed rows
+  (title + legend on top; *Pass-rate trend* toggle left and the carousel arrows right
+  below) so the controls stay put instead of reflowing as the window resizes.
+- **Selecting a dag·task group now scopes the whole dashboard** — ticking a group (or
+  runs) already focused the runs chart; now the *Flaky tests* panel, the **Failures** and
+  **Slowdowns** KPIs (and their modals) all narrow to the selected dag·task(s) too, with a
+  *selected groups* chip. One pick filters the entire board — chart, flaky, failures,
+  slowdowns — at once (client-side, so it works for any set of groups).
+
+### Fixed
+- **Group checkbox now clears with *show all*** — selecting a dag·task group focuses the
+  chart on its runs; clicking *show all* on the chart cleared the selection and unticked
+  the individual run checkboxes but left the **group header checkbox** still ticked. It
+  now resets (checked + indeterminate) along with the rest.
+- **`/api/flaky` now has a read budget** — a new `_FLAKY_SCAN_CAP` (2000 run-meta files,
+  mirroring `/api/slow`) bounds the work so many dag·tasks × a large window can't make one
+  request walk most of the archive; `capped` flags it. Found via load testing (150 dag·tasks
+  × window 200 went from ~5.0s to ~2.9s).
+- **Run-detail donut: tiny slices no longer overlap** — a very small fail/error share
+  rendered as a rounded dot positioned by its raw proportion, so two small slices could
+  slide on top of each other. Slices are now laid out by their actual footprint within the
+  gapped arc, keeping a full gap between every segment.
+
+### Tests
+- **Playwright UI regression suite** (`tests/ui`, opt-in marker `ui`) — boots the standalone
+  dev server against a seeded report tree and drives a real browser to guard the dashboard
+  (KPIs, donut non-overlap, group-scoping, modals, legend filter, trend/threshold, mobile
+  no-horizontal-scroll). Run with `pip install -e '.[web,ui-test]' && playwright install
+  chromium && pytest -m ui`; a dedicated `ui` CI job runs it. The default `pytest` stays
+  unit-only and browser-free. Tests run on both a small and a **large (3200-run)** seed so
+  layout is verified at scale.
+- **Embedded-in-Airflow UI tests** (`tests/ui`, marker `ui_airflow`) — boot a real Airflow 3
+  api-server with the plugin mounted and drive Playwright against the embedded app at
+  `/pytest-reports/`, proving it loads/serves under Airflow's own runtime + auth manager. A
+  dedicated `ui-airflow` CI job installs Airflow (official constraints) + the browser and runs
+  `pytest -m ui_airflow`; it auto-skips when Airflow isn't installed.
+
 ## [0.3.2] - 2026-06-28
 
 ### Added
@@ -187,7 +279,8 @@ the Airflow 3 web UI.
 - CI/CD: lint, type-check, unit (py3.10–3.13) + Airflow 3 integration matrices,
   CodeQL, OpenSSF Scorecard, DCO, and Trusted-Publishing release workflows.
 
-[Unreleased]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.2.1...v0.3.0

@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import subprocess
@@ -122,6 +123,17 @@ def test_index_has_feature_markers(client):
         'id="d-allure"',
         "openFailures",
         "kpi-failures",
+        "renderClusters",
+        "openClusters",
+        "failure-clusters",
+        "cl-btn",
+        "cl-item",
+        "trend-danger",
+        "trend-dot-bad",
+        "kFailuresTip",
+        "slowRowAvg",
+        "slowSlowest",
+        "uq-meta",
         "setParentDim",
         "openCompare",
         'id="cmp-prev"',
@@ -142,6 +154,11 @@ def test_index_has_feature_markers(client):
         "clearSelection",
         "chartSelected",
         'id="trend-toggle"',
+        'id="f-clear"',
+        "clearFilters",
+        "leg-reset",
+        "legendReset",
+        "statusShown",
         "renderTrend",
         "trendToggle",
         "trend-line",
@@ -178,8 +195,30 @@ def test_index_has_feature_markers(client):
         "Unique tests",
         "openUnique",
         "fillUnique",
+        "uqStats",
         "kpi-unique",
+        "kpi-slow",
+        "openSlow",
+        "loadSlow",
+        "refreshSlow",
+        "slowQuery",
+        "fillSlow",
+        'id="slow"',
+        "slowRowReg",
+        "slowRegressing",
+        "slowKpiTip",
+        "renderCaseHead",
+        "caseCmp",
+        'id="case-head"',
         "forbidden",
+        'id="flk-scope"',
+        "flkSelScope",
+        "selKeySet",
+        "scopeClusters",
+        "chart-range",
+        "chart-avg",
+        "updateChartMeta",
+        "surface-glass",
     ):
         assert marker in html
 
@@ -210,6 +249,7 @@ def test_openapi_and_docs_serve(client):
     paths = doc["paths"]
     assert "/api/flaky" in paths and "/api/test-history" in paths
     assert "/api/groups" in paths and paths["/api/groups"]["get"]["tags"] == ["reports"]
+    assert "/api/slow" in paths and paths["/api/slow"]["get"]["tags"] == ["reports"]
     # Routes are grouped into the documented sections; the UI assets stay out of it.
     assert [t["name"] for t in doc["tags"]] == [
         "monitoring",
@@ -220,6 +260,7 @@ def test_openapi_and_docs_serve(client):
     ]
     assert paths["/api/flaky"]["get"]["tags"] == ["flaky"]
     assert paths["/api/compare"]["get"]["tags"] == ["compare"]
+    assert paths["/api/failure-clusters"]["get"]["tags"] == ["failures"]
     assert paths["/api/health"]["get"]["tags"] == ["monitoring"]
     assert paths["/api/version"]["get"]["tags"] == ["monitoring"]
     assert "/icon.svg" not in paths and "/" not in paths  # icons + viewer hidden
@@ -234,6 +275,8 @@ def test_openapi_and_docs_serve(client):
     assert "reports" in ex("/api/reports", "get")
     assert ex("/api/groups", "get")["groups"][0]["avg_duration"] is not None
     assert "flaky" in ex("/api/flaky", "get")
+    assert ex("/api/slow", "get")["regressed"][0]["regressed"] is True
+    assert ex("/api/failure-clusters", "get")["clusters"][0]["signature"]
     # ... and the error status codes each route can return are declared.
     for path, method in [
         ("/api/reports/{report_id}", "get"),
@@ -327,6 +370,127 @@ def test_groups_endpoint_and_rbac(reports_root):
     # RBAC: a reader denied dagB sees only its permitted group.
     c = TestClient(make_app(reports_root, read_authorizer=lambda dag, u: dag == "dagA"))
     assert {g["dag_id"] for g in c.get("/api/groups").json()["groups"]} == {"dagA"}
+
+
+def test_slow_stats_pure():
+    from airflow_pytest_plugin.web.routes.reports import slow_stats
+
+    flat = slow_stats([1.0, 1.0, 1.0, 1.0], factor=1.3, min_delta=0.5)
+    assert flat["avg"] == 1.0 and flat["regressed"] is False and flat["ratio"] == 1.0
+
+    reg = slow_stats([1.0, 1.0, 3.0, 3.0], factor=1.3, min_delta=0.5)
+    assert reg["old_avg"] == 1.0 and reg["new_avg"] == 3.0
+    assert reg["ratio"] == 3.0 and reg["regressed"] is True
+
+    # big ratio but the absolute slowdown is below the floor -> not a regression
+    tiny = slow_stats([0.1, 0.1, 0.5, 0.5], factor=1.3, min_delta=0.5)
+    assert tiny["ratio"] == 5.0 and tiny["regressed"] is False
+
+    few = slow_stats([1.0, 9.0], factor=1.3, min_delta=0.5)  # < 4 runs -> no verdict
+    assert few["runs"] == 2 and few["old_avg"] is None and few["regressed"] is False
+    assert few["avg"] == 5.0 and few["last"] == 9.0
+
+    empty = slow_stats([], factor=1.3, min_delta=0.5)
+    assert empty["runs"] == 0 and empty["avg"] == 0.0 and empty["regressed"] is False
+
+    # a test that sped back up in the recent half is NOT a regression
+    faster = slow_stats([5.0, 5.0, 1.0, 1.0], factor=1.3, min_delta=0.5)
+    assert faster["new_avg"] == 1.0 and faster["regressed"] is False
+
+    # appeared from ~0s and is now slow -> regression with ratio None (infinite jump)
+    appeared = slow_stats([0.0, 0.0, 2.0, 2.0], factor=1.3, min_delta=0.5)
+    assert appeared["regressed"] is True and appeared["ratio"] is None
+
+
+def _seed_slow_group(reports_root, dag="dag", task="t"):
+    """4 runs where test 'a' doubles its duration in the recent half; 'b' stays fast."""
+    durs = {"a": [1.0, 1.0, 5.0, 5.0], "b": [0.1, 0.1, 0.1, 0.1]}
+    for i in range(4):
+        write_tests(
+            reports_root,
+            ReportRef(dag, f"r{i}", task, 1),
+            [["a", "passed", durs["a"][i]], ["b", "passed", durs["b"][i]]],
+            created_at=f"2026-06-0{i + 1}T00:00:00+00:00",
+        )
+
+
+def test_slow_endpoint_regressions_and_slowest(reports_root):
+    _seed_slow_group(reports_root)
+    d = TestClient(make_app(reports_root)).get("/api/slow").json()
+    assert d["window"] == 30 and d["factor"] == 1.3 and d["min_delta"] == 0.5
+    assert {r["node_id"] for r in d["regressed"]} == {"a"}  # b is flat
+    a = d["regressed"][0]
+    assert a["old_avg"] == 1.0 and a["new_avg"] == 5.0 and a["ratio"] == 5.0
+    # the slowest leaderboard ranks by average duration (a avg 3.0, b 0.1)
+    assert [r["node_id"] for r in d["slowest"]] == ["a", "b"]
+    assert d["slowest"][0]["avg"] == 3.0
+    assert d["capped"] is False
+    assert "baseline" not in d  # no per-run baseline leaks from this endpoint
+
+
+def test_slow_endpoint_skips_single_run_and_caps_scan(reports_root, monkeypatch):
+    import airflow_pytest_plugin.web.routes.reports as reports_mod
+
+    # a one-off run -> not eligible for the "reliably slow" leaderboard despite 9s
+    write_tests(
+        reports_root,
+        ReportRef("solo", "r0", "t", 1),
+        [["only", "passed", 9.0]],
+        created_at="2026-05-01T00:00:00+00:00",
+    )
+    _seed_slow_group(reports_root)  # a 4-run group (eligible)
+    c = TestClient(make_app(reports_root))
+    d = c.get("/api/slow").json()
+    assert "only" not in {r["node_id"] for r in d["slowest"]} and d["capped"] is False
+    # a tiny read budget skips whole groups and flags it
+    monkeypatch.setattr(reports_mod, "_SLOW_SCAN_CAP", 1)
+    assert c.get("/api/slow").json()["capped"] is True
+
+
+def test_slow_endpoint_window_clamped_and_echoed(reports_root):
+    _seed_slow_group(reports_root)
+    c = TestClient(make_app(reports_root))
+    assert c.get("/api/slow?window=4").json()["window"] == 4
+    assert c.get("/api/slow?window=1").json()["window"] == 2  # clamped low
+    assert c.get("/api/slow?window=999").json()["window"] == 200  # clamped high
+
+
+def test_slow_endpoint_hides_unreadable(reports_root):
+    _seed_slow_group(reports_root, dag="dagA")
+    _seed_slow_group(reports_root, dag="dagB")
+    c = TestClient(make_app(reports_root, read_authorizer=lambda dag, u: dag == "dagA"))
+    d = c.get("/api/slow").json()
+    assert {r["dag_id"] for r in d["slowest"]} == {"dagA"}
+    assert {r["dag_id"] for r in d["regressed"]} == {"dagA"}
+
+
+def test_slow_endpoint_respects_filters(reports_root):
+    _seed_slow_group(reports_root, dag="dagA", task="alpha")
+    _seed_slow_group(reports_root, dag="dagB", task="beta")
+    c = TestClient(make_app(reports_root))
+    # task_id substring narrows to one group (mirrors the run list filters)
+    d = c.get("/api/slow?task_id=alpha").json()
+    assert {r["dag_id"] for r in d["slowest"]} == {"dagA"}
+    assert {r["dag_id"] for r in d["regressed"]} == {"dagA"}
+    # run_id narrows the considered runs (only r0 -> 1 run/group -> no verdicts)
+    only_r0 = c.get("/api/slow?run_id=r0").json()
+    assert only_r0["total_regressed"] == 0 and only_r0["slowest"] == []
+
+
+def test_slow_factor_from_config(reports_root, monkeypatch):
+    import airflow_pytest_plugin.web.routes.reports as reports_mod
+
+    for i, dur in enumerate([1.0, 1.0, 2.0, 2.0]):  # ratio 2.0, delta 1.0
+        write_tests(
+            reports_root,
+            ReportRef("dag", f"r{i}", "t", 1),
+            [["a", "passed", dur]],
+            created_at=f"2026-06-0{i + 1}T00:00:00+00:00",
+        )
+    c = TestClient(make_app(reports_root))
+    assert {r["node_id"] for r in c.get("/api/slow").json()["regressed"]} == {"a"}
+    monkeypatch.setattr(reports_mod, "get_slow_factor", lambda: 3.0)
+    assert c.get("/api/slow").json()["regressed"] == []  # 2.0× < 3.0× -> not flagged
 
 
 def test_detail_endpoint_round_trips_token(client):
@@ -539,6 +703,273 @@ def test_failures_capped(reports_root, monkeypatch):
     assert d["capped"] is True and d["total"] == 3 and len(d["failures"]) == 3
 
 
+def test_normalize_and_cluster_failures_pure():
+    from airflow_pytest_plugin.web.routes.failures import (
+        cluster_failures,
+        normalize_error,
+    )
+
+    assert (
+        normalize_error("AssertionError: expected 5 got 7")
+        == "AssertionError: expected N got N"
+    )
+    assert normalize_error("conn 0xDEADbeef to 10.0.0.1") == "conn ADDR to N.N.N.N"
+    assert (
+        normalize_error("boom\n--- Captured stdout ---\nx") == "boom"
+    )  # skips section header
+    items = [
+        {
+            "id": "a",
+            "dag_id": "d",
+            "task_id": "t",
+            "run_id": "r1",
+            "created_at": "x",
+            "node_id": "n1",
+            "outcome": "failed",
+            "message": "E: boom 1",
+        },
+        {
+            "id": "b",
+            "dag_id": "d",
+            "task_id": "t",
+            "run_id": "r2",
+            "created_at": "y",
+            "node_id": "n2",
+            "outcome": "failed",
+            "message": "E: boom 2",
+        },
+        {
+            "id": "c",
+            "dag_id": "d",
+            "task_id": "t",
+            "run_id": "r3",
+            "created_at": "z",
+            "node_id": "n3",
+            "outcome": "error",
+            "message": "Other",
+        },
+    ]
+    cl = cluster_failures(items)
+    assert cl[0]["signature"] == "E: boom N" and cl[0]["count"] == 2  # biggest first
+    assert cl[0]["outcomes"] == ["failed"] and len(cl[0]["tests"]) == 2
+    assert "message" not in cl[0]["tests"][0]  # raw message not leaked per test
+
+
+def _xml_failures(cases):
+    """Tiny JUnit body. cases: list of (classname, name, outcome, message)."""
+    tc = []
+    for cn, nm, oc, msg in cases:
+        kind = {"failed": "failure"}.get(oc, oc)  # junit uses <failure>, not <failed>
+        body = (
+            f'<{kind} message="{msg}">{msg}</{kind}>'
+            if oc in ("failed", "error")
+            else ""
+        )
+        tc.append(
+            f'<testcase classname="{cn}" name="{nm}" time="0.1">{body}</testcase>'
+        )
+    return (
+        f'<testsuites><testsuite name="pytest" tests="{len(cases)}">'
+        + "".join(tc)
+        + "</testsuite></testsuites>"
+    )
+
+
+def test_failure_clusters_endpoint_groups_and_filters(reports_root):
+    write_report_xml(
+        reports_root,
+        ReportRef("dagA", "r1", "task", 1),
+        _xml_failures(
+            [
+                (
+                    "tests/api.py",
+                    "test_a",
+                    "failed",
+                    "AssertionError: expected 5 got 7",
+                ),
+                (
+                    "tests/api.py",
+                    "test_b",
+                    "failed",
+                    "AssertionError: expected 8 got 3",
+                ),
+                ("tests/api.py", "test_c", "error", "RuntimeError: boom"),
+            ]
+        ),
+        summary={"total": 3, "passed": 0, "failed": 2, "errors": 1},
+    )
+    write_report_xml(
+        reports_root,
+        ReportRef("dagB", "r2", "task", 1),
+        _xml_failures(
+            [("tests/x.py", "test_d", "failed", "AssertionError: expected 1 got 9")]
+        ),
+        summary={"total": 1, "passed": 0, "failed": 1, "errors": 0},
+    )
+    c = TestClient(make_app(reports_root))
+    d = c.get("/api/failure-clusters").json()
+    top = d["clusters"][0]
+    assert top["signature"] == "AssertionError: expected N got N" and top["count"] == 3
+    assert d["total"] == 4 and d["capped"] is False
+    # RBAC: deny dagB -> its failure drops out
+    cc = TestClient(
+        make_app(reports_root, read_authorizer=lambda dag, u: dag == "dagA")
+    )
+    dd = cc.get("/api/failure-clusters").json()
+    assert dd["total"] == 3
+    assert {x["dag_id"] for cl in dd["clusters"] for x in cl["tests"]} == {"dagA"}
+    # run_id filter scopes to a single run (the in-run view)
+    assert c.get("/api/failure-clusters?run_id=r2").json()["total"] == 1
+
+
+def test_normalize_error_masks_and_first_line():
+    from airflow_pytest_plugin.web.routes.failures import _error_line, normalize_error
+
+    assert (
+        normalize_error("E: id 550e8400-e29b-41d4-a716-446655440000 at 0xAB12 n=7")
+        == "E: id UUID at ADDR n=N"
+    )
+    assert (
+        normalize_error("first\n--- Captured ---\nx") == "first"
+    )  # skips section header
+    assert _error_line("--- only ---") == "--- only ---"  # fallback: no non-header line
+    assert normalize_error("") == "" and normalize_error(None) == ""
+    assert len(normalize_error("x" * 500)) == 200  # capped
+
+
+def test_cluster_failures_caps_tests_not_count():
+    from airflow_pytest_plugin.web.routes.failures import (
+        _CLUSTER_TESTS_CAP,
+        cluster_failures,
+    )
+
+    items = [
+        {
+            "id": str(i),
+            "dag_id": "d",
+            "task_id": "t",
+            "run_id": "r",
+            "created_at": "x",
+            "node_id": f"n{i}",
+            "outcome": "failed",
+            "message": "same boom",
+        }
+        for i in range(_CLUSTER_TESTS_CAP + 50)
+    ]
+    cl = cluster_failures(items)
+    assert len(cl) == 1
+    assert cl[0]["count"] == _CLUSTER_TESTS_CAP + 50  # exact count...
+    assert len(cl[0]["tests"]) == _CLUSTER_TESTS_CAP  # ...list capped
+
+
+def test_slow_endpoint_zero_baseline_ranks_first(reports_root):
+    durs = {"a": [0.0, 0.0, 3.0, 3.0], "b": [1.0, 1.0, 2.0, 2.0]}
+    for i in range(4):
+        write_tests(
+            reports_root,
+            ReportRef("dag", f"r{i}", "t", 1),
+            [["a", "passed", durs["a"][i]], ["b", "passed", durs["b"][i]]],
+            created_at=f"2026-06-0{i + 1}T00:00:00+00:00",
+        )
+    d = TestClient(make_app(reports_root)).get("/api/slow").json()
+    reg = [r["node_id"] for r in d["regressed"]]
+    assert set(reg) == {"a", "b"}
+    assert (
+        reg[0] == "a"
+    )  # 0->slow (infinite ratio) ranks before finite-ratio regression
+
+
+def test_unique_tests_same_node_across_tasks_merges(reports_root):
+    write_tests(
+        reports_root,
+        ReportRef("dagA", "r", "alpha", 1),
+        [["shared", "passed", 1.0]],
+        created_at="2026-06-02T00:00:00+00:00",  # newest
+    )
+    write_tests(
+        reports_root,
+        ReportRef("dagB", "r", "beta", 1),
+        [["shared", "failed", 3.0]],
+        created_at="2026-06-01T00:00:00+00:00",
+    )
+    d = TestClient(make_app(reports_root)).get("/api/unique-tests?full=1").json()
+    assert d["count"] == 1  # distinct by node_id
+    x = d["tests"][0]
+    assert x["node_id"] == "shared" and x["runs"] == 2  # stats merged across dag·tasks
+    assert x["passed"] == 1 and x["failed"] == 1
+    assert (x["dag_id"], x["task_id"]) == ("dagA", "alpha")  # first-seen = newest run
+
+
+def test_non_finite_duration_is_sanitized(reports_root):
+    import os
+
+    from airflow_pytest_plugin.layout import META_FILENAME, ReportLayout
+
+    ref = ReportRef("dag", "r", "t", 1)
+    d = ReportLayout().dir_for(reports_root, ref)
+    os.makedirs(d, exist_ok=True)
+    meta = {
+        "schema_version": 1,
+        "dag_id": "dag",
+        "run_id": "r",
+        "task_id": "t",
+        "try_number": 1,
+        "map_index": -1,
+        "created_at": "2026-06-01T00:00:00+00:00",
+        "report_file": "junit.xml",
+        "summary": {"total": 1, "passed": 1, "failed": 0},
+        "tests": [["a", "passed", float("inf")]],  # corrupt/crafted duration
+    }
+    with open(os.path.join(d, META_FILENAME), "w") as fh:
+        json.dump(meta, fh)  # stdlib json writes "Infinity"
+    body = TestClient(make_app(reports_root)).get("/api/unique-tests?full=1")
+    assert "Infinity" not in body.text and "NaN" not in body.text  # valid JSON out
+    assert body.json()["tests"][0]["avg_duration"] == 0.0  # sanitized
+
+
+def test_failures_latest_retry_green_hides_failed_try(reports_root):
+    # same dag·run·task: try 1 failed, try 2 passed, EQUAL created_at -> the newer try
+    # wins the tie (try_number tiebreaker) so "current" is green.
+    when = "2026-06-01T00:00:00+00:00"
+    write_report_xml(
+        reports_root,
+        ReportRef("dag", "r", "t", 1),
+        _xml_failures([("tests/a.py", "x", "failed", "Boom")]),
+        summary={"total": 1, "passed": 0, "failed": 1},
+        created_at=when,
+    )
+    write_report(reports_root, ReportRef("dag", "r", "t", 2), passed=1, created_at=when)
+    c = TestClient(make_app(reports_root))
+    assert (
+        c.get("/api/failures").json()["total"] == 0
+    )  # try 2 (newer) green -> nothing now
+    assert c.get("/api/failures?latest=0").json()["total"] == 1  # history keeps try 1
+
+
+def test_failures_latest_only_drops_fixed_tests(reports_root):
+    # same dag·task: an OLD failing run, then a NEWER green run -> the failure is "fixed"
+    write_report_xml(
+        reports_root,
+        ReportRef("dag", "old", "t", 1),
+        _xml_failures([("tests/a.py", "test_x", "failed", "Boom")]),
+        summary={"total": 1, "passed": 0, "failed": 1},
+        created_at="2026-06-01T00:00:00+00:00",
+    )
+    write_report(
+        reports_root,
+        ReportRef("dag", "new", "t", 1),
+        passed=3,
+        created_at="2026-06-02T00:00:00+00:00",  # newer, all green
+    )
+    c = TestClient(make_app(reports_root))
+    # default (current): latest run is green -> the old failure has dropped off
+    assert c.get("/api/failures").json()["total"] == 0
+    assert c.get("/api/failure-clusters").json()["total"] == 0
+    # full history still has it
+    assert c.get("/api/failures?latest=0").json()["total"] == 1
+    assert c.get("/api/failure-clusters?latest=0").json()["total"] == 1
+
+
 def test_compare_diff_categories(reports_root):
     base, head = ReportRef("dag", "base", "t", 1), ReportRef("dag", "head", "t", 1)
     write_tests(
@@ -730,6 +1161,32 @@ def test_flaky_respects_window(reports_root):
     assert {f["node_id"] for f in c.get("/api/flaky?window=3").json()["flaky"]} == {"a"}
 
 
+def test_flaky_endpoint_caps_scan(reports_root, monkeypatch):
+    import airflow_pytest_plugin.web.routes.flaky as flaky_mod
+
+    # Two flaky dag·task groups (each flips a: passed -> failed across two runs).
+    for dag in ("d1", "d2"):
+        write_tests(
+            reports_root,
+            ReportRef(dag, "r1", "t", 1),
+            [["a", "passed"]],
+            created_at="2026-06-01T00:00:00+00:00",
+        )
+        write_tests(
+            reports_root,
+            ReportRef(dag, "r2", "t", 1),
+            [["a", "failed"]],
+            created_at="2026-06-02T00:00:00+00:00",
+        )
+    c = TestClient(make_app(reports_root))
+    full = c.get("/api/flaky").json()
+    assert full["total"] == 2 and full["capped"] is False  # both groups fit the budget
+    # a tiny read budget stops after the first group and flags it
+    monkeypatch.setattr(flaky_mod, "_FLAKY_SCAN_CAP", 1)
+    capped = c.get("/api/flaky").json()
+    assert capped["total"] == 1 and capped["capped"] is True
+
+
 def test_flaky_task_filter(reports_root):
     for task in ("alpha", "beta"):
         write_tests(
@@ -802,24 +1259,47 @@ def test_test_history_requires_node_id(client):
 
 def test_unique_tests_counts_distinct_node_ids(reports_root):
     write_tests(
-        reports_root, ReportRef("dag", "r1", "t", 1), [["a", "passed"], ["b", "failed"]]
+        reports_root,
+        ReportRef("dag", "r1", "t", 1),
+        [["a", "passed", 1.0], ["b", "failed", 0.5], ["d", "error", 0.0]],
     )
     write_tests(
         reports_root,
         ReportRef("dag", "r2", "t", 1),
-        [["a", "passed"], ["b", "passed"], ["c", "passed"]],
+        [
+            ["a", "passed", 3.0],
+            ["b", "passed", 0.5],
+            ["c", "passed", 0.0],
+            ["d", "skipped", 0.0],
+        ],
     )
-    write_tests(reports_root, ReportRef("dag2", "r1", "t", 1), [["x", "passed"]])
+    write_tests(reports_root, ReportRef("dag2", "r1", "t", 1), [["x", "passed", 0.0]])
     c = TestClient(make_app(reports_root))
     # The KPI fetch is count-only (no list payload); the list rides ``full=1``.
     light = c.get("/api/unique-tests").json()
-    assert light == {
-        "count": 4,
-        "capped": False,
-    }  # a, b, c, x -- distinct, not 6 summed
+    assert light == {"count": 5, "capped": False}  # a, b, c, d, x distinct
     full = c.get("/api/unique-tests?full=1").json()
-    assert [x["node_id"] for x in full["tests"]] == ["a", "b", "c", "x"]  # sorted
-    assert full["tests"][3] == {"node_id": "x", "dag_id": "dag2", "task_id": "t"}
+    assert [x["node_id"] for x in full["tests"]] == ["a", "b", "c", "d", "x"]  # sorted
+    by = {x["node_id"]: x for x in full["tests"]}
+    # per-test stats aggregated from the same scan (no extra I/O)
+    assert (
+        by["a"]["runs"] == 2
+        and by["a"]["passed"] == 2
+        and by["a"]["avg_duration"] == 2.0
+    )
+    assert by["b"]["passed"] == 1 and by["b"]["failed"] == 1
+    assert by["d"]["runs"] == 2 and by["d"]["errors"] == 1 and by["d"]["skipped"] == 1
+    assert by["x"] == {
+        "node_id": "x",
+        "dag_id": "dag2",
+        "task_id": "t",
+        "runs": 1,
+        "passed": 1,
+        "failed": 0,
+        "errors": 0,
+        "skipped": 0,
+        "avg_duration": 0.0,
+    }
 
 
 def test_unique_tests_scan_is_capped(reports_root, monkeypatch):

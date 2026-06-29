@@ -143,3 +143,30 @@ def test_success_threshold_default_env_and_clamp(monkeypatch):
     for bad in ("x", "1.5", "-0.1"):  # invalid / out of 0–1 -> default
         monkeypatch.setenv(config.SUCCESS_THRESHOLD_ENV, bad)
         assert config.get_success_threshold() == config.DEFAULT_SUCCESS_THRESHOLD
+
+
+def test_slow_factor_default_env_and_floor(monkeypatch):
+    monkeypatch.delenv(config.SLOW_FACTOR_ENV, raising=False)
+    monkeypatch.setattr(config, "get_conf_value", lambda s, k: None)
+    assert config.get_slow_factor() == config.DEFAULT_SLOW_FACTOR == 1.3
+    monkeypatch.setenv(config.SLOW_FACTOR_ENV, "2.5")
+    assert config.get_slow_factor() == 2.5
+    for bad in ("x", "0.5", "0"):  # invalid / below the 1.0 floor -> default
+        monkeypatch.setenv(config.SLOW_FACTOR_ENV, bad)
+        assert config.get_slow_factor() == config.DEFAULT_SLOW_FACTOR
+    for bad in ("inf", "Infinity", "-inf", "nan", "1e400"):  # non-finite -> default
+        monkeypatch.setenv(config.SLOW_FACTOR_ENV, bad)
+        assert config.get_slow_factor() == config.DEFAULT_SLOW_FACTOR
+
+
+def test_slow_min_delta_default_env_and_floor(monkeypatch):
+    monkeypatch.delenv(config.SLOW_MIN_DELTA_ENV, raising=False)
+    monkeypatch.setattr(config, "get_conf_value", lambda s, k: None)
+    assert config.get_slow_min_delta() == config.DEFAULT_SLOW_MIN_DELTA == 0.5
+    monkeypatch.setenv(config.SLOW_MIN_DELTA_ENV, "1.5")
+    assert config.get_slow_min_delta() == 1.5
+    monkeypatch.setenv(config.SLOW_MIN_DELTA_ENV, "0")  # zero is allowed (no floor)
+    assert config.get_slow_min_delta() == 0.0
+    for bad in ("x", "-1"):  # invalid / negative -> default
+        monkeypatch.setenv(config.SLOW_MIN_DELTA_ENV, bad)
+        assert config.get_slow_min_delta() == config.DEFAULT_SLOW_MIN_DELTA

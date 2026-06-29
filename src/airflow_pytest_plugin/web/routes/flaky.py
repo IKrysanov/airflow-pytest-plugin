@@ -33,6 +33,11 @@ TAG = "flaky"
 #: Upper bound on flaky tests returned.
 _FLAKY_CAP = 1000
 
+#: Max run-meta files read per request (mirrors slow's ``_SLOW_SCAN_CAP``). Flaky work is
+#: Σ groups · min(runs, window) outcome reads with no other bound, so many dag·tasks × a
+#: large window could otherwise make a single request walk much of the archive.
+_FLAKY_SCAN_CAP = 2000
+
 #: How many recent outcomes to include in a flaky test's strip (keeps the UI tidy).
 _FLAKY_STRIP = 10
 
@@ -142,7 +147,9 @@ def build_router(deps: RouteDeps) -> APIRouter:
         test that shows both a pass and a fail/error. Per test: ``runs``, ``fails``,
         ``flips``, a ``score`` (flip rate 0–1), a ``trend`` (``up``/``down``/``flat``),
         a ``quarantined`` flag, and a ``recent`` outcome strip (last 10). Sorted
-        flakiest-first; capped at ``1000``. ``quarantine_score`` echoes the threshold.
+        flakiest-first; capped at ``1000``. At most ``2000`` run-meta files are read per
+        request; ``capped`` flags either truncation (output cap or read budget).
+        ``quarantine_score`` echoes the threshold.
         """
         chosen = window if window is not None else get_flaky_window()
         win = max(2, min(chosen, 200))
@@ -158,11 +165,17 @@ def build_router(deps: RouteDeps) -> APIRouter:
             groups.setdefault((s.ref.dag_id, s.ref.task_id), []).append(s)
 
         items: list[dict[str, Any]] = []
+        scanned = 0
+        scan_capped = False
         for (dag, task), summaries in groups.items():
+            if scanned >= _FLAKY_SCAN_CAP:  # skip whole groups past the read budget
+                scan_capped = True
+                break
             summaries.sort(key=lambda s: s.created_at or "", reverse=True)
             window_runs = summaries[:win]
             if len(window_runs) < 2:
                 continue
+            scanned += len(window_runs)
             seqs: dict[str, list[str]] = {}
             for s in reversed(window_runs):  # oldest -> newest
                 for node, info in (src.test_outcomes(s.ref) or {}).items():
@@ -178,7 +191,7 @@ def build_router(deps: RouteDeps) -> APIRouter:
             {
                 "flaky": items[:_FLAKY_CAP],
                 "total": min(len(items), _FLAKY_CAP),
-                "capped": len(items) > _FLAKY_CAP,
+                "capped": scan_capped or len(items) > _FLAKY_CAP,
                 "window": win,
                 "quarantine_score": qscore,
                 "min_score": min_score,
