@@ -88,13 +88,16 @@ def test_large_donut_small_slices_do_not_overlap(large_dash):
 
 def test_large_group_selection_scopes_board(large_dash):
     page = large_dash.page
+    # Wait for the flaky panel's async load before interacting (slow CI races otherwise).
+    page.wait_for_selector("#flaky-list .fb-row")
     # Scope to a single green-latest group: the flaky panel + chip narrow to it.
     page.locator("tr.lgrp:has-text('d01') .gsel").check()
     expect(page.locator("#flk-scope")).to_be_visible()
     expect(page.locator("#chart-filter")).to_be_visible()
-    assert page.locator("#flaky-count").inner_text().strip() == "1"
-    assert (
-        page.locator("#kpi-failures .value").inner_text().strip() == "0"
+    # expect() auto-retries until the scoped re-render settles.
+    expect(page.locator("#flaky-count")).to_have_text("1")
+    expect(page.locator("#kpi-failures .value")).to_have_text(
+        "0"
     )  # d01 latest is green
 
 

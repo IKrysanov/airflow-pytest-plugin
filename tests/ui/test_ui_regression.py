@@ -97,15 +97,18 @@ def test_run_detail_opens_with_donut(dash):
 
 def test_group_selection_scopes_chart_flaky_and_kpis(dash):
     page = dash.page
-    # Baseline: 3 flaky (one per group), 2 current failures (alpha only).
-    assert page.locator("#flaky-count").inner_text().strip() == "3"
-    assert _kpi(page, "kpi-failures") == "2"
+    # Baseline: 3 flaky (one per group), 2 current failures (alpha only). expect() waits
+    # for the flaky panel's async load (one-shot reads race on slow CI).
+    expect(page.locator("#flaky-count")).to_have_text("3")
+    expect(page.locator("#kpi-failures .value")).to_have_text("2")
     # Scope to "beta" (a green-latest group): the whole board narrows to it.
     page.locator("tr.lgrp:has-text('beta') .gsel").check()
     expect(page.locator("#flk-scope")).to_be_visible()
     expect(page.locator("#chart-filter")).to_be_visible()
-    assert page.locator("#flaky-count").inner_text().strip() == "1"
-    assert _kpi(page, "kpi-failures") == "0"  # beta's latest run is green
+    expect(page.locator("#flaky-count")).to_have_text("1")
+    expect(page.locator("#kpi-failures .value")).to_have_text(
+        "0"
+    )  # beta latest is green
 
 
 def test_failures_modal_opens_clusters(dash):
