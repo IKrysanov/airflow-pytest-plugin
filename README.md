@@ -47,6 +47,7 @@ It has two halves that share one on-disk layout:
 - [HTTP API](#http-api)
 - [Access control (RBAC)](#access-control-rbac)
 - [Configuration](#configuration)
+- [Prometheus metrics](#prometheus-metrics)
 - [Architecture (SOLID)](#architecture-solid)
 - [Development](#development)
 - [License](#license)
@@ -213,6 +214,7 @@ runtime. Endpoints (relative to the mount):
 | `GET /api/reports/{report_id}/allure.zip` | raw Allure results as a zip (if any) |
 | `GET /api/health` | liveness + readiness: `status`, `ready`, `reports_root`(+`_exists`), `auth`, `secure_xml` |
 | `GET /api/version` | `{"name": ..., "version": ...}` from package metadata |
+| `GET /api/metrics` | Prometheus exposition — opt-in, bearer-token (see [Prometheus metrics](#prometheus-metrics)) |
 | `GET /api/docs` | OpenAPI docs (Swagger UI) |
 
 The reads (`GET`) and the delete are gated by Airflow RBAC — see below.
@@ -281,6 +283,7 @@ Download them from a report's detail view, or `GET
 | `AIRFLOW_PYTEST_SLOW_FACTOR` (env/cfg) | `1.3` | how much slower (recent-half avg ÷ older half, ≥1) a test must get to count as a duration regression |
 | `AIRFLOW_PYTEST_SLOW_MIN_DELTA` (env/cfg) | `0.5` | minimum absolute slowdown in seconds for a regression to register (filters jittery fast tests) |
 | `AIRFLOW_PYTEST_SUCCESS_THRESHOLD` (env/cfg) | `0.85` | pass-rate (0–1) over executed tests at/above which a run counts as successful (*Passing runs*); `1.0` = strict, zero failures/errors |
+| `AIRFLOW_PYTEST_METRICS_TOKEN` (env/cfg) | — | bearer token that **enables** the Prometheus `/api/metrics` endpoint; unset = disabled (see [below](#prometheus-metrics)) |
 
 **Enable / disable the reader.** Set `AIRFLOW_PYTEST_PLUGIN_ENABLE` to a falsey
 value (`0`, `false`, `no`, `off`) to stop the plugin registering its UI and API
@@ -299,6 +302,34 @@ type. To avoid walking the report tree once per call, the filesystem source reus
 single scan for `AIRFLOW_PYTEST_SCAN_CACHE_TTL` seconds (default `2.0`; deletes
 invalidate it immediately). New runs therefore appear within a couple of seconds (or
 on **Refresh**); set it to `0` for no caching, or higher on a very large tree.
+
+## Prometheus metrics
+
+`GET /api/metrics` exposes per-dag·task gauges (from each dag·task's **latest** run)
+in the Prometheus text format — `airflow_pytest_latest_{passed,failed,errors,skipped,
+tests,pass_ratio,duration_seconds,success,run_timestamp_seconds}{dag_id,task_id}` and
+`airflow_pytest_dagtask_runs{dag_id,task_id}`, plus globals
+`airflow_pytest_{up,runs,dagtasks,latest_failures,series_truncated,build_info}` (all gauges).
+
+It's **disabled by default** and turns on only when you set a scrape token; requests must
+then present it as a bearer token (constant-time compared). The scrape is cheap and
+bounded — one cached directory scan, summary-derived (no per-run reads), capped at 2000
+series — so it's safe to poll frequently.
+
+```bash
+export AIRFLOW_PYTEST_METRICS_TOKEN="$(openssl rand -hex 16)"
+```
+
+```yaml
+# prometheus.yml
+scrape_configs:
+  - job_name: airflow-pytest
+    metrics_path: /pytest-reports/api/metrics   # the plugin's mount prefix
+    authorization:
+      credentials: "<AIRFLOW_PYTEST_METRICS_TOKEN>"
+    static_configs:
+      - targets: ["airflow-apiserver:8080"]
+```
 
 ## Retention (auto-cleanup)
 

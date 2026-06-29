@@ -7,7 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-29
+
 ### Added
+- **Prometheus metrics** — `GET /api/metrics` exposes per-dag·task gauges from each
+  dag·task's latest run (`airflow_pytest_latest_*{dag_id,task_id}`) plus globals
+  (`airflow_pytest_up` / `runs` / `dagtasks` / `latest_failures` / `build_info`) in the
+  Prometheus text format — all gauges (no `_total` suffix), values at full precision (no
+  scientific-notation rounding), no new dependency. **Secure by default:**
+  disabled unless `AIRFLOW_PYTEST_METRICS_TOKEN` is set, then requires
+  `Authorization: Bearer <token>` (constant-time compare; label values escaped). The token
+  is declared as a bearer security scheme, so Swagger's *Authorize* box sends it correctly.
+  **Load-cheap:** one cached scan, summary-derived (no per-run reads), cardinality-capped
+  at 2000 series. See the *Prometheus metrics* README section.
 - **Slow tests & duration regressions** — a new *Slowdowns* KPI opens a panel
   listing tests whose **execution time got slower** (recent-half average duration vs
   the older half, over a configurable window) and the **slowest tests** by average
@@ -267,7 +279,8 @@ the Airflow 3 web UI.
 - CI/CD: lint, type-check, unit (py3.10–3.13) + Airflow 3 integration matrices,
   CodeQL, OpenSSF Scorecard, DCO, and Trusted-Publishing release workflows.
 
-[Unreleased]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.2.1...v0.3.0

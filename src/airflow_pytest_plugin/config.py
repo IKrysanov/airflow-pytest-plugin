@@ -208,6 +208,20 @@ def get_success_threshold() -> float:
     )
 
 
+#: Opt-in bearer token for the Prometheus ``/api/metrics`` endpoint. Secure-by-default:
+#: unset = the endpoint is DISABLED (404). When set, a scrape must send
+#: ``Authorization: Bearer <token>``. Reads the env var, then the cfg key.
+METRICS_TOKEN_ENV = "AIRFLOW_PYTEST_METRICS_TOKEN"
+
+
+def get_metrics_token() -> str | None:
+    """The metrics scrape token, or ``None`` when the endpoint should stay disabled."""
+    raw = os.environ.get(METRICS_TOKEN_ENV)
+    if raw is None or not raw.strip():
+        raw = get_conf_value(CONF_SECTION, "metrics_token")
+    return raw.strip() if raw and raw.strip() else None
+
+
 def get_reports_root() -> str:
     """Resolve the report root directory (absolute path)."""
     env = os.environ.get(ENV_VAR)
