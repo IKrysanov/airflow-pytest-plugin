@@ -92,6 +92,8 @@ def test_index_serves_html(client):
     r = client.get("/")
     assert r.status_code == 200
     assert "Pytest Reports" in r.text
+    # The inline-JS single-page app must never be cached, or an upgrade keeps running old JS.
+    assert "no-store" in r.headers.get("cache-control", "")
 
 
 def test_index_has_feature_markers(client):

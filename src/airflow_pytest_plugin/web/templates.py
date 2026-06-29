@@ -241,8 +241,13 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     padding: 10px 12px; font-size: 12.5px; line-height: 1.55;
     box-shadow: 0 10px 30px #00000038; max-width: 320px;
   }
+  /* Tooltip text stays single-line (ellipsised) so the tooltip is a FIXED height as the
+     cursor sweeps bars -- wrapping made the status dots jump up/down between bars. */
+  #tip .tt, #tip .tm { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   #tip .tt { font-weight: 650; font-size: 13px; }
   #tip .tm { opacity: .72; }
+  /* The heatmap tooltip alone wraps its long node_id line (full id is the point there). */
+  #tip .tm.wrap { white-space: normal; overflow: visible; overflow-wrap: anywhere; text-overflow: clip; }
   #tip .tr { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 5px; }
   #tip .tr span { white-space: nowrap; font-variant-numeric: tabular-nums; }
   #tip i { display: inline-block; width: 8px; height: 8px; border-radius: 2px;
@@ -432,6 +437,11 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   /* Popups opened from inside a run sit inset within it -- narrower/shorter than the
      detail dialog so they never touch its borders. */
   #flaky, #history, #compare, #failures { max-width: min(680px, 84vw); max-height: 82vh; }
+  /* The heatmap wants width (more run columns visible). Wide when opened on its own;
+     inset (narrower than the run dialog) when opened from inside a run, so it doesn't
+     touch the run dialog's frame. */
+  #heatmap { max-width: min(1040px, 92vw); max-height: 88vh; }
+  #heatmap.hm-inset { max-width: min(880px, 86vw); max-height: 82vh; }
   dialog::backdrop { background: rgba(0, 0, 0, 0.5); }
   .dlg-head { display: flex; align-items: center; gap: 10px; padding: 16px 20px;
     border-bottom: 1px solid var(--border); flex: 0 0 auto; background: var(--surface);
@@ -494,7 +504,13 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .fk-row, .hist-row { display: flex; align-items: center; gap: 10px; padding: 9px 0;
     border-bottom: 1px solid var(--border); font-size: 12.5px; }
   .fk-row:last-child, .hist-row:last-child { border-bottom: 0; }
-  .fk-row .node, .hist-row .when { flex: 1 1 auto; overflow-wrap: anywhere; }
+  /* Flaky row mirrors the main-page board: the name takes a full-width line (wraps if long),
+     the quarantine badge sits on its OWN line UNDER it -- never colliding with the name. */
+  .fk-row { align-items: flex-start; }
+  .fk-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+  .fk-main .node { overflow-wrap: anywhere; }
+  .fk-sub { display: flex; }
+  .hist-row .when { flex: 1 1 auto; overflow-wrap: anywhere; }
   .hist-row .when { color: var(--muted); }
   .fk-row .fk-meta, .hist-row .dur { color: var(--muted); white-space: nowrap;
     font-variant-numeric: tabular-nums; }
@@ -555,6 +571,56 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .cl-item:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
   .cl-item .mono { color: var(--primary); }
   .cl-item .muted { margin-left: auto; white-space: nowrap; }
+  /* Test×run heatmap: a FIXED test-name column + a horizontally-scrolling cell pane (a
+     carousel like the runs chart). The two are separate columns, so the cells slide
+     within their pane and can never ride over the names. The name column is fit-content
+     (capped) -- it shrinks to the names (no wasted indent) and only grows, shifting the
+     map right, when a name is long. Both grids share row heights + gap, so rows stay
+     aligned as the dialog body scrolls vertically. */
+  .hm-wrap { display: grid; grid-template-columns: fit-content(360px) 1fr; align-items: start;
+    --hm-cell: 22px; --hm-head: 16px; }
+  .hm-names { display: grid; gap: 3px; min-width: 0; }
+  .hm-scroll { overflow-x: auto; overflow-y: hidden; padding-bottom: 6px; cursor: grab; }
+  .hm-scroll.dragging { cursor: grabbing; }
+  /* Horizontal padding so the first/last cell's hover outline (offset 1px + 2px) isn't
+     clipped by the scroll container's edge. No vertical padding -> rows stay aligned with
+     the name column. */
+  .hm-cells { display: grid; gap: 3px; width: max-content; padding: 0 4px; }
+  .hm-corner { height: var(--hm-head); }
+  .hm-rhead { height: var(--hm-head); align-self: end; font-size: 9px; color: var(--muted);
+    text-align: center; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .hm-name { all: unset; box-sizing: border-box; height: var(--hm-cell); display: flex;
+    align-items: center; justify-content: flex-end; min-width: 0; padding-right: 10px;
+    white-space: nowrap; overflow: hidden; font-size: 11.5px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color: var(--primary); cursor: pointer; }
+  .hm-name > span { overflow: hidden; text-overflow: ellipsis; }
+  .hm-name:hover { text-decoration: underline; }
+  .hm-name:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
+  .hm-cell { width: var(--hm-cell); height: var(--hm-cell); border-radius: 3px;
+    display: inline-block; cursor: pointer; transition: opacity .12s; }
+  .hm-miss { background: transparent; border: 1px dashed var(--border); box-sizing: border-box;
+    cursor: default; }
+  .hm-cell:not(.hm-miss):hover { outline: 2px solid var(--ring); outline-offset: 1px; }
+  /* Legend = a status focus filter, like the runs-chart legend: focusing a status dims
+     the other cells (the .foc-<code> container classes drive it -- no per-cell work). */
+  .hm-cells.foc .hm-cell:not(.hm-miss) { opacity: .12; }
+  .hm-cells.foc.foc-p .hm-cell[data-o="p"], .hm-cells.foc.foc-f .hm-cell[data-o="f"],
+  .hm-cells.foc.foc-e .hm-cell[data-o="e"], .hm-cells.foc.foc-s .hm-cell[data-o="s"] { opacity: 1; }
+  .hm-legend { display: flex; gap: 6px; flex-wrap: wrap; align-items: center;
+    margin-top: 14px; font-size: 12px; color: var(--muted); }
+  .hm-lg { display: inline-flex; align-items: center; gap: 6px; border: 0; background: none;
+    color: inherit; font: inherit; padding: 4px 8px; border-radius: 7px; }
+  button.hm-lg { cursor: pointer; }
+  button.hm-lg:hover { background: var(--surface-2); }
+  button.hm-lg:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
+  button.hm-lg.off { opacity: .4; text-decoration: line-through; }
+  .hm-lg .hm-cell { width: 13px; height: 13px; cursor: inherit; transition: none; }
+  .hm-reset { border: 0; background: none; color: var(--primary); font: inherit;
+    font-size: 12px; cursor: pointer; padding: 4px 8px; }
+  .hm-note { margin-top: 8px; font-size: 12px; color: var(--muted); }
+  /* Briefly highlight the case a heatmap cell jumped to in the run detail. */
+  tr.case.case-focus > td { background: var(--ring); }
   /* Sortable case-table headers reuse the run-list's th.sortable + .arrow styling;
      TIME right-aligns over its values and defaults to slowest-first. */
   .case-table th.sortable { white-space: nowrap; user-select: none; }
@@ -578,6 +644,15 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   #list .table-wrap > table { width: 100%; }
   tr.lgrp > td { background: var(--surface-2); font-weight: 600; cursor: pointer; user-select: none; }
   tr.lgrp .chev { transition: transform .15s; }
+  /* Heatmap launcher in a group header: pinned to the cell's right edge so it lines up
+     across rows (and with the run rows' trash button when the group is expanded) instead
+     of drifting with the variable-length timestamp. */
+  td.lgrp-when { display: flex; align-items: center; white-space: nowrap; }
+  .lgrp-hm { margin-left: auto; flex: 0 0 auto; display: inline-flex; padding: 3px;
+    background: none; border: 0; border-radius: 6px; color: var(--muted); cursor: pointer; }
+  .lgrp-hm svg { width: 15px; height: 15px; }
+  .lgrp-hm:hover { color: var(--primary); background: var(--border); }
+  .lgrp-hm:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
   /* Align the grouped "DAG" header over the dag name (clears the chevron's footprint). */
   th.gcol-dag { padding-left: 32px; }
   /* A group's runs sit in their own full sub-table, marked by a left accent rather
@@ -861,6 +936,20 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   <div class="dlg-body" id="hist-body"></div>
 </dialog>
 
+<dialog id="heatmap" aria-labelledby="hm-title">
+  <div class="dlg-head">
+    <h2 id="hm-title" data-i18n="heatmapTitle">Test×run heatmap</h2>
+    <span class="grow" style="flex:1"></span>
+    <button id="hm-close" class="btn icon-btn" type="button" data-i18n-al="closeReport">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M18 6 6 18M6 6l12 12"/>
+      </svg>
+    </button>
+  </div>
+  <div class="dlg-body" id="hm-body"></div>
+</dialog>
+
 <div id="bulk-bar" class="bulk-bar" hidden></div>
 
 <script>
@@ -904,6 +993,10 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       cmp_added: "Added", cmp_removed: "Removed",
       flakyTitle: "Flaky tests", flakyBtn: "Flaky tests",
       flakyBtnAl: "Flaky tests in recent runs", flakyFail: "Failed to load flaky tests: ",
+      heatmapTitle: "Test×run heatmap", heatmapBtn: "Heatmap",
+      heatmapBtnAl: "Test×run outcome heatmap for this dag·task",
+      heatmapFail: "Failed to load heatmap: ", heatmapEmpty: "No runs to chart yet.",
+      heatmapTrunc: "Showing the {m} most-broken of {n} tests.",
       noFlaky: "No flaky tests in the recent runs.", flkFailed: "failed",
       flkSearch: "filter flaky tests…", flkNoMatch: "No flaky tests match the filter.",
       flkSelScope: "selected groups", flkNoSel: "No flaky tests in the selected groups.",
@@ -978,6 +1071,11 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       cmp_added: "Добавлены", cmp_removed: "Удалены",
       flakyTitle: "Нестабильные тесты", flakyBtn: "Нестабильные",
       flakyBtnAl: "Нестабильные тесты за последние прогоны", flakyFail: "Не удалось загрузить: ",
+      heatmapTitle: "Тепловая карта тест×прогон", heatmapBtn: "Тепловая карта",
+      heatmapBtnAl: "Тепловая карта исходов тест×прогон для этого dag·task",
+      heatmapFail: "Не удалось загрузить тепловую карту: ",
+      heatmapEmpty: "Пока нет прогонов для карты.",
+      heatmapTrunc: "Показаны {m} самых проблемных из {n} тестов.",
       noFlaky: "Нестабильных тестов за последние прогоны нет.", flkFailed: "падений",
       flkSearch: "поиск нестабильных тестов…",
       flkNoMatch: "Под фильтр не попал ни один нестабильный тест.",
@@ -1823,7 +1921,14 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       + '<td class="num">' + rate + "%</td>"
       + '<td class="num">' + fmtDur(g.avgDur) + "</td>"
       + "<td>" + badge(st, statusLabel(st)) + "</td>"
-      + '<td class="muted">' + fmtTime(g.newest.created_at) + "</td></tr>";
+      + '<td class="muted lgrp-when">' + fmtTime(g.newest.created_at)
+      + '<button type="button" class="lgrp-hm" data-key="' + esc(g.key)
+      + '" data-i18n-al="heatmapBtnAl" title="' + esc(t("heatmapBtn")) + '">'
+      + '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"'
+      + ' stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+      + '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/>'
+      + '<rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>'
+      + "</svg></button></td></tr>";
   }
 
   function renderList() {
@@ -1934,6 +2039,13 @@ _INDEX_HTML = r"""<!DOCTYPE html>
         var key = tr.getAttribute("data-key");
         listExpanded[key] = !listExpanded[key];
         renderList();
+      });
+    });
+    listEl.querySelectorAll(".lgrp-hm").forEach(function (b) {
+      b.addEventListener("click", function (e) {
+        e.stopPropagation();  // open the heatmap, don't toggle the group
+        var g = keyMap[b.getAttribute("data-key")];
+        if (g) openHeatmap(g.dag, g.task);
       });
     });
     listEl.querySelectorAll(".gsel").forEach(function (cb) {
@@ -2321,6 +2433,12 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       + '<path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z"/></svg>';
     out += '<button type="button" class="af-link" id="flk-btn" data-i18n-al="flakyBtnAl">'
       + zap + esc(t("flakyBtn")) + "</button>";
+    var grid = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"'
+      + ' stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+      + '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/>'
+      + '<rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>';
+    out += '<button type="button" class="af-link" id="hm-btn" data-i18n-al="heatmapBtnAl">'
+      + grid + esc(t("heatmapBtn")) + "</button>";
     if ((m.failed || 0) + (m.errors || 0) > 0) {
       var lst = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"'
         + ' stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
@@ -2586,6 +2704,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     if (cmpBtn && prev && rec) cmpBtn.addEventListener("click", function () { openCompare(prev, rec); });
     var flkBtn = document.getElementById("flk-btn");
     if (flkBtn) flkBtn.addEventListener("click", function () { openFlaky(m.dag_id, m.task_id); });
+    var hmBtn = document.getElementById("hm-btn");
+    if (hmBtn) hmBtn.addEventListener("click", function () { openHeatmap(m.dag_id, m.task_id); });
     // Per-run error clusters: a clear toolbar button opens the clusters modal scoped to
     // this run; a cluster's test jumps to its history.
     var clBtn = document.getElementById("cl-btn");
@@ -2664,7 +2784,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     return a.i - b.i;
   }
 
-  function openDetail(id) {
+  function openDetail(id, focusNode) {
     filter = "all"; currentId = id;
     caseQuery = ""; caseGroup = false; caseCollapsed = {};
     caseSort = { key: "time", dir: "desc" };
@@ -2678,10 +2798,28 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     setReportParam(id);
     fetch(API + "reports/" + encodeURIComponent(id))
       .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
-      .then(function (d) { detail = d; detail.cases = d.cases || []; renderDetail(); })
+      .then(function (d) {
+        detail = d; detail.cases = d.cases || []; renderDetail();
+        if (focusNode) focusCaseRow(focusNode);  // jump to + expand a specific test
+      })
       .catch(function (e) {
         dBody.innerHTML = '<div class="state c-fail">' + esc(t("reportFail") + e.message) + "</div>";
       });
+  }
+  // Scroll the case table to a node, expand its output, and flash it (used when a heatmap
+  // cell opens the run). The detail opened with filter=all + no grouping, so the row exists.
+  function focusCaseRow(node) {
+    var labels = dBody.querySelectorAll(".case-table tr.case .case-node");
+    for (var i = 0; i < labels.length; i++) {
+      if (labels[i].textContent === node) {
+        var tr = labels[i].closest("tr.case");
+        if (tr.getAttribute("aria-expanded") !== "true") tr.click();  // expand via its toggle
+        tr.scrollIntoView({ block: "center" });
+        tr.classList.add("case-focus");
+        setTimeout(function () { tr.classList.remove("case-focus"); }, 1600);
+        return;
+      }
+    }
   }
 
   // Deep-link rides the Airflow parent URL when embedded (the iframe's bare path
@@ -2725,7 +2863,14 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       return e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom;
     };
     d.addEventListener("mousedown", function (e) { startedOutside = e.target === d && outside(e); });
-    d.addEventListener("click", function (e) { if (startedOutside && outside(e)) closeFn(); });
+    d.addEventListener("click", function (e) {
+      // Only a genuine backdrop click closes: the target must BE the dialog element (the
+      // backdrop), not a bubbled click from inner content. Without `e.target === d`, a
+      // synthetic inner click (e.g. focusCaseRow's tr.click(), coords 0,0 -> reads as
+      // "outside") would dismiss a just-opened dialog. Reset the flag so it never goes stale.
+      if (startedOutside && e.target === d && outside(e)) closeFn();
+      startedOutside = false;
+    });
   }
 
   // Dim the WHOLE Airflow window (nav included) behind a modal, like Airflow's
@@ -2759,7 +2904,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     setParentDim((dlg && dlg.open) || (confirmDlg && confirmDlg.open)
       || (failuresDlg && failuresDlg.open) || (compareDlg && compareDlg.open)
       || (flakyDlg && flakyDlg.open) || (historyDlg && historyDlg.open)
-      || (uniqueDlg && uniqueDlg.open) || (slowDlg && slowDlg.open));
+      || (uniqueDlg && uniqueDlg.open) || (slowDlg && slowDlg.open)
+      || (heatmapDlg && heatmapDlg.open));
   }
 
   // Copy a deep-link to this report.
@@ -3175,7 +3321,9 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     listEl.innerHTML = rows.map(function (f) {
       return '<div class="fk-row"><span class="ostrip">'
         + (f.recent || []).map(outcomeDot).join("") + "</span>"
-        + '<span class="node mono">' + esc(f.node_id) + quarantineBadge(f) + "</span>"
+        + '<span class="fk-main"><span class="node mono">' + esc(f.node_id) + "</span>"
+        + (f.quarantined ? '<span class="fk-sub">' + quarantineBadge(f) + "</span>" : "")
+        + "</span>"
         + '<span class="fk-meta">' + flakyMeta(f) + "</span></div>";
     }).join("");
   }
@@ -3302,6 +3450,219 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   historyDlg.addEventListener("close", updateParentDim);
   closeOnBackdrop(historyDlg, closeHistory);
 
+  // Test×run heatmap: a per-dag·task matrix (rows = tests sorted most-broken first,
+  // columns = recent runs old→new, cell = outcome) so flaky rows, regression blocks and
+  // a build-breaking run read at a glance. A FIXED test-name column + a drag/scroll cell
+  // carousel (like the runs chart) -- cells slide under the names, never over. Same window
+  // selector as flaky/slow; hover shows the plugin's tooltip; click a cell to open that
+  // run, a test name to open its history. Delegated handlers + closure data (no per-cell
+  // listeners) keep it light at the row/column caps.
+  var heatmapDlg = document.getElementById("heatmap");
+  var hmBody = document.getElementById("hm-body");
+  var hmState = { dag: null, task: null, window: 30 };
+  var hmData = null;  // last rendered {runs, tests}; read by the delegated tooltip + clicks
+  var hmSeq = 0;      // guards against a stale window's response overwriting a newer one
+  var hmSel = { p: true, f: true, e: true, s: true };  // legend focus (mirrors chartSel)
+  var HM_COLOR = { p: "--pass", f: "--fail", e: "--error", s: "--skip" };
+  function hmOutcome(code) {
+    return { p: "passed", f: "failed", e: "error", s: "skipped" }[code] || "";
+  }
+  function hmAllOn() { return hmSel.p && hmSel.f && hmSel.e && hmSel.s; }
+  function applyHmFocus() {
+    // Drive the dimming from container classes (no per-cell work, fine at the caps).
+    var cellsEl = document.querySelector("#hm-grid .hm-cells");
+    if (!cellsEl) return;
+    var on = !hmAllOn();
+    cellsEl.classList.toggle("foc", on);
+    ["p", "f", "e", "s"].forEach(function (k) { cellsEl.classList.toggle("foc-" + k, on && hmSel[k]); });
+  }
+  function renderHmLegend() {
+    var el = document.getElementById("hm-legend");
+    if (!el) return;
+    el.innerHTML = ["p", "f", "e", "s"].map(function (k) {
+        return '<button type="button" class="hm-lg' + (hmSel[k] ? "" : " off")
+          + '" data-o="' + k + '" aria-pressed="' + !!hmSel[k] + '">'
+          + '<span class="hm-cell" style="background:var(' + HM_COLOR[k] + ')"></span>'
+          + esc(outcomeLabel(hmOutcome(k))) + "</button>";
+      }).join("")
+      + '<span class="hm-lg"><span class="hm-cell hm-miss"></span>' + esc(t("histDidntRun")) + "</span>"
+      + (hmAllOn() ? "" : '<button type="button" class="hm-reset">' + esc(t("legendReset")) + "</button>");
+    el.querySelectorAll("button.hm-lg").forEach(function (b) {
+      b.addEventListener("click", function () {
+        // Same "focus" model as the runs-chart legend: click shows only that status;
+        // click more to add/remove; emptying falls back to all-shown.
+        var s = b.getAttribute("data-o");
+        if (hmAllOn()) { ["p", "f", "e", "s"].forEach(function (k) { hmSel[k] = k === s; }); }
+        else {
+          hmSel[s] = !hmSel[s];
+          if (!hmSel.p && !hmSel.f && !hmSel.e && !hmSel.s) hmSel.p = hmSel.f = hmSel.e = hmSel.s = true;
+        }
+        renderHmLegend(); applyHmFocus();
+      });
+    });
+    var rst = el.querySelector(".hm-reset");
+    if (rst) rst.addEventListener("click", function () {
+      hmSel.p = hmSel.f = hmSel.e = hmSel.s = true; renderHmLegend(); applyHmFocus();
+    });
+  }
+  function hmShort(node) {
+    // Drop the file path, keep class::test (the informative tail); full id is in the tooltip.
+    var i = node.indexOf("::");
+    return i >= 0 ? node.slice(i + 2) : node;
+  }
+  function findRun(dag, task, run) {
+    var best = null;  // newest try of this dag·task·run, to open its detail on click
+    allReports.forEach(function (x) {
+      if (x.dag_id === dag && x.task_id === task && x.run_id === run
+          && (!best || (x.try_number || 0) > (best.try_number || 0))) best = x;
+    });
+    return best;
+  }
+  // The heatmap's own drag-to-pan -- deliberately NOT the chart's, whose `chartDragged`
+  // resets on a setTimeout that fires after `click`, so a slightly-draggy cell click would
+  // be swallowed. `hmDragMoved` is read synchronously by the click handler and reset on the
+  // next pointerdown, so a real pan is suppressed but an ordinary click always lands.
+  var hmDrag = null, hmDragMoved = 0;
+  function enableHmDrag(el) {
+    el.addEventListener("pointerdown", function (e) {
+      if (e.pointerType === "touch") return;  // touch/trackpad use native scroll
+      hmDrag = { el: el, x: e.clientX, left: el.scrollLeft };
+      el.classList.add("dragging");
+    });
+  }
+  function hmDragMove(e) {
+    if (!hmDrag) return;
+    var dx = e.clientX - hmDrag.x;
+    if (Math.abs(dx) > hmDragMoved) hmDragMoved = Math.abs(dx);
+    hmDrag.el.scrollLeft = hmDrag.left - dx;
+  }
+  function hmDragEnd() {
+    if (!hmDrag) return;
+    hmDrag.el.classList.remove("dragging");
+    hmDrag = null;  // hmDragMoved persists until the next pointerdown so click() can read it
+  }
+  function hmCellTip(cell, ev) {
+    if (!hmData) return;
+    var r = +cell.getAttribute("data-r"), c = +cell.getAttribute("data-c");
+    var tt = hmData.tests[r], run = hmData.runs[c] || {};
+    if (!tt) return;
+    var code = tt.cells[c], col = HM_COLOR[code] || "--muted";
+    var label = code === "-" ? t("histDidntRun") : outcomeLabel(hmOutcome(code));
+    tipShow(
+      '<div class="tt">' + esc(hmShort(tt.node_id)) + "</div>"
+      + '<div class="tm wrap">' + esc(tt.node_id) + "</div>"
+      + '<div class="tm">#' + (c + 1)
+        + (run.created_at ? " · " + esc(fmtTime(run.created_at)) : "") + "</div>"
+      + '<div class="tr"><span><i style="background:var(' + col + ')"></i>'
+        + esc(label) + "</span></div>",
+      ev,
+    );
+  }
+  function openHeatmap(dag, task) {
+    hmState.dag = dag; hmState.task = task; hmState.window = 30;
+    hmSel.p = hmSel.f = hmSel.e = hmSel.s = true;  // reset the legend focus per open
+    // Inset (narrower than the run dialog) when opened from inside a run; wide otherwise.
+    var det = document.getElementById("detail");
+    heatmapDlg.classList.toggle("hm-inset", !!(det && det.open));
+    if (typeof heatmapDlg.showModal === "function") { if (!heatmapDlg.open) heatmapDlg.showModal(); }
+    else heatmapDlg.setAttribute("open", "");
+    updateParentDim();
+    var title = document.getElementById("hm-title");
+    if (title) title.textContent = t("heatmapTitle") + " · " + dag + "·" + task;
+    hmBody.innerHTML = '<div class="flk-ctrls"><label title="' + esc(t("flkWindowTip")) + '">'
+      + esc(t("flkWindow")) + ' <select id="hm-win">'
+      + FLK_WINDOWS.map(function (w) {
+          return '<option value="' + w + '"' + (w === hmState.window ? " selected" : "") + ">"
+            + esc(t("flkWinOpt").replace("{n}", w)) + "</option>";
+        }).join("")
+      + "</select></label></div>"
+      + '<div class="hm-legend" id="hm-legend"></div>'  // legend on top: visible without scrolling
+      + '<div id="hm-grid"></div>';
+    document.getElementById("hm-win").addEventListener("change", function () {
+      hmState.window = +this.value; loadHeatmap();
+    });
+    var grid = document.getElementById("hm-grid");
+    grid.addEventListener("pointerdown", function () { hmDragMoved = 0; });  // fresh per gesture
+    grid.addEventListener("click", function (e) {
+      if (hmDragMoved > 6) return;  // a real pan shouldn't open anything; a click always does
+      var name = e.target.closest(".hm-name");
+      if (name) { closeHeatmap(); openHistory(hmState.dag, hmState.task, name.getAttribute("data-node")); return; }
+      var cell = e.target.closest(".hm-cell");
+      if (cell && cell.hasAttribute("data-c") && !cell.classList.contains("hm-miss") && hmData) {
+        var run = hmData.runs[+cell.getAttribute("data-c")];
+        var tt = hmData.tests[+cell.getAttribute("data-r")];
+        var rec = run && findRun(hmState.dag, hmState.task, run.run_id);
+        if (rec) { closeHeatmap(); openDetail(rec.id, tt && tt.node_id); }  // jump to that test
+      }
+    });
+    grid.addEventListener("mouseover", function (e) {
+      var cell = e.target.closest(".hm-cell");
+      if (cell && cell.hasAttribute("data-r")) hmCellTip(cell, e);  // instant, no hover delay
+    });
+    grid.addEventListener("mousemove", function (e) {
+      if (tipEl && tipEl.style.display === "block") tipMove(e);
+    });
+    grid.addEventListener("mouseout", function (e) {
+      if (e.target.closest(".hm-cell")) tipHide();
+    });
+    loadHeatmap();
+  }
+  function loadHeatmap() {
+    var gridEl = document.getElementById("hm-grid");
+    if (gridEl) gridEl.innerHTML = '<div class="state"><div class="skeleton" style="width:40%;margin:0 auto"></div></div>';
+    var q = new URLSearchParams({
+      dag_id: hmState.dag, task_id: hmState.task, window: String(hmState.window),
+    });
+    var my = ++hmSeq;
+    fetch(API + "heatmap?" + q.toString())
+      .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+      .then(function (d) { if (my !== hmSeq) return; renderHeatmap(d); })
+      .catch(function (e) {
+        if (my !== hmSeq) return;
+        var el = document.getElementById("hm-grid");
+        if (el) el.innerHTML = '<div class="state c-fail">' + esc(t("heatmapFail") + e.message) + "</div>";
+      });
+  }
+  function renderHeatmap(d) {
+    var gridEl = document.getElementById("hm-grid");
+    if (!gridEl) return;
+    hmData = d;
+    var runs = d.runs || [], tests = d.tests || [], n = runs.length;
+    if (!tests.length) { gridEl.innerHTML = '<div class="state">' + esc(t("heatmapEmpty")) + "</div>"; return; }
+    // Fixed column of test names (short, readable; full id on hover) -- the corner spacer
+    // matches the run-header row height so rows line up with the scrolling pane.
+    var names = '<div class="hm-corner"></div>' + tests.map(function (tt) {
+      return '<button type="button" class="hm-name" data-node="' + esc(tt.node_id)
+        + '" title="' + esc(tt.node_id) + '"><span>' + esc(hmShort(tt.node_id)) + "</span></button>";
+    }).join("");
+    // Scrolling pane: a run-number header row, then one row of cells per test.
+    var head = "";
+    for (var c = 0; c < n; c++) {
+      var show = (c % 5 === 0) || (c === n - 1);  // label every 5th run + the last
+      head += '<div class="hm-rhead">' + (show ? "#" + (c + 1) : "") + "</div>";
+    }
+    var cells = tests.map(function (tt, r) {
+      return (tt.cells || []).map(function (code, c) {
+        var miss = code === "-";
+        var bg = miss ? "" : ' style="background:var(' + (HM_COLOR[code] || "--muted") + ')"';
+        return '<span class="hm-cell' + (miss ? " hm-miss" : "") + '" data-o="' + code
+          + '" data-r="' + r + '" data-c="' + c + '"' + bg + "></span>";
+      }).join("");
+    }).join("");
+    var note = d.truncated
+      ? '<div class="hm-note">' + esc(t("heatmapTrunc").replace("{m}", tests.length).replace("{n}", d.total_tests)) + "</div>"
+      : "";
+    gridEl.innerHTML = '<div class="hm-wrap"><div class="hm-names">' + names + "</div>"
+      + '<div class="hm-scroll"><div class="hm-cells" style="grid-template-columns:'
+      + "repeat(" + n + ", var(--hm-cell))\">" + head + cells + "</div></div></div>" + note;
+    enableHmDrag(gridEl.querySelector(".hm-scroll"));  // heatmap-local drag-to-pan
+    renderHmLegend(); applyHmFocus();  // clickable status focus, like the chart legend
+  }
+  function closeHeatmap() { if (heatmapDlg.open) heatmapDlg.close(); else heatmapDlg.removeAttribute("open"); }
+  document.getElementById("hm-close").addEventListener("click", closeHeatmap);
+  heatmapDlg.addEventListener("close", updateParentDim);
+  closeOnBackdrop(heatmapDlg, closeHeatmap);
+
   document.getElementById("refresh").addEventListener("click", load);
   // Links menu: GitHub + the FastAPI docs. Airflow's iframe sandbox blocks _blank
   // from inside, so open the tab from the same-origin parent; standalone uses ours.
@@ -3335,6 +3696,9 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   document.addEventListener("pointermove", chartDragMove);
   document.addEventListener("pointerup", chartDragEnd);
   document.addEventListener("pointercancel", chartDragEnd);
+  document.addEventListener("pointermove", hmDragMove);
+  document.addEventListener("pointerup", hmDragEnd);
+  document.addEventListener("pointercancel", hmDragEnd);
   // Debounce the top filters: each keystroke otherwise re-renders the whole page
   // (chart + list + KPIs + flaky) -- costly on large datasets. Call with no arg so it
   // resets to page 1 / newest (binding the listener directly passes the Event as the

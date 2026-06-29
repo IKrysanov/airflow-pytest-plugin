@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Test×run heatmap** — a per-dag·task matrix (rows = tests, columns = recent runs
+  oldest→newest, each cell coloured by that test's outcome; `did not run` shown as an
+  empty dashed cell) that surfaces flaky rows (alternating colours), regression blocks
+  (failures filling in on the right) and a build-breaking run (a red/error column) at a
+  glance. Rows sort most-broken first (fail+error count, then flakiness). A **fixed
+  test-name column + a drag/scroll cell carousel** (like the runs chart) keeps names
+  readable as the matrix scrolls; hovering a cell shows the plugin's standard tooltip
+  (test · run · outcome). The legend is a **status focus filter** (like the runs-chart
+  legend) — click a status to dim the rest. Opens from a **Heatmap** button on each
+  dag·task group header in the run list and from a run's toolbar; clicking a **cell opens
+  that run and jumps to / expands that test**, a test name opens its history. A window
+  selector mirrors the flaky/slow panels.
+- **`GET /api/heatmap`** — the outcome matrix for one dag·task (`dag_id` + `task_id`
+  required, `window` optional). Rows are compact single-char cell codes
+  (`p`/`f`/`e`/`s`, `-` = didn't run) aligned to `runs`; RBAC-filtered, window clamped
+  to 2–100, rows capped at 300 (`truncated` flags it). Load profile mirrors `/api/flaky`
+  for one group (cached scan, bounded).
+
 ## [0.4.0] - 2026-06-29
 
 ### Added

@@ -134,6 +134,24 @@ def test_unique_modal_opens(dash):
     expect(page.locator("dialog#unique")).to_be_visible()
 
 
+def test_flaky_modal_quarantine_badge_sits_under_name(dash):
+    # Open a run's Flaky modal; a quarantined test's badge must be on its OWN line UNDER
+    # the test name (not inline, where a long name pushes it onto another row).
+    page = dash.page
+    page.click("tr.lgrp:has-text('alpha')")  # expand
+    page.locator("tr.clickable").first.click()
+    expect(page.locator("dialog#detail")).to_be_visible()
+    page.click("#flk-btn")
+    page.wait_for_selector("#flk-list .fk-row")
+    row = page.locator(".fk-row:has(.flk-q)").first  # a quarantined flaky test
+    expect(row).to_be_visible()
+    node = row.locator(".fk-main .node").bounding_box()
+    badge = row.locator(".fk-sub .flk-q").bounding_box()
+    assert badge["y"] >= node["y"] + node["height"] - 2, (
+        "quarantine badge not below the name"
+    )
+
+
 def test_legend_focus_filter_resets(dash):
     page = dash.page
     base = page.locator("tr.lgrp").count()

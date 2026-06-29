@@ -150,6 +150,11 @@ def create_app(
 
     @app.get("/", response_class=HTMLResponse, include_in_schema=False)
     def index() -> HTMLResponse:
-        return HTMLResponse(index_html())
+        # The whole single-page app (incl. all inline JS) lives in this HTML, so it must
+        # never be served stale -- otherwise a browser/Airflow cache keeps running old JS
+        # after an upgrade. no-store guarantees every load fetches the current build.
+        return HTMLResponse(
+            index_html(), headers={"Cache-Control": "no-store, must-revalidate"}
+        )
 
     return app
