@@ -31,6 +31,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     --primary: #017cee; --on-primary: #ffffff; --ring: #017cee40;
     --pass: #008000; --fail: #ff0000; --skip: #ff69b4; --error: #9370db;
     --pass-bg: #0080001a; --fail-bg: #ff00001a; --skip-bg: #ff69b41f; --error-bg: #9370db1f;
+    --warn: #a16207; --warn-bg: #fef08a;  /* amber "flaky" warning chip (readable on yellow) */
     --trend: #0891b2;  /* cyan pass-rate trend line (darker for contrast on white) */
     --thresh: #d97706;  /* amber success-threshold (label text -- must stay readable) */
     --thresh-soft: #d9770659;  /* muted amber for the gridline so it recedes behind data */
@@ -45,6 +46,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     --primary: #4ba3f5; --on-primary: #07121e; --ring: #017cee66;
     --pass: #2ecc71; --fail: #ff6b6b; --skip: #ff8ecb; --error: #b39ddb;
     --pass-bg: #2ecc711f; --fail-bg: #ff6b6b1f; --skip-bg: #ff8ecb1f; --error-bg: #b39ddb1f;
+    --warn: #fcd34d; --warn-bg: #fcd34d2e;  /* amber "flaky" warning chip on the dark theme */
     --trend: #22d3ee;  /* cyan pass-rate trend line (brighter on the navy theme) */
     --thresh: #fbbf24;  /* amber success-threshold (label text -- must stay readable) */
     --thresh-soft: #fbbf2459;  /* muted amber for the gridline so it recedes behind data */
@@ -674,6 +676,16 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   #list .table-wrap > table { width: 100%; }
   tr.lgrp > td { background: var(--surface-2); font-weight: 600; cursor: pointer; user-select: none; }
   tr.lgrp .chev { transition: transform .15s; }
+  /* Flaky warning chip -- shown only on groups that actually have flaky tests. Amber/yellow
+     with a warning triangle; clicking it scopes the board (chart + flaky panel) to the group. */
+  .lgrp-flk { display: inline-flex; align-items: center; gap: 3px; margin-left: 8px;
+    padding: 1px 8px 1px 6px; border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent);
+    border-radius: 999px; background: var(--warn-bg); color: var(--warn); font-size: 11px;
+    font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.6; cursor: pointer;
+    vertical-align: middle; }
+  .lgrp-flk svg { width: 12px; height: 12px; }
+  .lgrp-flk:hover { background: color-mix(in srgb, var(--warn) 26%, var(--warn-bg)); }
+  .lgrp-flk:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
   /* WHEN is the last column and shrinks to its content (width:1% on the th) so the date and
      its heatmap button stay snug together at the row's right edge -- the leftover width goes
      to the wide DAG/TASK identity columns instead of opening a hole between the date and the
@@ -822,7 +834,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       </div>
       <div id="chart"></div>
     </div>
-    <div class="card flaky-card" id="flaky-card">
+    <div class="card flaky-card" id="flaky-card" hidden>
       <div class="chart-head">
         <span data-i18n="flakyTitle">Flaky tests</span>
         <span class="flk-scope" id="flk-scope" hidden></span>
@@ -1034,6 +1046,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       heatmapFail: "Failed to load heatmap: ", heatmapEmpty: "No runs to chart yet.",
       heatmapTrunc: "Showing the {m} most-broken of {n} tests.",
       noFlaky: "No flaky tests in the recent runs.", flkFailed: "failed",
+      flkGroupWarn: "Flaky tests in this group — click to focus the board on it",
       flkSearch: "filter flaky tests…", flkNoMatch: "No flaky tests match the filter.",
       flkSelScope: "selected groups", flkNoSel: "No flaky tests in the selected groups.",
       flkWindow: "Analysis window:", flkWinOpt: "last {n} runs",
@@ -1113,6 +1126,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       heatmapEmpty: "Пока нет прогонов для карты.",
       heatmapTrunc: "Показаны {m} самых проблемных из {n} тестов.",
       noFlaky: "Нестабильных тестов за последние прогоны нет.", flkFailed: "падений",
+      flkGroupWarn: "В этой группе есть нестабильные тесты — нажмите, чтобы сфокусироваться",
       flkSearch: "поиск нестабильных тестов…",
       flkNoMatch: "Под фильтр не попал ни один нестабильный тест.",
       flkSelScope: "выбранные группы",
@@ -1954,6 +1968,14 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     if (groupSort.key === "status") return g.newest.success ? 2 : (g.newest.errors ? 0 : 1);
     return String(g.newest.created_at || "");  // created_at, and the default
   }
+  // Yellow warning chip -- rendered ONLY for groups that have at least one flaky test.
+  function flkGroupChip(g) {
+    var c = flkCountByKey[g.key] || 0;
+    if (!c) return "";
+    return ' <button type="button" class="lgrp-flk" data-key="' + esc(g.key)
+      + '" aria-label="' + esc(t("flkGroupWarn")) + '" title="' + esc(t("flkGroupWarn")) + '">'
+      + ICONS.error + "<span>" + c + "</span></button>";
+  }
   function groupHeaderHtml(g) {
     var exp = !!listExpanded[g.key];
     var nSel = g.runs.filter(function (r) { return selectedIds.has(r.id); }).length;
@@ -1964,7 +1986,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
         + (nSel === g.runs.length ? " checked" : "") + ' aria-label="' + esc(t("selectGroup")) + '"></td>'
       + '<td class="mono"><span class="chev"' + (exp ? ' style="transform:rotate(90deg)"' : "")
         + ">" + CHEV + "</span> " + esc(g.dag) + "</td>"
-      + '<td class="mono">' + esc(g.task) + "</td>"
+      + '<td class="mono">' + esc(g.task) + flkGroupChip(g) + "</td>"
       + '<td class="num">' + g.runs.length + "</td>"
       + '<td class="num">' + rate + "%</td>"
       + '<td class="num">' + fmtDur(g.avgDur) + "</td>"
@@ -2097,6 +2119,15 @@ _INDEX_HTML = r"""<!DOCTYPE html>
         e.stopPropagation();  // open the heatmap, don't toggle the group
         var g = keyMap[b.getAttribute("data-key")];
         if (g) openHeatmap(g.dag, g.task);
+      });
+    });
+    listEl.querySelectorAll(".lgrp-flk").forEach(function (b) {
+      b.addEventListener("click", function (e) {
+        e.stopPropagation();  // scope the board to this group, don't toggle the expand
+        var cb = b.closest("tr").querySelector(".gsel");
+        if (cb && !cb.checked) { cb.checked = true; cb.dispatchEvent(new Event("change")); }
+        var card = document.getElementById("flaky-card");
+        if (card && !card.hidden) card.scrollIntoView({ behavior: "smooth", block: "nearest" });
       });
     });
     listEl.querySelectorAll(".gsel").forEach(function (cb) {
@@ -2275,9 +2306,33 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   // Flaky panel on the main board: global flaky tests, filtered client-side by the
   // dag/task search; a row opens that test's history.
   var allFlaky = [];
+  // Per-group flaky count, keyed exactly like a group's key (JSON [dag_id, task_id]); drives
+  // the yellow warning chip on the run-list groups. Rebuilt whenever the flaky data changes.
+  var flkCountByKey = {};
+  function rebuildFlkCounts() {
+    flkCountByKey = {};
+    allFlaky.forEach(function (f) {
+      var k = JSON.stringify([f.dag_id, f.task_id]);
+      flkCountByKey[k] = (flkCountByKey[k] || 0) + 1;
+    });
+  }
   function renderFlakyBoard() {
     var box = document.getElementById("flaky-list");
     if (!box) return;
+    // No flaky anywhere -> drop the whole panel so the runs chart takes the full width.
+    // It reappears (with content) the moment any flaky test shows up. When the panel's
+    // presence flips, the chart is re-rendered so its bars re-fill the new (wider/narrower)
+    // width -- otherwise they'd stay sized to the old half-width layout.
+    var flakyCard = document.getElementById("flaky-card");
+    if (flakyCard) {
+      var wasHidden = flakyCard.hidden;
+      flakyCard.hidden = !allFlaky.length;
+      // Re-fill the chart to the new width when the panel appears/disappears -- but only if
+      // the carousel is at its default (newest) position, so we never yank a scroll the user
+      // (or a test) just made. A scrolled chart keeps its window until the next natural render.
+      if (flakyCard.hidden !== wasHidden && chartScroll == null) renderChart();
+    }
+    if (!allFlaky.length) return;
     var dag = document.getElementById("f-dag").value.trim().toLowerCase();
     var task = document.getElementById("f-task").value.trim().toLowerCase();
     var qEl = document.getElementById("flk-board-q");
@@ -2326,8 +2381,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   function loadFlaky() {
     fetch(API + "flaky")
       .then(function (r) { return r.ok ? r.json() : { flaky: [] }; })
-      .then(function (d) { allFlaky = d.flaky || []; renderFlakyBoard(); })
-      .catch(function () { allFlaky = []; renderFlakyBoard(); });
+      .then(function (d) { allFlaky = d.flaky || []; rebuildFlkCounts(); renderFlakyBoard(); renderList(); })
+      .catch(function () { allFlaky = []; rebuildFlkCounts(); renderFlakyBoard(); renderList(); });
   }
   // Duration-regression scan honouring the top dag/task/run filters (like the other
   // KPIs): feeds the "Slowdowns" count and primes the modal so its first open is instant.

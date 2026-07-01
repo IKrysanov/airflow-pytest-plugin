@@ -39,7 +39,10 @@ _log = logging.getLogger(__name__)
 META_SCHEMA_VERSION = 1
 
 
-class ArchivingResultParser(JUnitResultParser):  # type: ignore[misc]
+# The operator base is typed as Any when the operator package ships without type info (some
+# environments) and concretely typed in others -- so the misc subclass error only fires
+# sometimes. Listing `unused-ignore` keeps this quiet whether or not misc fires.
+class ArchivingResultParser(JUnitResultParser):  # type: ignore[misc, unused-ignore]
     """Archives each run under the reports layout: the operator's JUnit result
     plus (with ``allure=True``) the raw Allure results for TestOps export."""
 
