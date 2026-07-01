@@ -178,3 +178,54 @@ def test_mobile_has_no_horizontal_scroll(dash):
     overflow = page.evaluate("document.documentElement.scrollWidth - window.innerWidth")
     assert overflow <= 2, f"horizontal overflow at 375px: {overflow}px"
     assert dash.errors == []
+
+
+def test_chart_tooltip_anchored_above_bars(dash):
+    # The runs-chart tooltip pins its Y above the bars (follows the cursor's X only) so it
+    # doesn't jump up/down as the cursor sweeps -- regression guard.
+    page = dash.page
+    page.locator(".chart-bars .bar").first.hover()
+    page.wait_for_timeout(450)
+    r = page.evaluate(
+        "() => { const t=document.getElementById('tip'), s=document.querySelector('.chart-bars');"
+        " if(!t || getComputedStyle(t).display==='none') return null;"
+        " return {tb: t.getBoundingClientRect().bottom, st: s.getBoundingClientRect().top}; }"
+    )
+    assert r is not None, "chart tooltip did not show"
+    assert r["tb"] <= r["st"] + 2, "tooltip should sit above the bars (stable Y anchor)"
+
+
+def test_list_header_only_label_sorts(dash):
+    # In the run list, clicking the empty header space must NOT sort -- only the label text.
+    page = dash.page
+
+    def active():
+        return page.evaluate(
+            '() => document.querySelector(\'th.gsort[aria-sort="ascending"],'
+            "th.gsort[aria-sort=\"descending\"]')?.getAttribute('data-key') || 'none'"
+        )
+
+    before = active()
+    box = page.locator("th.gsort").nth(1).bounding_box()
+    page.mouse.click(
+        box["x"] + box["width"] - 5, box["y"] + box["height"] / 2
+    )  # empty space
+    page.wait_for_timeout(150)
+    assert active() == before, "clicking empty header space should not sort"
+    page.locator("th.gsort .th-lab").nth(1).click()  # the label itself
+    page.wait_for_timeout(150)
+    assert active() != before, "clicking the label should sort"
+
+
+def test_case_table_long_names_wrap(dash):
+    # Long test ids wrap (not nowrap) so the Time column stays visible without h-scroll.
+    page = dash.page
+    page.click("tr.lgrp:has-text('alpha')")
+    page.locator("tr.clickable").first.click()
+    page.wait_for_selector(".case-table tr.case")
+    ws = page.eval_on_selector(".case-node", "el => getComputedStyle(el).whiteSpace")
+    assert ws == "normal", f"case node should wrap, got white-space:{ws}"
+    overflow = page.eval_on_selector(
+        ".case-table", "el => el.querySelector('table').scrollWidth - el.clientWidth"
+    )
+    assert overflow <= 3, f"case table overflows horizontally by {overflow}px"

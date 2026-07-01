@@ -403,6 +403,15 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   }
   th.sortable, th.gsort, th.rsort { cursor: pointer; }
   th.sortable:hover, th.gsort:hover, th.rsort:hover { color: var(--fg); }
+  /* Run-list headers: ONLY the label text (.th-lab) sorts -- the empty cell space around it
+     is not clickable. The <th> shows a default cursor; the label carries the pointer/hover. */
+  #list th.sortable, #list th.gsort, #list th.rsort { cursor: default; }
+  /* Hovering the empty cell space must NOT highlight the label: keep the th muted (inherit
+     would resolve to --fg and darken the word). Only .th-lab:hover below highlights it. */
+  #list th.sortable:hover, #list th.gsort:hover, #list th.rsort:hover { color: var(--muted); }
+  .th-lab { display: inline-flex; align-items: center; gap: 4px; vertical-align: middle;
+    cursor: pointer; }
+  .th-lab:hover { color: var(--fg); }
   th .arrow { opacity: .9; margin-left: 4px; }
   tbody td { border-bottom: 1px solid var(--border); }
   tbody tr { transition: background .12s; }
@@ -460,16 +469,17 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .pill:hover { border-color: var(--primary); }
   .pill[aria-pressed="true"] { background: var(--primary); border-color: var(--primary); color: var(--on-primary); }
   .pill:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
-  /* Let a long test id keep the cell on one line; the table-wrap scrolls
-     horizontally to its full width so it never overlaps the Time column. */
-  .case-node { display: inline-block; white-space: nowrap; }
+  /* A long test id WRAPS so the whole row (incl. the Time column) stays visible without
+     horizontal scrolling -- the node column takes the slack and grows taller, not wider.
+     (Overrides the global `td { white-space: nowrap }`, which would block wrapping.) */
+  .case-node { display: inline-block; white-space: normal; overflow-wrap: anywhere; }
   .case-table { overflow-x: auto; }
   /* border-collapse:separate so the frozen (sticky) outcome column keeps its OWN
      borders -- with collapse, a sticky cell's borders belong to the table and get
      painted over, so the column's row lines vanished and the header doubled up.
      Each cell carries only border-bottom (+ the divider on the first cell), so the
      lines are single and aligned across all columns. */
-  .case-table table { width: max-content; min-width: 100%;
+  .case-table table { width: 100%;
     border-collapse: separate; border-spacing: 0; }
   .case.clickable[aria-expanded="true"] { background: var(--surface-2); }
   .case-table thead th:first-child,
@@ -577,18 +587,30 @@ _INDEX_HTML = r"""<!DOCTYPE html>
      (capped) -- it shrinks to the names (no wasted indent) and only grows, shifting the
      map right, when a name is long. Both grids share row heights + gap, so rows stay
      aligned as the dialog body scrolls vertically. */
-  .hm-wrap { display: grid; grid-template-columns: fit-content(360px) 1fr; align-items: start;
-    --hm-cell: 22px; --hm-head: 16px; }
-  .hm-names { display: grid; gap: 3px; min-width: 0; }
-  .hm-scroll { overflow-x: auto; overflow-y: hidden; padding-bottom: 6px; cursor: grab; }
+  /* Name column is capped (adaptive to the dialog width) so one very long test id can't
+     stretch it and open a big empty gap on the left -- long names ellipsis-truncate instead. */
+  .hm-wrap { display: grid; grid-template-columns: fit-content(clamp(100px, 22vw, 160px)) 1fr;
+    align-items: start; --hm-cell: 22px; --hm-head: 16px; --hm-gap: 3px;
+    /* grid-line colour == the regular UI border/divider colour (adaptive per theme); the 3px
+       rounded gaps keep the cells clearly separated without the line itself standing out. */
+    --hm-grid: var(--border); }
+  .hm-names { display: grid; gap: var(--hm-gap); min-width: 0; }
+  .hm-scroll { overflow-x: auto; overflow-y: hidden; padding: 0 6px 6px; cursor: grab; }
   .hm-scroll.dragging { cursor: grabbing; }
-  /* Horizontal padding so the first/last cell's hover outline (offset 1px + 2px) isn't
-     clipped by the scroll container's edge. No vertical padding -> rows stay aligned with
-     the name column. */
-  .hm-cells { display: grid; gap: 3px; width: max-content; padding: 0 4px; }
+  /* The run-number row floats ABOVE the map (own transparent grid, same columns + gaps so it
+     lines up), with no boxes/lines around the numbers. Its height + the names' corner both
+     equal --hm-head, and the map's own top frame follows, so name rows still align with cells. */
+  .hm-headrow { display: grid; gap: var(--hm-gap); padding: 0 var(--hm-gap); width: max-content; }
+  .hm-rhead { height: var(--hm-head); display: flex; align-items: flex-end; justify-content: center;
+    overflow: hidden; font-size: var(--hm-rhead-fs, 9px); color: var(--muted);
+    white-space: nowrap; font-variant-numeric: tabular-nums; }
+  /* A real grid: the container is painted with the grid-line colour and every cell is inset
+     from it by an EQUAL gap on all four sides -- the same value drives both `gap` (interior
+     lines) and `padding` (the outer frame), so spacing is identical everywhere and the top/
+     bottom/side borders are never eaten. Rounded container + rounded cells. */
+  .hm-cells { display: grid; gap: var(--hm-gap); padding: var(--hm-gap); width: max-content;
+    background: var(--hm-grid); border-radius: 8px; }
   .hm-corner { height: var(--hm-head); }
-  .hm-rhead { height: var(--hm-head); align-self: end; font-size: 9px; color: var(--muted);
-    text-align: center; white-space: nowrap; font-variant-numeric: tabular-nums; }
   .hm-name { all: unset; box-sizing: border-box; height: var(--hm-cell); display: flex;
     align-items: center; justify-content: flex-end; min-width: 0; padding-right: 10px;
     white-space: nowrap; overflow: hidden; font-size: 11.5px;
@@ -597,11 +619,16 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .hm-name > span { overflow: hidden; text-overflow: ellipsis; }
   .hm-name:hover { text-decoration: underline; }
   .hm-name:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
-  .hm-cell { width: var(--hm-cell); height: var(--hm-cell); border-radius: 3px;
-    display: inline-block; cursor: pointer; transition: opacity .12s; }
-  .hm-miss { background: transparent; border: 1px dashed var(--border); box-sizing: border-box;
-    cursor: default; }
-  .hm-cell:not(.hm-miss):hover { outline: 2px solid var(--ring); outline-offset: 1px; }
+  .hm-cell { width: var(--hm-cell); height: var(--hm-cell); display: block; border-radius: 5px;
+    cursor: pointer; transition: opacity .12s, filter .1s; }
+  .hm-miss { background: var(--surface); cursor: default; }  /* empty grid cell = didn't run */
+  /* Hover highlight (map cells only -- NOT the legend swatches) stays ENTIRELY INSIDE the cell:
+     an inset ring + a brightness lift. Because nothing is drawn outside the border-box and the
+     cell isn't lifted over its neighbours, it can't reach into the 3px gaps or squeeze the
+     adjacent squares -- every cell keeps its exact size and the highlight looks identical on
+     all of them. A white inset ring reads clearly on any status colour, in both themes. */
+  .hm-cells .hm-cell:not(.hm-miss):hover { filter: brightness(1.22);
+    box-shadow: inset 0 0 0 2px rgba(255, 255, 255, .92), inset 0 0 0 3px rgba(0, 0, 0, .35); }
   /* Legend = a status focus filter, like the runs-chart legend: focusing a status dims
      the other cells (the .foc-<code> container classes drive it -- no per-cell work). */
   .hm-cells.foc .hm-cell:not(.hm-miss) { opacity: .12; }
@@ -615,7 +642,10 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   button.hm-lg:hover { background: var(--surface-2); }
   button.hm-lg:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
   button.hm-lg.off { opacity: .4; text-decoration: line-through; }
-  .hm-lg .hm-cell { width: 13px; height: 13px; cursor: inherit; transition: none; }
+  .hm-lg .hm-cell { width: 13px; height: 13px; cursor: inherit; transition: none;
+    border-radius: 3px; }
+  .hm-lg .hm-miss { background: transparent; border: 1px dashed var(--border);
+    box-sizing: border-box; }  /* legend swatch keeps the dashed "didn't run" look */
   .hm-reset { border: 0; background: none; color: var(--primary); font: inherit;
     font-size: 12px; cursor: pointer; padding: 4px 8px; }
   .hm-note { margin-top: 8px; font-size: 12px; color: var(--muted); }
@@ -644,11 +674,17 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   #list .table-wrap > table { width: 100%; }
   tr.lgrp > td { background: var(--surface-2); font-weight: 600; cursor: pointer; user-select: none; }
   tr.lgrp .chev { transition: transform .15s; }
-  /* Heatmap launcher in a group header: pinned to the cell's right edge so it lines up
-     across rows (and with the run rows' trash button when the group is expanded) instead
-     of drifting with the variable-length timestamp. */
-  td.lgrp-when { display: flex; align-items: center; white-space: nowrap; }
-  .lgrp-hm { margin-left: auto; flex: 0 0 auto; display: inline-flex; padding: 3px;
+  /* WHEN is the last column and shrinks to its content (width:1% on the th) so the date and
+     its heatmap button stay snug together at the row's right edge -- the leftover width goes
+     to the wide DAG/TASK identity columns instead of opening a hole between the date and the
+     button. The date is left-aligned so the "When" header still sits right over it. */
+  th.gcol-when { width: 1%; }
+  /* Keep the cell a real table-cell so its bottom border (the row separator) stays continuous
+     to the right edge -- `display:flex` on a <td> drops that border. The flex lives on an
+     inner wrapper instead, which lays out the date + heatmap button snugly. */
+  td.lgrp-when { white-space: nowrap; }
+  .lgrp-when-in { display: flex; align-items: center; }
+  .lgrp-hm { margin-left: 8px; flex: 0 0 auto; display: inline-flex; padding: 3px;
     background: none; border: 0; border-radius: 6px; color: var(--muted); cursor: pointer; }
   .lgrp-hm svg { width: 15px; height: 15px; }
   .lgrp-hm:hover { color: var(--primary); background: var(--border); }
@@ -1587,21 +1623,32 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     tipEl.style.display = "block";
     tipMove(ev);
   }
+  var tipAnchorEl = null;  // when set, the tooltip pins its Y to this element (follows X only)
   function tipMove(ev) {
     if (!tipEl) return;
     var pad = 14, w = tipEl.offsetWidth, h = tipEl.offsetHeight;
-    var x = ev.clientX + pad, y = ev.clientY + pad;
+    var x = ev.clientX + pad;
     if (x + w > window.innerWidth - 8) x = ev.clientX - w - pad;
-    if (y + h > window.innerHeight - 8) y = ev.clientY - h - pad;
+    var y;
+    if (tipAnchorEl) {
+      // Pin Y above the anchor (e.g. the runs-chart strip) so sweeping across bars doesn't
+      // make the tooltip -- and its status dots -- jump up/down with the cursor's wobble.
+      var ar = tipAnchorEl.getBoundingClientRect();
+      y = ar.top - h - 8;
+      if (y < 8) y = ar.bottom + 8;  // no room above -> sit below
+    } else {
+      y = ev.clientY + pad;
+      if (y + h > window.innerHeight - 8) y = ev.clientY - h - pad;
+    }
     tipEl.style.left = Math.max(8, x) + "px";
     tipEl.style.top = Math.max(8, y) + "px";
   }
-  function tipHide() { if (tipEl) tipEl.style.display = "none"; }
-  function bindTip(el, htmlFn) {
+  function tipHide() { if (tipEl) tipEl.style.display = "none"; tipAnchorEl = null; }
+  function bindTip(el, htmlFn, anchorEl) {
     if (!el) return;
     var timer = null, last = null;
     el.addEventListener("mouseenter", function (ev) {
-      last = ev;
+      last = ev; tipAnchorEl = anchorEl || null;
       // Skip if a re-render detached the element during the delay (no stale tooltip).
       timer = setTimeout(function () { if (el.isConnected) tipShow(htmlFn(), last); }, 320);
     });
@@ -1702,7 +1749,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     strip.querySelectorAll(".bar").forEach(function (bar, i) {
       var r = win[i], id = bar.getAttribute("data-id");
       bar.addEventListener("click", function () { if (!chartDragged) openDetail(id); });
-      bindTip(bar, function () { return barTip(r, r.seq); });
+      bindTip(bar, function () { return barTip(r, r.seq); }, barsEl);  // pin Y above the strip
     });
     renderTrend(chart, strip, win, slot, stripW);
 
@@ -1771,7 +1818,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       bindTip(dot, function () {
         return "<b>#" + p.r.seq + "</b> " + esc(t("passRate")) + ": "
           + Math.round(p.rate * 100) + "% (" + (p.r.passed || 0) + "/" + (p.r.total || 0) + ")";
-      });
+      }, strip);  // pin Y above the strip (no vertical jump sweeping dots)
     });
     // Dashed threshold gridline, pinned (lives in #chart, outside the scrolling strip).
     var th = document.createElement("div");
@@ -1871,7 +1918,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     return COLS.map(function (c) {
       var asc = sort.key === c.key ? (sort.dir === 1 ? "ascending" : "descending") : "none";
       return '<th class="sortable" data-key="' + c.key + '" aria-sort="' + asc + '">'
-        + esc(t(c.label)) + arrow(c.key) + "</th>";
+        + '<span class="th-lab">' + esc(t(c.label)) + arrow(c.key) + "</span></th>";
     }).join("");
   }
   // A group's full column header -- sorts the runs of THAT group only (class rsort,
@@ -1882,7 +1929,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       var ar = on ? '<span class="arrow">' + (eff.dir === 1 ? "↑" : "↓") + "</span>" : "";
       return '<th class="rsort" data-key="' + c.key + '" data-gkey="' + esc(g.key)
         + '" aria-sort="' + (on ? (eff.dir === 1 ? "ascending" : "descending") : "none") + '">'
-        + esc(t(c.label)) + ar + "</th>";
+        + '<span class="th-lab">' + esc(t(c.label)) + ar + "</span></th>";
     }).join("");
     return '<th class="sel-cell"></th>' + cells + "<th></th>";
   }
@@ -1890,7 +1937,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   function gHeadCell(key, label, cls) {
     var asc = groupSort.key === key ? (groupSort.dir === 1 ? "ascending" : "descending") : "none";
     return '<th class="gsort' + (cls ? " " + cls : "") + '" data-key="' + key
-      + '" aria-sort="' + asc + '">' + esc(t(label)) + groupArrow(key) + "</th>";
+      + '" aria-sort="' + asc + '"><span class="th-lab">' + esc(t(label))
+      + groupArrow(key) + "</span></th>";
   }
   function groupArrow(key) {
     if (groupSort.key !== key) return "";
@@ -1921,14 +1969,14 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       + '<td class="num">' + rate + "%</td>"
       + '<td class="num">' + fmtDur(g.avgDur) + "</td>"
       + "<td>" + badge(st, statusLabel(st)) + "</td>"
-      + '<td class="muted lgrp-when">' + fmtTime(g.newest.created_at)
+      + '<td class="muted lgrp-when"><div class="lgrp-when-in">' + fmtTime(g.newest.created_at)
       + '<button type="button" class="lgrp-hm" data-key="' + esc(g.key)
       + '" data-i18n-al="heatmapBtnAl" title="' + esc(t("heatmapBtn")) + '">'
       + '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"'
       + ' stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
       + '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/>'
       + '<rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>'
-      + "</svg></button></td></tr>";
+      + "</svg></button></div></td></tr>";
   }
 
   function renderList() {
@@ -1960,7 +2008,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
         + gHeadCell("task_id", "cTask")
         + gHeadCell("runs", "cRuns") + gHeadCell("pass_rate", "cPassRate")
         + gHeadCell("avg_dur", "cAvgDur") + gHeadCell("status", "cStatus")
-        + gHeadCell("created_at", "cWhen");
+        + gHeadCell("created_at", "cWhen", "gcol-when");
       var groups = groupReports(shown);
       groups.forEach(function (g) { keyMap[g.key] = g; });
       groups.sort(function (a, b) {
@@ -2004,7 +2052,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       listGroup = lg.checked; listExpanded = {}; groupRunSort = {}; listPage = 0; renderList();
     });
     listEl.querySelectorAll("th.sortable").forEach(function (th) {
-      th.addEventListener("click", function () {
+      th.addEventListener("click", function (e) {
+        if (!e.target.closest(".th-lab")) return;  // only the label sorts, not the empty space
         var k = th.getAttribute("data-key");
         if (sort.key === k) sort.dir *= -1; else { sort.key = k; sort.dir = 1; }
         listPage = 0;
@@ -2012,7 +2061,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       });
     });
     listEl.querySelectorAll("th.gsort").forEach(function (th) {  // top header: groups + tests
-      th.addEventListener("click", function () {
+      th.addEventListener("click", function (e) {
+        if (!e.target.closest(".th-lab")) return;  // only the label sorts, not the empty space
         var k = th.getAttribute("data-key");
         if (groupSort.key === k) groupSort.dir *= -1; else { groupSort.key = k; groupSort.dir = 1; }
         groupRunSort = {};  // drop per-group overrides -- the top header is the global control
@@ -2022,7 +2072,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       });
     });
     listEl.querySelectorAll("th.rsort").forEach(function (th) {  // sort one group's runs only
-      th.addEventListener("click", function () {
+      th.addEventListener("click", function (e) {
+        if (!e.target.closest(".th-lab")) return;  // only the label sorts, not the empty space
         var gk = th.getAttribute("data-gkey"), k = th.getAttribute("data-key");
         var cur = groupRunSort[gk] || { key: sort.key, dir: sort.dir };
         groupRunSort[gk] = cur.key === k ? { key: k, dir: -cur.dir } : { key: k, dir: 1 };
@@ -3636,6 +3687,10 @@ _INDEX_HTML = r"""<!DOCTYPE html>
         + '" title="' + esc(tt.node_id) + '"><span>' + esc(hmShort(tt.node_id)) + "</span></button>";
     }).join("");
     // Scrolling pane: a run-number header row, then one row of cells per test.
+    // Shrink the header font when the largest label has more digits, so e.g. "#100" or
+    // "#1000" stays inside its cell instead of spilling over its neighbour.
+    var digits = String(n).length;
+    var rheadFs = digits <= 2 ? 9 : digits === 3 ? 8 : 6;
     var head = "";
     for (var c = 0; c < n; c++) {
       var show = (c % 5 === 0) || (c === n - 1);  // label every 5th run + the last
@@ -3652,9 +3707,12 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     var note = d.truncated
       ? '<div class="hm-note">' + esc(t("heatmapTrunc").replace("{m}", tests.length).replace("{n}", d.total_tests)) + "</div>"
       : "";
+    var cols = "grid-template-columns:repeat(" + n + ", var(--hm-cell))";
     gridEl.innerHTML = '<div class="hm-wrap"><div class="hm-names">' + names + "</div>"
-      + '<div class="hm-scroll"><div class="hm-cells" style="grid-template-columns:'
-      + "repeat(" + n + ", var(--hm-cell))\">" + head + cells + "</div></div></div>" + note;
+      + '<div class="hm-scroll">'
+      + '<div class="hm-headrow" style="--hm-rhead-fs:' + rheadFs + "px;" + cols + '">' + head + "</div>"
+      + '<div class="hm-cells" style="' + cols + '">' + cells + "</div>"
+      + "</div></div>" + note;
     enableHmDrag(gridEl.querySelector(".hm-scroll"));  // heatmap-local drag-to-pan
     renderHmLegend(); applyHmFocus();  // clickable status focus, like the chart legend
   }
