@@ -294,6 +294,8 @@ Download them from a report's detail view, or `GET
 | `AIRFLOW_PYTEST_SLOW_MIN_DELTA` (env/cfg) | `0.5` | minimum absolute slowdown in seconds for a regression to register (filters jittery fast tests) |
 | `AIRFLOW_PYTEST_SUCCESS_THRESHOLD` (env/cfg) | `0.85` | pass-rate (0–1) over executed tests at/above which a run counts as successful (*Passing runs*); `1.0` = strict, zero failures/errors |
 | `AIRFLOW_PYTEST_METRICS_TOKEN` (env/cfg) | — | bearer token that **enables** the Prometheus `/api/metrics` endpoint; unset = disabled (see [below](#prometheus-metrics)) |
+| `AIRFLOW_PYTEST_ALERTS_EMAIL_TO` (env/cfg) | — | comma-separated alert recipients (empty = alerting stays off; the per-task `email=True` flag is the on-switch — see [below](#email-alerts)) |
+| `AIRFLOW_PYTEST_SMTP_*` (env/cfg) | — | standalone SMTP (`_HOST`, `_PORT`, `_USER`, `_PASSWORD`, `_FROM`, `_STARTTLS`); when `_HOST` is set it is used directly (takes precedence over Airflow's `send_email`), otherwise it's the fallback |
 
 **Enable / disable the reader.** Set `AIRFLOW_PYTEST_PLUGIN_ENABLE` to a falsey
 value (`0`, `false`, `no`, `off`) to stop the plugin registering its UI and API
@@ -369,6 +371,70 @@ disappears. `prune_reports(dry_run=True)` reports what *would* go without deleti
 scheduler-driven — the plugin never deletes on its own. For a custom policy, build a
 `RetentionPolicy(...)` and pass it (`prune_reports(policy)`).
 
+## Email alerts
+
+Opt-in email notifications with an **adaptive, styled HTML body** — green for a clean pass, amber
+for flaky, red for a failure — listing the failed / flaky tests and linking back to the run:
+
+<p>
+<img src="docs/screenshots/email_failed.png" alt="Failed run email" width="32%">
+<img src="docs/screenshots/email_flaky.png" alt="Flaky run email" width="32%">
+<img src="docs/screenshots/email_passed.png" alt="Passed run email" width="32%">
+</p>
+
+**Automatic notifications are per task, via `email=True`.** The `ArchivingResultParser(email=)`
+flag is the switch: with `email=True` a "run finished" mail is sent **after every run** (styled by
+outcome — green pass / amber flaky / red fail), so a team gets notified without watching the run;
+the default `email=False` sends **nothing**, so a noisy ping / smoke suite can't flood the mailbox:
+
+```python
+from airflow_pytest_plugin import ArchivingResultParser
+
+parser = ArchivingResultParser(email=True)    # this task: email me when each run finishes
+parser = ArchivingResultParser()              # default email=False: never auto-emails (ping-safe)
+```
+
+A run is "failing" below `AIRFLOW_PYTEST_SUCCESS_THRESHOLD` (the same 0–1 bar the *Passing runs*
+KPI uses; default `0.85`) — which is what colours the email. Recipients + transport are configured
+once, one of two ways:
+
+**Airflow mode** — mail rides Airflow's own SMTP; just set the recipients (configure `[smtp]` in
+`airflow.cfg` / the `smtp_default` connection separately, per the
+[Airflow email guide](https://airflow.apache.org/docs/apache-airflow/stable/howto/email-config.html)):
+
+```bash
+export AIRFLOW_PYTEST_ALERTS_EMAIL_TO="team@example.com, oncall@example.com"
+export AIRFLOW_PYTEST_SUCCESS_THRESHOLD=0.85   # optional
+```
+
+**Standalone mode** — no Airflow SMTP available (the bundled dev server, or a worker without mail
+configured), so also point the built-in SMTP client at your server:
+
+```bash
+export AIRFLOW_PYTEST_ALERTS_EMAIL_TO="team@example.com"
+export AIRFLOW_PYTEST_SMTP_HOST=smtp.example.com
+export AIRFLOW_PYTEST_SMTP_PORT=587
+export AIRFLOW_PYTEST_SMTP_STARTTLS=true                 # default true; set false for plain SMTP
+export AIRFLOW_PYTEST_SMTP_USER=apikey                   # omit user+password for an open relay
+export AIRFLOW_PYTEST_SMTP_PASSWORD="$SMTP_PASSWORD"     # keep the secret out of shell history
+export AIRFLOW_PYTEST_SMTP_FROM="pytest-reports@example.com"
+```
+
+**Send one run by hand (from the UI).** Open a run and click the ✉ **Email** button in its
+toolbar to email that run's summary. Recipients are optional (leave the field empty to use the
+configured `AIRFLOW_PYTEST_ALERTS_EMAIL_TO`); any you type are validated as email addresses and
+capped. The button appears only when a mail transport is configured. The action is **RBAC-gated**
+— it needs permission to *read* the run's DAG — and backed by `POST /api/reports/{id}/email`.
+
+**Transport precedence:** if you set `AIRFLOW_PYTEST_SMTP_HOST`, that standalone SMTP client is
+used directly — **even inside Airflow** — so your explicit config always wins. Otherwise mail goes
+through **Airflow's configured SMTP** (`airflow.utils.email.send_email`; set it up per the
+[Airflow email/SMTP guide](https://airflow.apache.org/docs/apache-airflow/stable/howto/email-config.html)).
+Alerting is **best-effort** — a mail or config failure is logged (the real reason lands in the
+reader's log; the UI/endpoint only says "failed to send") and never fails the task that archived
+the run. The decision (`evaluate_alerts`) and orchestrator (`notify_for_run`, which takes
+`dry_run=` and a custom `mailer=`) are importable and side-effect-free for testing.
+
 ## Architecture (SOLID)
 
 Mirrors the operator's layering — each piece has one reason to change:
@@ -380,6 +446,8 @@ Mirrors the operator's layering — each piece has one reason to change:
 | `sources.ReportSource` / `FileSystemReportSource` | read/index reports behind an interface (Dependency Inversion) |
 | `web.create_app` | map HTTP onto a `ReportSource` — knows nothing about the filesystem |
 | `retention` | pure `select_expired` decision + a `prune` orchestrator over any `ReportSource` |
+| `notifications` | pure `evaluate_alerts` decision + a `notify_for_run` orchestrator over any `ReportSource` + a pluggable `Mailer` |
+| `flaky_core` | web-free flaky scoring behind the `/api/flaky` route |
 | `plugin.PytestReportsPlugin` | register the app with Airflow |
 | `compat` | the only module that imports Airflow; version differences resolved once |
 | `models` | JSON-serializable view types; the web layer never sees operator types |

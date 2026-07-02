@@ -177,6 +177,26 @@ def _seed_green(root: str, nruns: int = 8) -> None:
         _write_run(root, "green_dag", f"r{ri:03d}", when, cases)
 
 
+def _seed_declining(root: str, nruns: int = 40) -> None:
+    """One dag·task whose health declines over time: the earliest runs all pass, later runs
+    fail more and more. Proves the run-health trend line slopes down (delta ▼, negative)."""
+    ntests = 10
+    for ri in range(nruns):
+        frac = (ri / (nruns - 1)) * 0.6  # 0 (first run) -> 0.6 (last run) failing
+        nfail = round(frac * ntests)
+        cases = [
+            (
+                f"tests/d.py::test_{ti:02d}",
+                "failed" if ti < nfail else "passed",
+                0.1,
+                "boom" if ti < nfail else "",
+            )
+            for ti in range(ntests)
+        ]
+        when = (_BASE + timedelta(hours=ri)).isoformat()
+        _write_run(root, "declining_dag", f"r{ri:03d}", when, cases)
+
+
 #: XSS payload embedded in a test node id + failure message (the failure decodes to live HTML),
 #: to regression-test that the UI escapes user-supplied strings client-side.
 _XSS_NODE = "tests/x.py::test_<script>window.__xss=1</script>_case"
@@ -244,11 +264,13 @@ def _free_port() -> int:
     return port
 
 
-def _boot(root: str):
+def _boot(root: str, *, extra_env: dict | None = None):
     """Start the standalone dev server against ``root``; yield its base URL, then stop it."""
     port = _free_port()
     env = dict(os.environ)
     env["PYTHONPATH"] = str(_SRC) + os.pathsep + env.get("PYTHONPATH", "")
+    if extra_env:
+        env.update(extra_env)
     proc = subprocess.Popen(
         [
             sys.executable,
@@ -324,6 +346,29 @@ def evil_base_url(tmp_path_factory):
     yield from _boot(str(root))
 
 
+@pytest.fixture(scope="session")
+def declining_base_url(tmp_path_factory):
+    """Seed whose run health declines over time -> the run-health trend line slopes down."""
+    root = tmp_path_factory.mktemp("ui-reports-declining")
+    _seed_declining(str(root))
+    yield from _boot(str(root))
+
+
+@pytest.fixture(scope="session")
+def email_base_url(tmp_path_factory):
+    """Server booted with an SMTP host configured -> a mail transport exists, so
+    ``email_available`` is true and the run-detail Email button shows."""
+    root = tmp_path_factory.mktemp("ui-reports-email")
+    _seed(str(root), _SMALL, _SMALL_NRUNS)
+    yield from _boot(
+        str(root),
+        extra_env={
+            "AIRFLOW_PYTEST_SMTP_HOST": "localhost",
+            "AIRFLOW_PYTEST_ALERTS_EMAIL_TO": "team@example.com",
+        },
+    )
+
+
 @dataclass
 class Dash:
     page: object
@@ -367,6 +412,18 @@ def green_dash(page, green_base_url) -> Dash:
 def evil_dash(page, evil_base_url) -> Dash:
     """A loaded dashboard whose data carries an XSS payload -> the UI must escape it."""
     return _load_dash(page, evil_base_url)
+
+
+@pytest.fixture
+def declining_dash(page, declining_base_url) -> Dash:
+    """A loaded dashboard whose health declines over time -> the trend line slopes down."""
+    return _load_dash(page, declining_base_url)
+
+
+@pytest.fixture
+def email_dash(page, email_base_url) -> Dash:
+    """A loaded dashboard whose server has a mail transport -> the Email button is available."""
+    return _load_dash(page, email_base_url)
 
 
 # --- real Airflow (embedded) --------------------------------------------------

@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 from .config import get_reports_root
 from .layout import ReportLayout
 from .models import CaseView, ReportDetail, ReportRef, ReportSummary
+from .notifications import AlertPolicy, notify_after_archive, notify_for_run
 from .producer import ArchivingResultParser
 from .retention import RetentionPolicy, RetentionResult, prune_reports
 from .sources import FileSystemReportSource, ReportSource
@@ -42,6 +43,9 @@ __all__ = [
     "RetentionPolicy",
     "RetentionResult",
     "prune_reports",
+    "AlertPolicy",
+    "notify_for_run",
+    "notify_after_archive",
     "get_reports_root",
     "create_app",
     "__version__",

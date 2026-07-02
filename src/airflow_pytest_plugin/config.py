@@ -222,6 +222,28 @@ def get_metrics_token() -> str | None:
     return raw.strip() if raw and raw.strip() else None
 
 
+#: Alerting: opt-in email notifications. The per-parser ``email=True`` flag on
+#: ``ArchivingResultParser`` is the switch for AUTOMATIC alerts (on failure / flaky); recipients
+#: come from here. A run is "failing" below ``AIRFLOW_PYTEST_SUCCESS_THRESHOLD``.
+ALERTS_EMAIL_TO_ENV = "AIRFLOW_PYTEST_ALERTS_EMAIL_TO"
+
+
+def _list_setting(env_var: str, conf_key: str) -> tuple[str, ...]:
+    """A comma/semicolon-separated list from env, then cfg (empty tuple when unset)."""
+    raw = os.environ.get(env_var)
+    if raw is None or not raw.strip():
+        raw = get_conf_value(CONF_SECTION, conf_key)
+    if raw is None or not str(raw).strip():
+        return ()
+    parts = (p.strip() for p in str(raw).replace(";", ",").split(","))
+    return tuple(p for p in parts if p)
+
+
+def get_alerts_recipients() -> tuple[str, ...]:
+    """The alert email recipients (empty = alerting stays inert)."""
+    return _list_setting(ALERTS_EMAIL_TO_ENV, "alerts_email_to")
+
+
 def get_reports_root() -> str:
     """Resolve the report root directory (absolute path)."""
     env = os.environ.get(ENV_VAR)

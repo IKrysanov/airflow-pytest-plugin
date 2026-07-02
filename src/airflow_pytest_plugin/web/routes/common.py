@@ -20,14 +20,14 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from ...flaky_core import FAIL_OUTCOMES  # re-exported: shared with /api/compare
 from ...models import ReportRef
 from ...sources import ReportSource
 
 #: An authorizer: ``(dag_id, user) -> bool``. ``user`` is ``None`` standalone.
 Authorizer = Callable[[str, Any], bool]
 
-#: Outcomes that count as a failure, shared by /api/compare and /api/flaky.
-FAIL_OUTCOMES = ("failed", "error")
+__all__ = ["FAIL_OUTCOMES", "Authorizer", "RouteDeps", "ok", "ref_from_token"]
 
 
 @dataclass(frozen=True)

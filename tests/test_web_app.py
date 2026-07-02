@@ -527,6 +527,146 @@ def test_delete_unknown_is_404(client):
     assert client.delete(f"/api/reports/{token}").status_code == 404
 
 
+# --- email a run summary (UI action) ----------------------------------------------------------
+class _SpyMailer:
+    def __init__(self) -> None:
+        self.sent: list[dict] = []
+
+    def send(self, *, subject, body, recipients, html=None) -> None:
+        self.sent.append(
+            {"subject": subject, "recipients": list(recipients), "html": html}
+        )
+
+
+def _first_token(c) -> str:
+    return c.get("/api/reports").json()["reports"][0]["id"]
+
+
+def test_reports_echoes_email_available(client, monkeypatch):
+    import airflow_pytest_plugin.web.routes.reports as reports_mod
+
+    monkeypatch.setattr(reports_mod, "build_mailer", lambda: object())
+    assert client.get("/api/reports").json()["email_available"] is True
+    monkeypatch.setattr(reports_mod, "build_mailer", lambda: None)
+    assert client.get("/api/reports").json()["email_available"] is False
+
+
+def test_email_run_sends_to_configured_recipients(client, monkeypatch):
+    import airflow_pytest_plugin.web.routes.reports as reports_mod
+
+    spy = _SpyMailer()
+    monkeypatch.setattr(reports_mod, "build_mailer", lambda: spy)
+    monkeypatch.setenv("AIRFLOW_PYTEST_ALERTS_EMAIL_TO", "team@x.io")
+    r = client.post(
+        f"/api/reports/{_first_token(client)}/email"
+    )  # no body -> configured
+    assert r.status_code == 200 and r.json()["sent"] is True
+    assert r.json()["recipients"] == ["team@x.io"]
+    assert spy.sent and spy.sent[0]["recipients"] == ["team@x.io"]
+    # Styled HTML is delivered (the client fixture's run failed -> red banner).
+    assert spy.sent[0]["html"] and "#dc2626" in spy.sent[0]["html"]
+    assert r.json()["kind"] == "failed"
+
+
+def test_email_run_accepts_and_dedups_supplied_recipients(client, monkeypatch):
+    import airflow_pytest_plugin.web.routes.reports as reports_mod
+
+    spy = _SpyMailer()
+    monkeypatch.setattr(reports_mod, "build_mailer", lambda: spy)
+    r = client.post(
+        f"/api/reports/{_first_token(client)}/email",
+        json={"recipients": ["a@x.io", "b@x.io", "a@x.io"]},
+    )
+    assert r.status_code == 200
+    assert r.json()["recipients"] == ["a@x.io", "b@x.io"]  # deduped, order kept
+    assert spy.sent[0]["recipients"] == ["a@x.io", "b@x.io"]
+
+
+def test_email_run_rejects_invalid_and_excess_recipients(client, monkeypatch):
+    import airflow_pytest_plugin.web.routes.reports as reports_mod
+
+    spy = _SpyMailer()
+    monkeypatch.setattr(reports_mod, "build_mailer", lambda: spy)
+    token = _first_token(client)
+    assert (
+        client.post(
+            f"/api/reports/{token}/email", json={"recipients": ["nope"]}
+        ).status_code
+        == 400
+    )
+    # A header-injection attempt in a recipient is rejected by validation.
+    assert (
+        client.post(
+            f"/api/reports/{token}/email",
+            json={"recipients": ["a@x.io\nBcc: evil@x.io"]},
+        ).status_code
+        == 400
+    )
+    too_many = {"recipients": [f"a{i}@x.io" for i in range(11)]}
+    assert client.post(f"/api/reports/{token}/email", json=too_many).status_code == 400
+    assert spy.sent == []  # nothing sent on any rejection
+
+
+def test_email_run_no_recipients_is_400(client, monkeypatch):
+    import airflow_pytest_plugin.web.routes.reports as reports_mod
+
+    monkeypatch.setattr(reports_mod, "build_mailer", lambda: _SpyMailer())
+    monkeypatch.delenv("AIRFLOW_PYTEST_ALERTS_EMAIL_TO", raising=False)
+    r = client.post(
+        f"/api/reports/{_first_token(client)}/email"
+    )  # none configured/supplied
+    assert r.status_code == 400
+
+
+def test_email_run_no_transport_is_503(client, monkeypatch):
+    import airflow_pytest_plugin.web.routes.reports as reports_mod
+
+    monkeypatch.setattr(reports_mod, "build_mailer", lambda: None)
+    monkeypatch.setenv("AIRFLOW_PYTEST_ALERTS_EMAIL_TO", "team@x.io")
+    r = client.post(f"/api/reports/{_first_token(client)}/email")
+    assert r.status_code == 503
+
+
+def test_email_run_send_failure_is_502(client, monkeypatch):
+    import airflow_pytest_plugin.web.routes.reports as reports_mod
+
+    class _Boom:
+        def send(self, *, subject, body, recipients, html=None):
+            raise RuntimeError("smtp down")
+
+    monkeypatch.setattr(reports_mod, "build_mailer", lambda: _Boom())
+    r = client.post(
+        f"/api/reports/{_first_token(client)}/email", json={"recipients": ["a@x.io"]}
+    )
+    assert r.status_code == 502
+    # The real reason is surfaced (type + message) so the UI can show something actionable.
+    assert "smtp down" in r.json()["detail"] and "RuntimeError" in r.json()["detail"]
+
+
+def test_email_run_bad_token_is_400_and_unknown_is_404(client, monkeypatch):
+    import airflow_pytest_plugin.web.routes.reports as reports_mod
+
+    monkeypatch.setattr(reports_mod, "build_mailer", lambda: _SpyMailer())
+    assert client.post("/api/reports/%21%21bad/email").status_code == 400
+    gone = ReportRef("nope", "nope", "nope", 9).token
+    assert client.post(f"/api/reports/{gone}/email").status_code == 404
+
+
+def test_email_run_requires_read_permission(reports_root, monkeypatch):
+    import airflow_pytest_plugin.web.routes.reports as reports_mod
+
+    write_report(reports_root, ReportRef("dag", "run", "task", 1), passed=2, failed=1)
+    monkeypatch.setattr(reports_mod, "build_mailer", lambda: _SpyMailer())
+    token = _first_token(TestClient(make_app(reports_root)))
+    denied = TestClient(make_app(reports_root, read_authorizer=lambda d, u: False))
+    assert (
+        denied.post(
+            f"/api/reports/{token}/email", json={"recipients": ["a@x.io"]}
+        ).status_code
+        == 403
+    )
+
+
 def test_delete_bad_token_is_400(client):
     assert client.delete("/api/reports/%21%21bad").status_code == 400
 

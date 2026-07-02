@@ -445,6 +445,88 @@ def test_radar_pass_rate_matches_chart_avg_globally(dash):
     )
 
 
+def test_reliability_trend_renders(dash):
+    # A run-health sparkline sits under the radar: a current value, a delta chip, and a line.
+    page = dash.page
+    expect(page.locator("#rel-trend .rt-spark")).to_be_visible()
+    now = int(page.locator(".rt-now").text_content().strip())
+    assert 0 <= now <= 100
+    # The line has >= 2 points and an even 2px stroke everywhere (non-scaling under the
+    # stretched viewBox -> no thickness "walk", the same guarantee as the chart hover ring).
+    pts = page.eval_on_selector(".rt-line", "el => el.getAttribute('points')")
+    assert pts and len(pts.split()) >= 2
+    assert (
+        page.eval_on_selector(".rt-line", "el => getComputedStyle(el).strokeWidth")
+        == "2px"
+    )
+    # The delta arrow agrees with its sign class (▲ up / ▼ down / → flat).
+    txt = page.locator(".rt-delta").text_content().strip()
+    cls = page.get_attribute(".rt-delta", "class")
+    arrow = txt[0]
+    assert (
+        (arrow == "▲" and "rt-up" in cls)
+        or (arrow == "▼" and "rt-down" in cls)
+        or (arrow == "→" and "rt-flat" in cls)
+    ), f"arrow/class mismatch: {txt!r} / {cls}"
+    assert dash.errors == []
+
+
+def test_reliability_trend_declines_on_degrading_history(declining_dash):
+    # When run health falls over time, the trend reads as a decline (▼, negative, red).
+    page = declining_dash.page
+    expect(page.locator("#rel-trend .rt-spark")).to_be_visible()
+    txt = page.locator(".rt-delta").text_content().strip()
+    cls = page.get_attribute(".rt-delta", "class")
+    assert "rt-down" in cls, f"expected a declining trend, got {cls} / {txt!r}"
+    assert txt.startswith("▼")
+    assert int(re.search(r"-?\d+", txt).group()) < 0
+    assert int(page.locator(".rt-now").text_content().strip()) < 100
+    assert declining_dash.errors == []
+
+
+def test_reliability_info_modal_covers_the_trend(dash):
+    # The ⓘ popup appends a paragraph explaining the trend (so radar vs trend is self-evident).
+    page = dash.page
+    page.click("#rel-info-btn")
+    expect(page.locator("dialog#rel-info")).to_be_visible()
+    page.wait_for_selector("#rel-info-body .rel-info-list li")
+    # Two intro paragraphs: the axes intro + the appended trend note.
+    assert page.locator("#rel-info-body .rel-info-intro").count() == 2
+    assert (
+        page.locator("#rel-info-body .rel-info-intro").last.inner_text().strip() != ""
+    )
+
+
+def _open_first_run(page):
+    page.click("tr.lgrp:has-text('beta')")  # expand a group
+    page.locator("tr.clickable").first.click()
+    expect(page.locator("dialog#detail")).to_be_visible()
+
+
+def test_email_button_hidden_without_transport(dash):
+    # The default server has no mail transport -> email_available is false -> button hidden.
+    page = dash.page
+    _open_first_run(page)
+    expect(page.locator("#d-email")).to_be_hidden()
+    assert dash.errors == []
+
+
+def test_email_button_opens_dialog_and_validates(email_dash):
+    # With SMTP configured the Email button shows; the dialog surfaces server-side validation
+    # (a malformed recipient is rejected) and never sends on rejection.
+    page = email_dash.page
+    _open_first_run(page)
+    expect(page.locator("#d-email")).to_be_visible()
+    page.click("#d-email")
+    expect(page.locator("dialog#email-dlg")).to_be_visible()
+    page.fill("#em-to", "not-an-email")
+    page.click("#em-send")
+    expect(page.locator("#em-status.err")).to_be_visible()  # the server 400 is surfaced
+    page.click("#em-cancel")
+    expect(page.locator("dialog#email-dlg")).to_be_hidden()
+    # NB: no dash.errors assertion -- the intentional 400 logs a console "failed to load" line.
+
+
 def test_flaky_panel_scrolls_within_bounded_card(large_dash):
     # Many flaky tests: the panel fills its (bounded) card and scrolls INSIDE it, rather than
     # stretching the row to fit every row.

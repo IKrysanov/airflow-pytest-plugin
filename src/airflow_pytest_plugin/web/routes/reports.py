@@ -12,24 +12,103 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Report routes — browse runs, per-test detail, history, and the test catalogue."""
+"""Report routes — browse runs, per-test detail, history, the test catalogue, and
+emailing a run's summary."""
 
 from __future__ import annotations
 
+import logging
+import re
+from dataclasses import replace
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 
 from ...config import (
+    get_alerts_recipients,
     get_flaky_window,
     get_slow_factor,
     get_slow_min_delta,
     get_success_threshold,
 )
+from ...notifications import AlertPolicy, build_mailer, build_run_alert
 from .common import ERR_400, ERR_403, ERR_404, RouteDeps, ok, ref_from_token
 
+_log = logging.getLogger(__name__)
+
 TAG = "reports"
+
+#: Basic email-shape check for user-supplied recipients (one @, a dotted domain, no spaces).
+#: Not RFC-perfect on purpose — it rejects the abuse cases (spaces, CR/LF, header tricks)
+#: while accepting ordinary addresses; the transport also strips control chars from headers.
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+#: Cap recipients per email so the endpoint can't be turned into a mass-mailer.
+_MAX_EMAIL_RECIPIENTS = 10
+
+
+def _email_available() -> bool:
+    """Whether a mail transport exists (Airflow SMTP or standalone), so the UI can show
+    the Email button. Independent of the recipients config."""
+    try:
+        return build_mailer() is not None
+    except Exception:  # pragma: no cover - defensive: never fail the list on this probe
+        return False
+
+
+def _user_label(user: Any) -> str:
+    """A stable-ish id for the acting user, for the audit log (no email/PII)."""
+    for attr in ("id", "user_id", "username", "name"):
+        value = getattr(user, attr, None)
+        if value:
+            return str(value)
+    return "anonymous"
+
+
+def _safe_reason(exc: Exception) -> str:
+    """A short, single-line summary of a send failure (type + message), safe to return to the
+    RBAC-gated caller: no traceback, no password (the mailer never puts it in the exception)."""
+    msg = " ".join(str(exc).split())  # collapse whitespace/newlines
+    text = f"{type(exc).__name__}: {msg}" if msg else type(exc).__name__
+    return text[:200]
+
+
+async def _json_body(request: Request) -> dict[str, Any]:
+    """Parse the request's JSON object body, tolerating an empty/absent/invalid body."""
+    try:
+        body = await request.json()
+    except Exception:
+        return {}
+    return body if isinstance(body, dict) else {}
+
+
+def _resolve_recipients(body: dict[str, Any]) -> tuple[str, ...]:
+    """Validated recipients from the body, or the configured default when omitted.
+
+    Accepts a list or a comma/semicolon string. Each address must look like an email and
+    the list is capped -- raises HTTP ``400`` otherwise (so the endpoint can't be abused as
+    an open mailer). Deduplicated, order preserved.
+    """
+    raw = body.get("recipients")
+    if raw is None or raw == "":
+        return tuple(get_alerts_recipients())
+    if isinstance(raw, str):
+        raw = re.split(r"[,;]", raw)
+    if not isinstance(raw, list):
+        raise HTTPException(
+            status_code=400, detail="recipients must be a list of email addresses"
+        )
+    cleaned = [str(r).strip() for r in raw if str(r).strip()]
+    bad = next((r for r in cleaned if not _EMAIL_RE.match(r)), None)
+    if bad is not None:
+        raise HTTPException(status_code=400, detail=f"invalid email address: {bad!r}")
+    if len(cleaned) > _MAX_EMAIL_RECIPIENTS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"too many recipients (max {_MAX_EMAIL_RECIPIENTS})",
+        )
+    return tuple(dict.fromkeys(cleaned))
+
 
 #: Cap on how many (newest) runs /api/unique-tests reads per-test maps from, so the
 #: KPI can't trigger an unbounded scan of every archived run on each filter change.
@@ -237,7 +316,13 @@ def build_router(deps: RouteDeps) -> APIRouter:
     @router.get(
         "/api/reports",
         summary="List runs",
-        responses=ok({"reports": [_EX_SUMMARY], "success_threshold": 0.85}),
+        responses=ok(
+            {
+                "reports": [_EX_SUMMARY],
+                "success_threshold": 0.85,
+                "email_available": True,
+            }
+        ),
     )
     def list_reports(
         dag_id: str | None = None,
@@ -258,6 +343,7 @@ def build_router(deps: RouteDeps) -> APIRouter:
             {
                 "reports": [s.to_dict() for s in visible],
                 "success_threshold": get_success_threshold(),
+                "email_available": _email_available(),
             }
         )
 
@@ -501,6 +587,88 @@ def build_router(deps: RouteDeps) -> APIRouter:
         if not src.delete(ref):
             raise HTTPException(status_code=404, detail="report not found")
         return JSONResponse({"deleted": True})
+
+    @router.post(
+        "/api/reports/{report_id}/email",
+        summary="Email a run summary",
+        responses={
+            **ok(
+                {
+                    "sent": True,
+                    "recipients": ["team@example.com"],
+                    "kind": "failed",
+                }
+            ),
+            **ERR_400,
+            **ERR_403,
+            **ERR_404,
+            502: {"description": "The mail server rejected the message."},
+            503: {"description": "Email is not configured on this server."},
+        },
+    )
+    async def email_report(
+        report_id: str,
+        request: Request,
+        user: Any = Depends(user_dep),  # noqa: B008 - FastAPI dependency idiom
+    ) -> JSONResponse:
+        """Email a summary of one run.
+
+        Requires permission to **read** the run's DAG (RBAC). Recipients may be supplied in
+        the JSON body (``{"recipients": ["a@x.io", ...]}`` or a comma/semicolon string) —
+        each is validated as an email address and the list is capped at
+        ``_MAX_EMAIL_RECIPIENTS``; omit them to use the configured
+        ``AIRFLOW_PYTEST_ALERTS_EMAIL_TO``. ``400`` bad token / bad or missing recipients,
+        ``403`` not readable, ``404`` run gone, ``503`` no mail transport, ``502`` send failed.
+        """
+        ref = ref_from_token(report_id)
+        if not read_auth(ref.dag_id, user):
+            raise HTTPException(
+                status_code=403, detail="not authorized to read this report"
+            )
+        if src.get_detail(ref) is None:
+            raise HTTPException(status_code=404, detail="report not found")
+
+        recipients = _resolve_recipients(await _json_body(request))
+        if not recipients:
+            raise HTTPException(
+                status_code=400, detail="no recipients provided or configured"
+            )
+
+        policy = replace(AlertPolicy.from_config(), recipients=recipients)
+        mailer = build_mailer()
+        if mailer is None:
+            raise HTTPException(
+                status_code=503, detail="email is not configured on this server"
+            )
+        # always=True: a manual send emails any run, incl. a clean pass (green template).
+        alert = build_run_alert(src, ref, policy, always=True)
+        if alert is None:
+            raise HTTPException(status_code=404, detail="report not found")
+        try:
+            mailer.send(
+                subject=alert.subject,
+                body=alert.body,
+                html=alert.html,
+                recipients=recipients,
+            )
+        except Exception as exc:
+            _log.warning("emailing run %s failed: %s", report_id, exc)
+            # Surface a short, safe reason (type + message, no traceback/password) so the caller
+            # can act -- e.g. "SMTPAuthenticationError: (535, ...)" or a connection timeout. The
+            # endpoint is RBAC-gated and the mailer never echoes the password, so this is safe.
+            raise HTTPException(status_code=502, detail=_safe_reason(exc)) from exc
+        # Audit: who emailed which run to how many recipients (count only -- no addresses).
+        _log.info(
+            "emailed run %s·%s·%s to %d recipient(s) (user=%s)",
+            ref.dag_id,
+            ref.task_id,
+            ref.run_id,
+            len(recipients),
+            _user_label(user),
+        )
+        return JSONResponse(
+            {"sent": True, "recipients": list(recipients), "kind": alert.kind}
+        )
 
     @router.get(
         "/api/reports/{report_id}/allure.zip",

@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-07-...
+
+### Added
+- **Run-health trend** — a sparkline under the reliability radar tracks run health over time
+  (per run, the mean of the three continuous axes: pass rate, no-errors, completeness), drawn as
+  a moving average so it reads as a trend, with a current value and a ▲/▼ delta vs the older half.
+  Scoped by the same filters + group selection as the radar; a pure read of already-loaded data
+  (no new request). The radar's ⓘ popup explains it (and why Green-now / Flaky stay radar-only).
+- **Email alerts (opt-in, producer-side) with styled HTML** — emails carry an adaptive inline-CSS
+  body (table layout for email-client compatibility): green for a clean pass, **amber for flaky**,
+  **red for a failure**, listing the failed / flaky tests and linking back to the run. The
+  per-task `ArchivingResultParser(email=True)` flag is the switch: with it, a "run finished" mail
+  is sent **after every run** (so a team is notified without watching the run); the default
+  `email=False` sends nothing, so a noisy ping / smoke suite can't spam the mailbox. A run is
+  "failing" (which colours the email) below
+  `AIRFLOW_PYTEST_SUCCESS_THRESHOLD`. Recipients come from `AIRFLOW_PYTEST_ALERTS_EMAIL_TO`; mail
+  goes through Airflow's SMTP, or a standalone client from `AIRFLOW_PYTEST_SMTP_*` (which wins when
+  its host is set). Best-effort — a mail/config failure never fails the task.
+- **Email a run from the UI** — a run's toolbar gains an ✉ **Email** button (shown only when a
+  mail transport is configured) that sends that run's styled summary (any outcome, incl. a green
+  pass) via `POST /api/reports/{id}/email`. RBAC-gated (needs read permission on the DAG);
+  recipients are optional (default the configured ones), validated as addresses, capped, and the
+  subject is header-sanitized; the send is audited and its failure reason is surfaced.
+
+### Changed
+- **Reliability card grows to fit the trend** (340→384px) so the radar stays large; the flaky
+  panel matches the new height. The trend line uses a non-scaling 2px stroke (even thickness).
+- **Explicit SMTP wins over Airflow's `send_email`** — if `AIRFLOW_PYTEST_SMTP_HOST` is set the
+  standalone SMTP client is used directly, even inside Airflow (whose own `[smtp]` may be unset),
+  so operator config is honoured instead of silently routing through an unconfigured `send_email`.
+
+### Internal
+- Extracted the pure flaky-scoring logic into a web-free `flaky_core` module (no FastAPI import
+  needed to unit-test the `/api/flaky` scoring).
+
+### Tests
+- Alerting unit tests: pure classification (passed / flaky / failed) + HTML rendering with plain
+  data (variant colours, escaped hostile node ids, capped lists), the gather + orchestrator
+  against a temp filesystem source + a spy mailer (silent on a clean pass, sends on failed/flaky,
+  `always` sends a pass, dry-run/no-recipient/missing no-ops, send failure swallowed), config, the
+  SMTP transport as `multipart/alternative` via a fake server (+ header-injection guard), the
+  explicit-SMTP precedence, a **load test** (alerting stays window-bounded on a 400-run history),
+  and the producer `email=` gate (fires only when True). The `POST /api/reports/{id}/email`
+  endpoint: RBAC 403, 400 on bad/too-many/injection recipients, 404/503/502, HTML delivered. UI
+  tests for the run-health trend and the Email button (hidden without a transport; dialog + validation).
+
 ## [0.5.0] - 2026-07-02
 
 ### Added

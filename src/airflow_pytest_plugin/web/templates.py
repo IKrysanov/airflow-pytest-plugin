@@ -303,7 +303,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   /* Both cards on this row share a fixed height (driven by the radar's size) so the flaky
      list scrolls INSIDE its card down to the bottom of the panel -- and can't stretch the
      row to fit all rows. Height is released on mobile (cards stack + size to content). */
-  #board2 > .card { height: 340px; }
+  #board2 > .card { height: 384px; }
   /* The radar FILLS its card (no max-width cap): the SVG stretches to the card and the wide
      viewBox scales the pentagon to fit by height, so it's as large as the card allows and
      shrinks proportionally with the screen. */
@@ -319,6 +319,25 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     font-variant-numeric: tabular-nums; }
   .rel-score-cap { fill: var(--muted); font-size: 8.5px; text-transform: uppercase;
     letter-spacing: .05em; }
+  /* Run-health trend: a compact sparkline of per-run health over time, under the radar.
+     A short footer so it never crowds the radar (the card grows to fit both). */
+  .rel-trend { display: flex; align-items: center; gap: 12px; flex: 0 0 auto;
+    padding-top: 9px; margin-top: 7px; border-top: 1px solid var(--border); }
+  .rt-meta { display: flex; align-items: baseline; gap: 7px; flex: 0 0 auto; }
+  .rt-label { color: var(--muted); font-size: 10.5px; text-transform: uppercase;
+    letter-spacing: .05em; }
+  .rt-now { font-weight: 700; font-size: 16px; color: var(--fg); font-variant-numeric: tabular-nums; }
+  .rt-delta { font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .rt-delta.rt-up { color: var(--pass); }
+  .rt-delta.rt-down { color: var(--fail); }
+  .rt-delta.rt-flat { color: var(--muted); }
+  /* Non-uniform scale (preserveAspectRatio=none) makes the line fill the width; the
+     non-scaling stroke keeps it an even 2px everywhere (no thickness "walk"). */
+  .rt-spark { flex: 1 1 auto; height: 34px; min-width: 0; display: block; }
+  .rt-line { fill: none; stroke: var(--primary); stroke-width: 2; stroke-linejoin: round;
+    stroke-linecap: round; vector-effect: non-scaling-stroke; }
+  .rt-fill { fill: color-mix(in srgb, var(--primary) 14%, transparent); stroke: none; }
+  .rt-hint { color: var(--muted); font-size: 12px; }
   /* Info (ⓘ) button by the Reliability title -> the "how it's computed" popup. */
   .rel-info-btn { display: inline-flex; align-items: center; justify-content: center; padding: 0;
     margin-left: 6px; border: 0; background: none; color: var(--muted); cursor: pointer; }
@@ -406,6 +425,17 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   #confirm .cbody { color: var(--muted); line-height: 1.5; }
   #confirm .cbody b { color: var(--fg); overflow-wrap: anywhere; }
   #confirm .cactions { display: flex; justify-content: flex-end; gap: 10px; }
+  /* Email-this-run dialog: a labelled recipients field + a status line. */
+  #email-dlg .cbody { display: flex; flex-direction: column; gap: 6px; }
+  .em-label { font-weight: 650; font-size: 13px; }
+  /* .case-q is flex:1 1 220px; in this flex COLUMN that basis becomes height -> pin it. */
+  #email-dlg .case-q { width: 100%; box-sizing: border-box; flex: 0 0 auto; height: 34px; max-width: none; }
+  .em-hint { color: var(--muted); font-size: 12px; }
+  .em-status { font-size: 13px; margin-top: 4px; }
+  .em-status.ok { color: var(--pass); }
+  .em-status.err { color: var(--fail); }
+  #email-dlg .cactions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 12px; }
+  #em-send { background: var(--primary); border-color: var(--primary); color: var(--on-primary); }
 
   /* Floating bulk-action toolbar, centred at the bottom of the viewport. */
   .bulk-bar { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
@@ -499,6 +529,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
      detail dialog so they never touch its borders. */
   #flaky, #history, #compare, #failures, #rel-info, #panel-info {
     max-width: min(680px, 84vw); max-height: 82vh; }
+  /* The email form is small; keep it clearly inset from the run dialog's frame. */
+  #email-dlg { max-width: min(460px, 84vw); max-height: 82vh; }
   #panel-info-body p { margin: 0; color: var(--fg); font-size: 13.5px; line-height: 1.6; }
   /* The heatmap wants width (more run columns visible). Wide when opened on its own;
      inset (narrower than the run dialog) when opened from inside a run, so it doesn't
@@ -915,6 +947,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
         <span class="flk-scope" id="rel-scope" hidden></span>
       </div>
       <div id="pentagon"></div>
+      <div id="rel-trend" class="rel-trend"></div>
     </div>
     <div class="card flaky-card" id="flaky-card" hidden>
       <div class="chart-head">
@@ -954,6 +987,12 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       </svg>
       <span data-i18n="downloadAllure">Allure results</span>
     </button>
+    <button id="d-email" class="btn icon-btn" type="button" hidden data-i18n-al="emailRun" title="Email">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/>
+      </svg>
+    </button>
     <button id="d-copy" class="btn icon-btn" type="button" data-i18n-al="copyLink" title="Copy link">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
            stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -984,6 +1023,23 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     <div class="cactions">
       <button id="c-cancel" class="btn" type="button" data-i18n="cancel">Cancel</button>
       <button id="c-ok" class="btn danger" type="button" data-i18n="delete">Delete</button>
+    </div>
+  </div>
+</dialog>
+
+<dialog id="email-dlg" aria-labelledby="em-title">
+  <div class="dlg-head"><h2 id="em-title" data-i18n="emailTitle">Email this run</h2></div>
+  <div class="dlg-body">
+    <div class="cbody">
+      <label for="em-to" class="em-label" data-i18n="emailToLabel">Recipients</label>
+      <input id="em-to" class="case-q" type="text" autocomplete="off" inputmode="email"
+        data-i18n-ph="emailToPh" placeholder="name@example.com, other@example.com" />
+      <div class="em-hint" data-i18n="emailHint">Comma-separated. Leave empty to use the configured recipients.</div>
+      <div class="em-status" id="em-status" hidden></div>
+    </div>
+    <div class="cactions">
+      <button id="em-cancel" class="btn" type="button" data-i18n="cancel">Cancel</button>
+      <button id="em-send" class="btn" type="button" data-i18n="emailSend">Send</button>
     </div>
   </div>
 </dialog>
@@ -1147,6 +1203,13 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       relFreshDesc: "Share of dag·tasks whose LATEST run cleared the success threshold.",
       relStableDesc: "Share of tests that are NOT flaky — that don't flip pass↔fail over the window.",
       relCompleteDesc: "Share of tests that actually ran (were not skipped).",
+      relTrend: "Run health", relTrendCollecting: "Collecting data…",
+      relTrendVs: "Recent half vs the older half of the runs in view",
+      relTrendDesc: "The line under the radar tracks run health over time — per run, the mean of the "
+        + "three continuous axes (pass rate, no errors, completeness), drawn as a moving average so "
+        + "it reads as a trend. Green-now and Flaky/Stability are radar-only snapshots (one is "
+        + "binary per run, the other a window metric), so they're not in the line. The number is "
+        + "the recent half's average health; the arrow is its change vs the older half.",
       cId: "ID", cStatus: "Status", cDag: "DAG", cTask: "Task", cRun: "Run", cTry: "Try",
       cTotal: "Total", cPass: "Pass", cFail: "Fail", cErr: "Err", cSkip: "Skip",
       cDuration: "Duration", cWhen: "When", cRuns: "Runs", cPassRate: "Pass %", cAvgDur: "Avg time",
@@ -1218,6 +1281,11 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       deleteTitleN: "Delete {n} reports?",
       deleteConfirm: "This permanently removes the report and its files everywhere.",
       cancel: "Cancel", delete: "Delete", deleting: "Deleting…",
+      emailRun: "Email this run", emailTitle: "Email this run", emailToLabel: "Recipients",
+      emailToPh: "name@example.com, other@example.com",
+      emailHint: "Comma-separated. Leave empty to use the configured recipients.",
+      emailSend: "Send", emailSending: "Sending…", emailSent: "Sent ✓",
+      emailFail: "Couldn't send the email.",
       deleteFail: "Failed to delete: ",
       deleteFailedN: "{n} could not be deleted (no permission).",
       nSelected: "{n} selected", deleteSelected: "Delete", clearSel: "Clear",
@@ -1253,6 +1321,13 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       relFreshDesc: "Доля dag·task, чей ПОСЛЕДНИЙ прогон прошёл порог успеха.",
       relStableDesc: "Доля тестов, которые НЕ нестабильны — не скачут pass↔fail в окне.",
       relCompleteDesc: "Доля тестов, которые реально выполнились (не были пропущены).",
+      relTrend: "Здоровье прогонов", relTrendCollecting: "Собираем данные…",
+      relTrendVs: "Недавняя половина против ранней половины прогонов в поле зрения",
+      relTrendDesc: "Линия под радаром показывает здоровье прогонов во времени — по каждому прогону "
+        + "среднее трёх непрерывных осей (доля прохождения, отсутствие ошибок, полнота), нарисованное "
+        + "скользящим средним, чтобы читалось как тренд. «Зелёный» и Нестабильность/Стабильность — "
+        + "снимки только на радаре (одна бинарна по прогону, другая оконная), поэтому в линию не "
+        + "входят. Число — среднее здоровье недавней половины; стрелка — изменение против ранней.",
       cId: "ID", cStatus: "Статус", cDag: "DAG", cTask: "Задача", cRun: "Запуск", cTry: "Попытка",
       cTotal: "Всего", cPass: "Усп", cFail: "Пров", cErr: "Ошиб", cSkip: "Проп",
       cDuration: "Время", cWhen: "Когда", cRuns: "Прогоны", cPassRate: "Проход %", cAvgDur: "Ср. время",
@@ -1329,6 +1404,11 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       cancel: "Отмена", delete: "Удалить", deleting: "Удаление…",
       deleteFail: "Не удалось удалить: ",
       deleteFailedN: "Не удалось удалить: {n} (нет прав).",
+      emailRun: "Отправить на почту", emailTitle: "Отправить прогон на почту",
+      emailToLabel: "Получатели", emailToPh: "name@example.com, other@example.com",
+      emailHint: "Через запятую. Пусто — отправить настроенным получателям.",
+      emailSend: "Отправить", emailSending: "Отправка…", emailSent: "Отправлено ✓",
+      emailFail: "Не удалось отправить письмо.",
       nSelected: "Выбрано: {n}", deleteSelected: "Удалить", clearSel: "Снять",
       selectRow: "Выбрать строку", selectAll: "Выбрать все",
       forbidden: "Нет прав на удаление этого отчёта (нужно право запускать DAG).",
@@ -1530,6 +1610,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   var chartSel = { passed: true, skipped: true, failed: true, error: true };
   var passTrend = false;        // overlay the pass-rate trend line (checkbox-toggled)
   var successThreshold = 0.85;  // echoed by /api/reports; drives the trend's threshold line
+  var emailAvailable = false;   // echoed by /api/reports; shows the run-detail Email button
   var CHART_VISIBLE = 30; // bars visible at once; beyond that the strip scrolls (carousel)
   var PAGE_SIZE = 100;    // list rows per page
   var chartScroll = null; // null => snap to newest; else a remembered scrollLeft (px)
@@ -2419,6 +2500,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       .then(function (d) {
         allReports = d.reports || [];
         if (typeof d.success_threshold === "number") successThreshold = d.success_threshold;
+        emailAvailable = !!d.email_available;
         populateSuggestions();
         applyFilter();
         loadFlaky();
@@ -2622,6 +2704,76 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     return '<svg viewBox="0 0 ' + W + " " + H + '" class="rel-svg" role="img" aria-label="' + esc(t("reliabilityTitle")) + '">'
       + rings + spokes + '<polygon class="rel-area" points="' + dataPts + '"/>' + dots + center + labels + "</svg>";
   }
+  // -- Run-health trend: a per-run health series over time, drawn as a sparkline under the
+  // radar. "Health" is the mean of the three CONTINUOUS per-run axes (pass rate, no-errors,
+  // completeness). Green-now (a binary 0/100 per run) and Flaky/Stability (a window metric) are
+  // radar snapshots, not per-run signals, so they're left off the line. Pure read of the loaded
+  // summaries, scoped like the radar.
+  function reliabilityTrend() {
+    var selKeys = selKeySet();
+    var inScope = function (o) { return !selKeys || selKeys[o.dag_id + "|" + o.task_id]; };
+    var rows = reports.filter(inScope).slice().sort(function (a, b) {
+      return String(a.created_at || "") < String(b.created_at || "") ? -1 : 1;  // oldest -> newest
+    });
+    var clamp = function (v) { return Math.max(0, Math.min(100, v)); };
+    return rows.map(function (r) {
+      var tt = r.total || 0;
+      var pass = tt ? (r.passed || 0) / tt * 100 : 100;
+      var robust = tt ? 100 - (r.errors || 0) / tt * 100 : 100;
+      var complete = tt ? 100 - (r.skipped || 0) / tt * 100 : 100;
+      return clamp(Math.round((pass + robust + complete) / 3));
+    });
+  }
+  // Trailing moving average so the line reads as a trend, not per-run jitter. Window scales
+  // with the run count (none for short histories, up to 9 for long ones).
+  function smoothSeries(series) {
+    var n = series.length, k = Math.min(9, Math.max(1, Math.floor(n / 12)));
+    if (k < 2) return series.slice();
+    var out = [];
+    for (var i = 0; i < n; i++) {
+      var lo = Math.max(0, i - k + 1), sum = 0;
+      for (var j = lo; j <= i; j++) sum += series[j];
+      out.push(sum / (i - lo + 1));
+    }
+    return out;
+  }
+  // "now" = the recent half's mean health; "delta" = recent half minus older half -- the same
+  // recent-vs-older split the flaky trend uses, so improving/declining reads consistently.
+  function trendDelta(series) {
+    var n = series.length;
+    if (n < 2) return null;
+    var half = Math.floor(n / 2);
+    var mean = function (a) { return a.reduce(function (s, v) { return s + v; }, 0) / a.length; };
+    var older = mean(series.slice(0, half)), recent = mean(series.slice(half));
+    return { now: Math.round(recent), delta: Math.round(recent - older) };
+  }
+  function trendSparkline(rawSeries) {
+    var series = smoothSeries(rawSeries);
+    var W = 240, H = 40, pad = 4, n = series.length;
+    var x = function (i) { return n < 2 ? W / 2 : pad + i * (W - 2 * pad) / (n - 1); };
+    var y = function (v) { return pad + (100 - v) / 100 * (H - 2 * pad); };
+    var line = series.map(function (v, i) { return x(i).toFixed(1) + "," + y(v).toFixed(1); }).join(" ");
+    var area = "M" + x(0).toFixed(1) + "," + y(0).toFixed(1)
+      + series.map(function (v, i) { return "L" + x(i).toFixed(1) + "," + y(v).toFixed(1); }).join("")
+      + "L" + x(n - 1).toFixed(1) + "," + y(0).toFixed(1) + "Z";
+    return '<svg class="rt-spark" viewBox="0 0 ' + W + " " + H + '" preserveAspectRatio="none"'
+      + ' role="img" aria-label="' + esc(t("relTrend")) + '">'
+      + '<path class="rt-fill" d="' + area + '"/>'
+      + '<polyline class="rt-line" points="' + line + '"/></svg>';
+  }
+  function renderRelTrend() {
+    var box = document.getElementById("rel-trend");
+    if (!box) return;
+    var series = reliabilityTrend(), d = trendDelta(series);
+    if (!d) { box.innerHTML = '<span class="rt-hint">' + esc(t("relTrendCollecting")) + "</span>"; return; }
+    var cls = d.delta > 0 ? "rt-up" : (d.delta < 0 ? "rt-down" : "rt-flat");
+    var arrow = d.delta > 0 ? "▲" : (d.delta < 0 ? "▼" : "→");
+    var sign = d.delta > 0 ? "+" : "";
+    box.innerHTML = '<div class="rt-meta"><span class="rt-label">' + esc(t("relTrend")) + "</span>"
+      + '<span class="rt-now">' + d.now + "</span>"
+      + '<span class="rt-delta ' + cls + '" title="' + esc(t("relTrendVs")) + '">' + arrow + " " + sign + d.delta
+      + "</span></div>" + trendSparkline(series);
+  }
   function renderReliability() {
     var el = document.getElementById("pentagon");
     if (!el) return;
@@ -2629,6 +2781,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     var sc = document.getElementById("rel-scope");
     if (sc) { sc.hidden = !selKeys; if (selKeys) sc.textContent = t("flkSelScope"); }
     el.innerHTML = pentagonSvg(reliabilityAxes());
+    renderRelTrend();
   }
   // "How the score is computed" popup: each axis with its live value + a plain-language
   // definition (matches reliabilityAxes exactly), so the radar is self-explaining.
@@ -2642,7 +2795,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
           return '<li><span class="ri-head"><span class="ri-name">' + esc(a.label) + "</span>"
             + '<span class="ri-val">' + a.value + "</span></span>"
             + '<span class="ri-desc">' + esc(t(REL_DESC[a.key])) + "</span></li>";
-        }).join("") + "</ul>";
+        }).join("") + "</ul>"
+      + '<p class="rel-info-intro" style="margin:14px 0 0">' + esc(t("relTrendDesc")) + "</p>";
     if (typeof relInfoDlg.showModal === "function") { if (!relInfoDlg.open) relInfoDlg.showModal(); }
     else relInfoDlg.setAttribute("open", "");
     updateParentDim();
@@ -3062,6 +3216,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     var prev = previousRun(rec);
     document.getElementById("d-seq").textContent = rec && rec.seq ? "#" + rec.seq : "";
     document.getElementById("d-allure").hidden = !m.has_allure;
+    document.getElementById("d-email").hidden = !emailAvailable;
 
     var kpis = [
       [t("kPassed"), m.passed, "c-pass"], [t("kFailed"), m.failed, "c-fail"],
@@ -3323,7 +3478,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       || (flakyDlg && flakyDlg.open) || (historyDlg && historyDlg.open)
       || (uniqueDlg && uniqueDlg.open) || (slowDlg && slowDlg.open)
       || (heatmapDlg && heatmapDlg.open) || (relInfoDlg && relInfoDlg.open)
-      || (panelInfoDlg && panelInfoDlg.open);
+      || (panelInfoDlg && panelInfoDlg.open) || (emailDlg && emailDlg.open);
     setLocalDim(anyOpen);   // dim our own page/iframe once
     setParentDim(anyOpen);  // and (embedded) the Airflow chrome around the iframe
   }
@@ -3417,6 +3572,59 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   confirmDlg.addEventListener("cancel", function () { pendingDelete = []; });
   confirmDlg.addEventListener("close", updateParentDim);
   closeOnBackdrop(confirmDlg, closeConfirm);
+
+  // Email-this-run dialog: POST the current run's token to /email. Recipients are validated
+  // + capped server-side; the field is optional (empty -> the configured recipients). The
+  // whole flow is RBAC-gated on the server, so a forbidden user just gets a 403 here.
+  var emailDlg = document.getElementById("email-dlg");
+  var emStatus = document.getElementById("em-status");
+  var emSend = document.getElementById("em-send");
+  var emTo = document.getElementById("em-to");
+  function setEmStatus(msg, cls) {
+    emStatus.hidden = !msg;
+    emStatus.textContent = msg || "";
+    emStatus.className = "em-status" + (cls ? " " + cls : "");
+  }
+  function openEmail() {
+    if (!currentId) return;
+    emTo.value = ""; setEmStatus("", ""); emSend.disabled = false;
+    if (typeof emailDlg.showModal === "function") { if (!emailDlg.open) emailDlg.showModal(); }
+    else emailDlg.setAttribute("open", "");
+    updateParentDim();
+    emTo.focus();
+  }
+  function closeEmail() { if (emailDlg.open) emailDlg.close(); else emailDlg.removeAttribute("open"); }
+  function sendEmail() {
+    if (!currentId) return;
+    var raw = emTo.value.trim();
+    var body = {};
+    if (raw) body.recipients = raw.split(/[,;]/).map(function (s) { return s.trim(); }).filter(Boolean);
+    emSend.disabled = true; setEmStatus(t("emailSending"), "");
+    fetch(API + "reports/" + encodeURIComponent(currentId) + "/email", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (d) { return { ok: r.ok, d: d }; });
+    }).then(function (res) {
+      if (res.ok && res.d && res.d.sent) {
+        setEmStatus(t("emailSent"), "ok");
+        setTimeout(function () { if (emailDlg.open) closeEmail(); }, 900);
+      } else {
+        // Show the server's reason (RBAC 403, 400 bad recipient, 503 no transport, 502 send fail).
+        setEmStatus(t("emailFail") + (res.d && res.d.detail ? " " + res.d.detail : ""), "err");
+        emSend.disabled = false;
+      }
+    }).catch(function () {
+      setEmStatus(t("emailFail"), "err"); emSend.disabled = false;
+    });
+  }
+  document.getElementById("d-email").addEventListener("click", openEmail);
+  document.getElementById("em-cancel").addEventListener("click", closeEmail);
+  emSend.addEventListener("click", sendEmail);
+  emTo.addEventListener("keydown", function (e) { if (e.key === "Enter") sendEmail(); });
+  emailDlg.addEventListener("close", updateParentDim);
+  closeOnBackdrop(emailDlg, closeEmail);
 
   // Failures modal: clicking the FAILURES KPI groups every failed/errored case across
   // the visible runs into clusters by normalized error (see /api/failure-clusters), so
