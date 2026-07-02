@@ -160,10 +160,87 @@ def test_list_skips_malformed_meta(reports_root, caplog):
     assert [s.ref.dag_id for s in summaries] == ["good"]
 
 
+def _write_meta(reports_root, ref: ReportRef, summary) -> None:
+    """Write a meta.json with a valid identity but a caller-supplied summary block."""
+    out_dir = ReportLayout().dir_for(reports_root, ref)
+    os.makedirs(out_dir, exist_ok=True)
+    with open(os.path.join(out_dir, META_FILENAME), "w", encoding="utf-8") as fh:
+        json.dump(
+            {
+                "dag_id": ref.dag_id,
+                "run_id": ref.run_id,
+                "task_id": ref.task_id,
+                "try_number": ref.try_number,
+                "map_index": ref.map_index,
+                "created_at": "2026-06-21T10:00:00+00:00",
+                "summary": summary,
+            },
+            fh,
+        )
+
+
+def test_corrupt_summary_counts_do_not_crash_the_scan(reports_root):
+    # A single sidecar with a non-numeric count must NOT take down the whole scan
+    # (the identity is valid, so the run is kept with the bad count coerced to 0).
+    write_report(reports_root, ReportRef("good", "r", "t", 1))
+    _write_meta(
+        reports_root,
+        ReportRef("bad", "r", "t", 1),
+        {"total": 3, "passed": "boom", "failed": 1, "errors": 0, "skipped": 0},
+    )
+    summaries = FileSystemReportSource(report_root=reports_root).list_summaries()
+    assert {s.ref.dag_id for s in summaries} == {"good", "bad"}  # neither dropped
+    bad = next(s for s in summaries if s.ref.dag_id == "bad")
+    assert bad.passed == 0 and bad.failed == 1  # bad value -> 0, good value kept
+
+
+def test_non_finite_duration_is_sanitized(reports_root):
+    # inf/NaN durations would otherwise make the JSON serializer raise (non-spec JSON).
+    for i, bad in enumerate(("inf", "-inf", "nan")):
+        _write_meta(
+            reports_root,
+            ReportRef("dg", f"r{i}", "t", 1),
+            {"total": 1, "passed": 1, "duration": bad},
+        )
+    summaries = FileSystemReportSource(report_root=reports_root).list_summaries()
+    assert len(summaries) == 3
+    import math
+
+    assert all(math.isfinite(s.duration) and s.duration == 0.0 for s in summaries)
+
+
+def test_summary_not_a_dict_is_tolerated(reports_root):
+    # A summary that isn't even an object (a list) must degrade to zero counts, not crash.
+    _write_meta(reports_root, ReportRef("dg", "r", "t", 1), [1, 2, 3])
+    summaries = FileSystemReportSource(report_root=reports_root).list_summaries()
+    assert len(summaries) == 1
+    assert summaries[0].total == 0 and summaries[0].passed == 0
+
+
 def test_get_detail_returns_none_on_corrupt_xml(reports_root):
     ref = ReportRef("dag", "run", "task", 1)
     write_report_xml(reports_root, ref, "<not-valid-xml", summary={"total": 0})
     assert FileSystemReportSource(report_root=reports_root).get_detail(ref) is None
+
+
+def test_get_detail_blocks_xxe_external_entity(reports_root):
+    # A junit.xml with an external-entity DOCTYPE must be REJECTED by the hardened parser: the
+    # entity is never resolved (no local file read), get_detail returns None, and nothing from
+    # the referenced file leaks. Guards the defusedxml protection against XXE.
+    ref = ReportRef("dag", "run", "task", 1)
+    xxe = (
+        '<?xml version="1.0"?>'
+        '<!DOCTYPE t [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>'
+        '<testsuites><testsuite name="p" tests="1" failures="1" errors="0" skipped="0" '
+        'time="0.1"><testcase classname="x" name="t" time="0.1">'
+        '<failure message="leak: &xxe;">body</failure></testcase></testsuite></testsuites>'
+    )
+    write_report_xml(reports_root, ref, xxe, summary={"total": 1, "failed": 1})
+    src = FileSystemReportSource(report_root=reports_root)
+    assert src.secure_xml is True  # the hardened (defusedxml) parser is active
+    assert (
+        src.get_detail(ref) is None
+    )  # entity forbidden -> no detail, no leak, no crash
 
 
 def test_case_output_includes_captured_stdout_for_passed(reports_root):

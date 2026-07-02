@@ -31,6 +31,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     --primary: #017cee; --on-primary: #ffffff; --ring: #017cee40;
     --pass: #008000; --fail: #ff0000; --skip: #ff69b4; --error: #9370db;
     --pass-bg: #0080001a; --fail-bg: #ff00001a; --skip-bg: #ff69b41f; --error-bg: #9370db1f;
+    --warn: #a16207; --warn-bg: #fef08a;  /* amber "flaky" warning chip (readable on yellow) */
     --trend: #0891b2;  /* cyan pass-rate trend line (darker for contrast on white) */
     --thresh: #d97706;  /* amber success-threshold (label text -- must stay readable) */
     --thresh-soft: #d9770659;  /* muted amber for the gridline so it recedes behind data */
@@ -45,6 +46,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     --primary: #4ba3f5; --on-primary: #07121e; --ring: #017cee66;
     --pass: #2ecc71; --fail: #ff6b6b; --skip: #ff8ecb; --error: #b39ddb;
     --pass-bg: #2ecc711f; --fail-bg: #ff6b6b1f; --skip-bg: #ff8ecb1f; --error-bg: #b39ddb1f;
+    --warn: #fcd34d; --warn-bg: #fcd34d2e;  /* amber "flaky" warning chip on the dark theme */
     --trend: #22d3ee;  /* cyan pass-rate trend line (brighter on the navy theme) */
     --thresh: #fbbf24;  /* amber success-threshold (label text -- must stay readable) */
     --thresh-soft: #fbbf2459;  /* muted amber for the gridline so it recedes behind data */
@@ -144,6 +146,10 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .kpi.clickable:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
   .kpi .label { font-size: 12px; color: var(--muted); text-transform: uppercase;
     letter-spacing: .04em; }
+  /* "all" chip: marks a KPI that counts every run in view, ignoring a group selection. */
+  .kpi-all { display: inline-block; margin-left: 6px; padding: 0 6px; border-radius: 999px;
+    background: var(--surface-2); border: 1px solid var(--border); color: var(--muted);
+    font-size: 9.5px; font-weight: 700; letter-spacing: .04em; vertical-align: middle; }
   .kpi .value { font-size: 26px; font-weight: 700; margin-top: 4px; }
 
   .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
@@ -225,12 +231,15 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .chart-bars.dragging .bar { cursor: grabbing; }
   .bars-strip { position: relative; height: 100%; }
   .bar { position: absolute; bottom: 22px; height: 100px; border-radius: 2px;
-    background: var(--surface-2); transition: filter .12s, opacity .12s; cursor: pointer; }
-  .bar:hover { filter: brightness(1.08); }
+    background: var(--surface-2); transition: opacity .12s; cursor: pointer; }
+  /* Hover = an even outline ring, NOT a brightness/colour change: sweeping across many narrow
+     bars must not make their fill colours flicker/"jump". An INTEGER 2px spread keeps the ring
+     the same crisp thickness on every edge (a fractional px anti-aliases unevenly). */
+  .bar:hover { box-shadow: 0 0 0 2px var(--fg); }
   /* With the trend on, bars recede so the line/threshold read clearly; hovering one
      brings it back to full strength. */
   .bars-strip.trend-on .bar { opacity: .26; }
-  .bars-strip.trend-on .bar:hover { opacity: 1; filter: brightness(1.08); }
+  .bars-strip.trend-on .bar:hover { opacity: 1; }
   .bnum { position: absolute; bottom: 0; width: 36px; text-align: center; font-size: 10px;
     color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
   /* Hover tooltip: inverts the page theme. */
@@ -241,8 +250,13 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     padding: 10px 12px; font-size: 12.5px; line-height: 1.55;
     box-shadow: 0 10px 30px #00000038; max-width: 320px;
   }
+  /* Tooltip text stays single-line (ellipsised) so the tooltip is a FIXED height as the
+     cursor sweeps bars -- wrapping made the status dots jump up/down between bars. */
+  #tip .tt, #tip .tm { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   #tip .tt { font-weight: 650; font-size: 13px; }
   #tip .tm { opacity: .72; }
+  /* The heatmap tooltip alone wraps its long node_id line (full id is the point there). */
+  #tip .tm.wrap { white-space: normal; overflow: visible; overflow-wrap: anywhere; text-overflow: clip; }
   #tip .tr { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 5px; }
   #tip .tr span { white-space: nowrap; font-variant-numeric: tabular-nums; }
   #tip i { display: inline-block; width: 8px; height: 8px; border-radius: 2px;
@@ -266,7 +280,10 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .flk-board-ctrls .case-q { flex: 1 1 auto; max-width: none; height: 30px; }
   .flk-board-only { display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto;
     white-space: nowrap; color: var(--muted); font-size: 12.5px; cursor: pointer; }
-  .flaky-scroll { flex: 1 1 auto; min-height: 110px; max-height: 132px; overflow-y: auto;
+  /* Fill the card (which stretches to the radar's height next to it) and scroll INSIDE it, so
+     the flaky list runs to the very bottom of the panel instead of stopping at a fixed cap.
+     min-height:0 lets the flex child shrink so overflow scrolls; capped only when stacked. */
+  .flaky-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto;
     overscroll-behavior-y: contain; scrollbar-width: thin; }
   .fb-row { display: flex; align-items: center; gap: 10px; padding: 7px 2px;
     border-bottom: 1px solid var(--border); cursor: pointer; font-size: 12.5px; }
@@ -279,11 +296,51 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .fb-dagtask { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
   .fb-meta { color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; flex: 0 0 auto; }
   .fb-empty { color: var(--muted); font-size: 12.5px; padding: 16px 2px; }
+  /* Reliability radar (pentagon): the 3rd main-board dashboard. Its own row UNDER the
+     full-width chart, sharing that row 50/50 with the flaky panel (both are .board > .card).
+     The SVG has a wide viewBox and scales to the card, so labels never spill on small screens. */
+  .pentagon-card { padding: 14px 16px; display: flex; flex-direction: column; }
+  /* Both cards on this row share a fixed height (driven by the radar's size) so the flaky
+     list scrolls INSIDE its card down to the bottom of the panel -- and can't stretch the
+     row to fit all rows. Height is released on mobile (cards stack + size to content). */
+  #board2 > .card { height: 340px; }
+  /* The radar FILLS its card (no max-width cap): the SVG stretches to the card and the wide
+     viewBox scales the pentagon to fit by height, so it's as large as the card allows and
+     shrinks proportionally with the screen. */
+  #pentagon { flex: 1 1 auto; min-height: 0; }
+  .rel-svg { display: block; width: 100%; height: 100%; }
+  .rel-grid { fill: none; stroke: var(--border); stroke-width: 1; }
+  .rel-area { fill: color-mix(in srgb, var(--primary) 20%, transparent);
+    stroke: var(--primary); stroke-width: 2; stroke-linejoin: round; }
+  .rel-dot { fill: var(--primary); }
+  .rel-lab { fill: var(--muted); font-size: 11px; }
+  .rel-val { fill: var(--fg); font-weight: 700; }
+  .rel-score { fill: var(--fg); font-weight: 700; font-size: 21px;
+    font-variant-numeric: tabular-nums; }
+  .rel-score-cap { fill: var(--muted); font-size: 8.5px; text-transform: uppercase;
+    letter-spacing: .05em; }
+  /* Info (ⓘ) button by the Reliability title -> the "how it's computed" popup. */
+  .rel-info-btn { display: inline-flex; align-items: center; justify-content: center; padding: 0;
+    margin-left: 6px; border: 0; background: none; color: var(--muted); cursor: pointer; }
+  .rel-info-btn svg { width: 16px; height: 16px; }
+  .rel-info-btn:hover { color: var(--primary); }
+  .rel-info-btn:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; border-radius: 50%; }
+  .rel-info-intro { color: var(--muted); font-size: 13px; margin: 0 0 14px; }
+  .rel-info-list { list-style: none; margin: 0; padding: 0; display: flex;
+    flex-direction: column; gap: 12px; }
+  .rel-info-list li { border-left: 2px solid var(--primary); padding: 2px 0 2px 12px; }
+  .ri-head { display: flex; align-items: baseline; gap: 8px; }
+  .ri-name { font-weight: 650; }
+  .ri-val { color: var(--primary); font-weight: 700; font-variant-numeric: tabular-nums; }
+  .ri-desc { display: block; color: var(--muted); font-size: 12.5px; margin-top: 2px; }
   /* Stacked board: cards size to their content (the row layout's flex:1 1 0 would
      collapse them to a sliver in a column, hiding the chart/flaky behind overflow). */
   @media (max-width: 860px) {
     .board { flex-direction: column; }
     .board > .card { flex: 0 0 auto; }
+    /* Stacked (content-sized cards): release the shared height, cap the flaky list instead. */
+    #board2 > .card { height: auto; }
+    .flaky-scroll { max-height: 300px; }
   }
   /* Unique-tests list: one wrapping column, so a long node id never forces a
      horizontal scrollbar (the dialog body scrolls vertically). */
@@ -398,6 +455,15 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   }
   th.sortable, th.gsort, th.rsort { cursor: pointer; }
   th.sortable:hover, th.gsort:hover, th.rsort:hover { color: var(--fg); }
+  /* Run-list headers: ONLY the label text (.th-lab) sorts -- the empty cell space around it
+     is not clickable. The <th> shows a default cursor; the label carries the pointer/hover. */
+  #list th.sortable, #list th.gsort, #list th.rsort { cursor: default; }
+  /* Hovering the empty cell space must NOT highlight the label: keep the th muted (inherit
+     would resolve to --fg and darken the word). Only .th-lab:hover below highlights it. */
+  #list th.sortable:hover, #list th.gsort:hover, #list th.rsort:hover { color: var(--muted); }
+  .th-lab { display: inline-flex; align-items: center; gap: 4px; vertical-align: middle;
+    cursor: pointer; }
+  .th-lab:hover { color: var(--fg); }
   th .arrow { opacity: .9; margin-left: 4px; }
   tbody td { border-bottom: 1px solid var(--border); }
   tbody tr { transition: background .12s; }
@@ -431,8 +497,18 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   dialog[open] { display: flex; flex-direction: column; }
   /* Popups opened from inside a run sit inset within it -- narrower/shorter than the
      detail dialog so they never touch its borders. */
-  #flaky, #history, #compare, #failures { max-width: min(680px, 84vw); max-height: 82vh; }
-  dialog::backdrop { background: rgba(0, 0, 0, 0.5); }
+  #flaky, #history, #compare, #failures, #rel-info, #panel-info {
+    max-width: min(680px, 84vw); max-height: 82vh; }
+  #panel-info-body p { margin: 0; color: var(--fg); font-size: 13.5px; line-height: 1.6; }
+  /* The heatmap wants width (more run columns visible). Wide when opened on its own;
+     inset (narrower than the run dialog) when opened from inside a run, so it doesn't
+     touch the run dialog's frame. */
+  #heatmap { max-width: min(1040px, 92vw); max-height: 88vh; }
+  #heatmap.hm-inset { max-width: min(880px, 86vw); max-height: 82vh; }
+  /* The dim comes from ONE shared full-screen overlay (updateParentDim), not per-dialog, so
+     stacking a popup on top of the run detail doesn't double-darken. The ::backdrop stays
+     (transparent) only to keep click-outside-to-close working. */
+  dialog::backdrop { background: transparent; }
   .dlg-head { display: flex; align-items: center; gap: 10px; padding: 16px 20px;
     border-bottom: 1px solid var(--border); flex: 0 0 auto; background: var(--surface);
     border-radius: 14px 14px 0 0; }
@@ -450,16 +526,17 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .pill:hover { border-color: var(--primary); }
   .pill[aria-pressed="true"] { background: var(--primary); border-color: var(--primary); color: var(--on-primary); }
   .pill:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
-  /* Let a long test id keep the cell on one line; the table-wrap scrolls
-     horizontally to its full width so it never overlaps the Time column. */
-  .case-node { display: inline-block; white-space: nowrap; }
+  /* A long test id WRAPS so the whole row (incl. the Time column) stays visible without
+     horizontal scrolling -- the node column takes the slack and grows taller, not wider.
+     (Overrides the global `td { white-space: nowrap }`, which would block wrapping.) */
+  .case-node { display: inline-block; white-space: normal; overflow-wrap: anywhere; }
   .case-table { overflow-x: auto; }
   /* border-collapse:separate so the frozen (sticky) outcome column keeps its OWN
      borders -- with collapse, a sticky cell's borders belong to the table and get
      painted over, so the column's row lines vanished and the header doubled up.
      Each cell carries only border-bottom (+ the divider on the first cell), so the
      lines are single and aligned across all columns. */
-  .case-table table { width: max-content; min-width: 100%;
+  .case-table table { width: 100%;
     border-collapse: separate; border-spacing: 0; }
   .case.clickable[aria-expanded="true"] { background: var(--surface-2); }
   .case-table thead th:first-child,
@@ -494,12 +571,21 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .fk-row, .hist-row { display: flex; align-items: center; gap: 10px; padding: 9px 0;
     border-bottom: 1px solid var(--border); font-size: 12.5px; }
   .fk-row:last-child, .hist-row:last-child { border-bottom: 0; }
-  .fk-row .node, .hist-row .when { flex: 1 1 auto; overflow-wrap: anywhere; }
+  /* Flaky row mirrors the main-page board: the name takes a full-width line (wraps if long),
+     the quarantine badge sits on its OWN line UNDER it -- never colliding with the name. */
+  .fk-row { align-items: flex-start; }
+  .fk-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+  .fk-main .node { overflow-wrap: anywhere; }
+  .fk-sub { display: flex; }
+  .hist-row .when { flex: 1 1 auto; overflow-wrap: anywhere; }
   .hist-row .when { color: var(--muted); }
+  .hist-row .hist-loc { color: var(--primary); font-family: ui-monospace, SFMono-Regular,
+    Menlo, Consolas, monospace; font-size: .92em; }
   .fk-row .fk-meta, .hist-row .dur { color: var(--muted); white-space: nowrap;
     font-variant-numeric: tabular-nums; }
   /* Test-history node header wraps so a long node id never scrolls horizontally. */
-  .hist-node { overflow-wrap: anywhere; color: var(--muted); margin-bottom: 8px; }
+  .hist-node { overflow-wrap: anywhere; color: var(--muted); margin-bottom: 4px; }
+  .hist-count { color: var(--muted); font-size: 11.5px; margin-bottom: 8px; }
   /* Flaky-deeper bits: score, trend arrow, quarantine + list badges, modal controls. */
   .flk-score { color: var(--fg); font-variant-numeric: tabular-nums; }
   .flk-trend { font-weight: 700; }
@@ -539,7 +625,10 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     font-variant-numeric: tabular-nums; }
   .cl-sig { flex: 1 1 auto; overflow-wrap: anywhere; }
   .cl-dots { flex: 0 0 auto; display: inline-flex; gap: 3px; }
-  .cl-dots .od, .cl-item .od { width: 9px; height: 9px; border-radius: 2px; }
+  /* flex:0 0 auto so the status square keeps its 9x9 even when a long test name wraps to
+     several lines (otherwise the flex row squeezes it). align-self:start keeps it on line 1. */
+  .cl-dots .od, .cl-item .od { flex: 0 0 auto; align-self: flex-start; width: 9px; height: 9px;
+    border-radius: 2px; }
   .cl-row .chev { flex: 0 0 auto; transition: transform .15s; }
   .cl-row[aria-expanded="true"] .chev { transform: rotate(90deg); }
   /* Tests inside an expanded cluster: clearly separated rows that highlight on hover
@@ -555,6 +644,76 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .cl-item:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
   .cl-item .mono { color: var(--primary); }
   .cl-item .muted { margin-left: auto; white-space: nowrap; }
+  /* Test×run heatmap: a FIXED test-name column + a horizontally-scrolling cell pane (a
+     carousel like the runs chart). The two are separate columns, so the cells slide
+     within their pane and can never ride over the names. The name column is fit-content
+     (capped) -- it shrinks to the names (no wasted indent) and only grows, shifting the
+     map right, when a name is long. Both grids share row heights + gap, so rows stay
+     aligned as the dialog body scrolls vertically. */
+  /* Name column is capped (adaptive to the dialog width) so one very long test id can't
+     stretch it and open a big empty gap on the left -- long names ellipsis-truncate instead. */
+  .hm-wrap { display: grid; grid-template-columns: fit-content(clamp(100px, 22vw, 160px)) 1fr;
+    align-items: start; --hm-cell: 22px; --hm-head: 16px; --hm-gap: 3px;
+    /* grid-line colour == the regular UI border/divider colour (adaptive per theme); the 3px
+       rounded gaps keep the cells clearly separated without the line itself standing out. */
+    --hm-grid: var(--border); }
+  .hm-names { display: grid; gap: var(--hm-gap); min-width: 0; }
+  .hm-scroll { overflow-x: auto; overflow-y: hidden; padding: 0 6px 6px; cursor: grab; }
+  .hm-scroll.dragging { cursor: grabbing; }
+  /* The run-number row floats ABOVE the map (own transparent grid, same columns + gaps so it
+     lines up), with no boxes/lines around the numbers. Its height + the names' corner both
+     equal --hm-head, and the map's own top frame follows, so name rows still align with cells. */
+  .hm-headrow { display: grid; gap: var(--hm-gap); padding: 0 var(--hm-gap); width: max-content; }
+  .hm-rhead { height: var(--hm-head); display: flex; align-items: flex-end; justify-content: center;
+    overflow: hidden; font-size: var(--hm-rhead-fs, 9px); color: var(--muted);
+    white-space: nowrap; font-variant-numeric: tabular-nums; }
+  /* A real grid: the container is painted with the grid-line colour and every cell is inset
+     from it by an EQUAL gap on all four sides -- the same value drives both `gap` (interior
+     lines) and `padding` (the outer frame), so spacing is identical everywhere and the top/
+     bottom/side borders are never eaten. Rounded container + rounded cells. */
+  .hm-cells { display: grid; gap: var(--hm-gap); padding: var(--hm-gap); width: max-content;
+    background: var(--hm-grid); border-radius: 8px; }
+  .hm-corner { height: var(--hm-head); }
+  .hm-name { all: unset; box-sizing: border-box; height: var(--hm-cell); display: flex;
+    align-items: center; justify-content: flex-end; min-width: 0; padding-right: 10px;
+    white-space: nowrap; overflow: hidden; font-size: 11.5px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color: var(--primary); cursor: pointer; }
+  .hm-name > span { overflow: hidden; text-overflow: ellipsis; }
+  .hm-name:hover { text-decoration: underline; }
+  .hm-name:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
+  .hm-cell { width: var(--hm-cell); height: var(--hm-cell); display: block; border-radius: 5px;
+    cursor: pointer; transition: opacity .12s, filter .1s; }
+  .hm-miss { background: var(--surface); cursor: default; }  /* empty grid cell = didn't run */
+  /* Hover highlight (map cells only -- NOT the legend swatches) stays ENTIRELY INSIDE the cell:
+     an inset ring + a brightness lift. Because nothing is drawn outside the border-box and the
+     cell isn't lifted over its neighbours, it can't reach into the 3px gaps or squeeze the
+     adjacent squares -- every cell keeps its exact size and the highlight looks identical on
+     all of them. A white inset ring reads clearly on any status colour, in both themes. */
+  .hm-cells .hm-cell:not(.hm-miss):hover { filter: brightness(1.22);
+    box-shadow: inset 0 0 0 2px rgba(255, 255, 255, .92), inset 0 0 0 3px rgba(0, 0, 0, .35); }
+  /* Legend = a status focus filter, like the runs-chart legend: focusing a status dims
+     the other cells (the .foc-<code> container classes drive it -- no per-cell work). */
+  .hm-cells.foc .hm-cell:not(.hm-miss) { opacity: .12; }
+  .hm-cells.foc.foc-p .hm-cell[data-o="p"], .hm-cells.foc.foc-f .hm-cell[data-o="f"],
+  .hm-cells.foc.foc-e .hm-cell[data-o="e"], .hm-cells.foc.foc-s .hm-cell[data-o="s"] { opacity: 1; }
+  .hm-legend { display: flex; gap: 6px; flex-wrap: wrap; align-items: center;
+    margin-top: 14px; font-size: 12px; color: var(--muted); }
+  .hm-lg { display: inline-flex; align-items: center; gap: 6px; border: 0; background: none;
+    color: inherit; font: inherit; padding: 4px 8px; border-radius: 7px; }
+  button.hm-lg { cursor: pointer; }
+  button.hm-lg:hover { background: var(--surface-2); }
+  button.hm-lg:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
+  button.hm-lg.off { opacity: .4; text-decoration: line-through; }
+  .hm-lg .hm-cell { width: 13px; height: 13px; cursor: inherit; transition: none;
+    border-radius: 3px; }
+  .hm-lg .hm-miss { background: transparent; border: 1px dashed var(--border);
+    box-sizing: border-box; }  /* legend swatch keeps the dashed "didn't run" look */
+  .hm-reset { border: 0; background: none; color: var(--primary); font: inherit;
+    font-size: 12px; cursor: pointer; padding: 4px 8px; }
+  .hm-note { margin-top: 8px; font-size: 12px; color: var(--muted); }
+  /* Briefly highlight the case a heatmap cell jumped to in the run detail. */
+  tr.case.case-focus > td { background: var(--ring); }
   /* Sortable case-table headers reuse the run-list's th.sortable + .arrow styling;
      TIME right-aligns over its values and defaults to slowest-first. */
   .case-table th.sortable { white-space: nowrap; user-select: none; }
@@ -578,6 +737,31 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   #list .table-wrap > table { width: 100%; }
   tr.lgrp > td { background: var(--surface-2); font-weight: 600; cursor: pointer; user-select: none; }
   tr.lgrp .chev { transition: transform .15s; }
+  /* Flaky warning chip -- shown only on groups that actually have flaky tests. Amber/yellow
+     with a warning triangle; clicking it scopes the board (chart + flaky panel) to the group. */
+  .lgrp-flk { display: inline-flex; align-items: center; gap: 3px; margin-left: 8px;
+    padding: 1px 8px 1px 6px; border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent);
+    border-radius: 999px; background: var(--warn-bg); color: var(--warn); font-size: 11px;
+    font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.6; cursor: pointer;
+    vertical-align: middle; }
+  .lgrp-flk svg { width: 12px; height: 12px; }
+  .lgrp-flk:hover { background: color-mix(in srgb, var(--warn) 26%, var(--warn-bg)); }
+  .lgrp-flk:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
+  /* WHEN is the last column and shrinks to its content (width:1% on the th) so the date and
+     its heatmap button stay snug together at the row's right edge -- the leftover width goes
+     to the wide DAG/TASK identity columns instead of opening a hole between the date and the
+     button. The date is left-aligned so the "When" header still sits right over it. */
+  th.gcol-when { width: 1%; }
+  /* Keep the cell a real table-cell so its bottom border (the row separator) stays continuous
+     to the right edge -- `display:flex` on a <td> drops that border. The flex lives on an
+     inner wrapper instead, which lays out the date + heatmap button snugly. */
+  td.lgrp-when { white-space: nowrap; }
+  .lgrp-when-in { display: flex; align-items: center; }
+  .lgrp-hm { margin-left: 8px; flex: 0 0 auto; display: inline-flex; padding: 3px;
+    background: none; border: 0; border-radius: 6px; color: var(--muted); cursor: pointer; }
+  .lgrp-hm svg { width: 15px; height: 15px; }
+  .lgrp-hm:hover { color: var(--primary); background: var(--border); }
+  .lgrp-hm:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
   /* Align the grouped "DAG" header over the dag name (clears the chevron's footprint). */
   th.gcol-dag { padding-left: 32px; }
   /* A group's runs sit in their own full sub-table, marked by a left accent rather
@@ -696,6 +880,12 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       <div class="chart-head chart-head-stack">
         <div class="chart-head-row">
           <span data-i18n="history">Recent runs</span>
+          <button id="chart-info" class="rel-info-btn" type="button" data-i18n-al="chartInfoAl"
+            title="About the runs chart">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+              stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
+          </button>
           <span class="chart-filter" id="chart-filter" hidden></span>
           <span class="legend" id="legend"></span>
         </div>
@@ -711,9 +901,30 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       </div>
       <div id="chart"></div>
     </div>
-    <div class="card flaky-card" id="flaky-card">
+  </div>
+  <div class="board" id="board2" hidden>
+    <div class="card pentagon-card" id="pentagon-card">
+      <div class="chart-head">
+        <span data-i18n="reliabilityTitle">Reliability</span>
+        <button id="rel-info-btn" class="rel-info-btn" type="button" data-i18n-al="reliabilityInfoAl"
+          title="How the score is computed">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
+        </button>
+        <span class="flk-scope" id="rel-scope" hidden></span>
+      </div>
+      <div id="pentagon"></div>
+    </div>
+    <div class="card flaky-card" id="flaky-card" hidden>
       <div class="chart-head">
         <span data-i18n="flakyTitle">Flaky tests</span>
+        <button id="flaky-info" class="rel-info-btn" type="button" data-i18n-al="flakyInfoAl"
+          title="About flaky tests">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
+        </button>
         <span class="flk-scope" id="flk-scope" hidden></span>
         <span style="flex:1"></span>
         <span class="muted" id="flaky-count"></span>
@@ -861,6 +1072,48 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   <div class="dlg-body" id="hist-body"></div>
 </dialog>
 
+<dialog id="rel-info" aria-labelledby="rel-info-title">
+  <div class="dlg-head">
+    <h2 id="rel-info-title" data-i18n="relInfoTitle">How the reliability score is computed</h2>
+    <span class="grow" style="flex:1"></span>
+    <button id="rel-info-close" class="btn icon-btn" type="button" data-i18n-al="closeReport">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M18 6 6 18M6 6l12 12"/>
+      </svg>
+    </button>
+  </div>
+  <div class="dlg-body" id="rel-info-body"></div>
+</dialog>
+
+<dialog id="panel-info" aria-labelledby="panel-info-title">
+  <div class="dlg-head">
+    <h2 id="panel-info-title"></h2>
+    <span class="grow" style="flex:1"></span>
+    <button id="panel-info-close" class="btn icon-btn" type="button" data-i18n-al="closeReport">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M18 6 6 18M6 6l12 12"/>
+      </svg>
+    </button>
+  </div>
+  <div class="dlg-body" id="panel-info-body"></div>
+</dialog>
+
+<dialog id="heatmap" aria-labelledby="hm-title">
+  <div class="dlg-head">
+    <h2 id="hm-title" data-i18n="heatmapTitle">Test×run heatmap</h2>
+    <span class="grow" style="flex:1"></span>
+    <button id="hm-close" class="btn icon-btn" type="button" data-i18n-al="closeReport">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M18 6 6 18M6 6l12 12"/>
+      </svg>
+    </button>
+  </div>
+  <div class="dlg-body" id="hm-body"></div>
+</dialog>
+
 <div id="bulk-bar" class="bulk-bar" hidden></div>
 
 <script>
@@ -881,10 +1134,37 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       avgWord: "avg", uqRuns: "Total runs",
       apiDocs: "API docs", linksAl: "Links & documentation", ghItem: "GitHub",
       benchTitle: "Test durations (10s buckets)", uniqueTitle: "Unique tests",
+      reliabilityTitle: "Reliability", reliabilityHint: "higher is better", relOverall: "score",
+      relPass: "Pass rate", relRobust: "No errors", relFresh: "Green now",
+      relStable: "Stability", relComplete: "Completeness",
+      reliabilityInfoAl: "How the reliability score is computed",
+      relInfoTitle: "How the reliability score is computed",
+      relInfoIntro: "Each axis is scored 0–100 over the runs currently in view (the top filters "
+        + "and any group selection apply). Higher is better; the centre is the average of the five.",
+      relPassDesc: "Average of each run's pass rate, across every run in view — the same "
+        + "value as the chart's “avg pass rate”.",
+      relRobustDesc: "Share of results that are NOT errors (a test crashing or its setup failing).",
+      relFreshDesc: "Share of dag·tasks whose LATEST run cleared the success threshold.",
+      relStableDesc: "Share of tests that are NOT flaky — that don't flip pass↔fail over the window.",
+      relCompleteDesc: "Share of tests that actually ran (were not skipped).",
       cId: "ID", cStatus: "Status", cDag: "DAG", cTask: "Task", cRun: "Run", cTry: "Try",
       cTotal: "Total", cPass: "Pass", cFail: "Fail", cErr: "Err", cSkip: "Skip",
       cDuration: "Duration", cWhen: "When", cRuns: "Runs", cPassRate: "Pass %", cAvgDur: "Avg time",
       kRuns: "Runs", kPassingRuns: "Passing runs", kTests: "Unique tests", kFailures: "Failures",
+      kAll: "all", kAllTip: "Counts every run in view — not narrowed by a group selection",
+      chartInfoAl: "About the runs chart", flakyInfoAl: "About flaky tests",
+      chartInfoTitle: "Recent runs chart",
+      chartInfoBody: "One bar per run, stacked by outcome (passed / failed / error / skipped), "
+        + "oldest → newest. Drag, swipe or use the arrows to scroll the carousel. Tick runs in "
+        + "the list to focus the chart on them. Turn on “Pass-rate trend” for a line through each "
+        + "run's pass rate with a dashed success-threshold gridline; the header then shows the "
+        + "visible run window (e.g. #48–#76 / 76) and its average pass rate.",
+      flakyInfoTitle: "Flaky tests",
+      flakyInfoBody: "Tests that BOTH pass and fail across the recent window of one dag·task. "
+        + "Score = how often the result flips (0–1); trend compares the recent half to the older "
+        + "half; a test is quarantined once its score clears the threshold. Use the search box or "
+        + "the “Quarantined only” toggle to narrow the list; a row opens that test's history. "
+        + "Flakiness is per dag·task — the same test run from two tasks can differ.",
       kFailuresTip: "Tests failing in the latest run of each dag·task (drops off when fixed)",
       kPassed: "Passed", kFailed: "Failed", kErrors: "Errors", kSkipped: "Skipped",
       sPass: "PASS", sFail: "FAIL", sError: "ERROR", success: "success",
@@ -904,7 +1184,12 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       cmp_added: "Added", cmp_removed: "Removed",
       flakyTitle: "Flaky tests", flakyBtn: "Flaky tests",
       flakyBtnAl: "Flaky tests in recent runs", flakyFail: "Failed to load flaky tests: ",
+      heatmapTitle: "Test×run heatmap", heatmapBtn: "Heatmap",
+      heatmapBtnAl: "Test×run outcome heatmap for this dag·task",
+      heatmapFail: "Failed to load heatmap: ", heatmapEmpty: "No runs to chart yet.",
+      heatmapTrunc: "Showing the {m} most-broken of {n} tests.",
       noFlaky: "No flaky tests in the recent runs.", flkFailed: "failed",
+      flkGroupWarn: "Flaky tests in this group — click to focus the board on it",
       flkSearch: "filter flaky tests…", flkNoMatch: "No flaky tests match the filter.",
       flkSelScope: "selected groups", flkNoSel: "No flaky tests in the selected groups.",
       flkWindow: "Analysis window:", flkWinOpt: "last {n} runs",
@@ -922,7 +1207,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       slowNoData: "Not enough run history yet.",
       historyTitle: "Test history", historyBtn: "History",
       historyFail: "Failed to load history: ", noHistory: "No history for this test.",
-      histDidntRun: "did not run",
+      histDidntRun: "did not run", histCount: "over the last {n} runs",
       caseSearch: "filter tests…", caseGroup: "Group by module",
       listGroup: "Group by dag·task", runsWord: "runs", selectGroup: "Select group",
       groupMore: "Showing 100 of {n} runs — filter to this dag·task to see all.",
@@ -939,7 +1224,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       selectRow: "Select row", selectAll: "Select all",
       forbidden: "You don't have permission to delete this report (it requires permission to trigger the DAG).",
       older: "Older runs", newer: "Newer runs",
-      avgPass: "avg", avgPassTip: "Average pass rate across the {n} runs in view",
+      avgPass: "avg", avgPassTip: "Average pass rate across all {n} runs in the chart (matches the radar)",
       visibleRuns: "Showing runs #{a}–#{b} of {n}",
       prevPage: "Previous page", nextPage: "Next page", page: "Page",
     },
@@ -955,10 +1240,37 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       avgWord: "сред.", uqRuns: "Всего прогонов",
       apiDocs: "Документация API", linksAl: "Ссылки и документация", ghItem: "GitHub",
       benchTitle: "Время выполнения тестов (по 10с)", uniqueTitle: "Уникальные тесты",
+      reliabilityTitle: "Надёжность", reliabilityHint: "больше — лучше", relOverall: "оценка",
+      relPass: "Проходимость", relRobust: "Без ошибок", relFresh: "Сейчас зелёные",
+      relStable: "Стабильность", relComplete: "Полнота",
+      reliabilityInfoAl: "Как считается оценка надёжности",
+      relInfoTitle: "Как считается оценка надёжности",
+      relInfoIntro: "Каждая ось — 0–100 по прогонам в поле зрения (учитываются верхние фильтры "
+        + "и выделение групп). Больше — лучше; в центре — среднее из пяти.",
+      relPassDesc: "Средняя доля прохождения по каждому прогону, по всем прогонам в поле "
+        + "зрения — то же значение, что «ср. прохождение» в диаграмме.",
+      relRobustDesc: "Доля результатов без ошибок (падение теста или сбой его настройки).",
+      relFreshDesc: "Доля dag·task, чей ПОСЛЕДНИЙ прогон прошёл порог успеха.",
+      relStableDesc: "Доля тестов, которые НЕ нестабильны — не скачут pass↔fail в окне.",
+      relCompleteDesc: "Доля тестов, которые реально выполнились (не были пропущены).",
       cId: "ID", cStatus: "Статус", cDag: "DAG", cTask: "Задача", cRun: "Запуск", cTry: "Попытка",
       cTotal: "Всего", cPass: "Усп", cFail: "Пров", cErr: "Ошиб", cSkip: "Проп",
       cDuration: "Время", cWhen: "Когда", cRuns: "Прогоны", cPassRate: "Проход %", cAvgDur: "Ср. время",
       kRuns: "Прогонов", kPassingRuns: "Успешных прогонов", kTests: "Уникальные тесты", kFailures: "Падений",
+      kAll: "все", kAllTip: "Считает все прогоны в поле зрения — не сужается выбором группы",
+      chartInfoAl: "О диаграмме прогонов", flakyInfoAl: "О нестабильных тестах",
+      chartInfoTitle: "Диаграмма последних прогонов",
+      chartInfoBody: "Один столбец — один прогон, с накоплением по статусам (passed / failed / "
+        + "error / skipped), от старых к новым. Прокрутка — перетаскиванием, свайпом или "
+        + "стрелками. Отметьте прогоны в списке, чтобы сфокусировать диаграмму на них. Включите "
+        + "«Тренд прохождения» — появится линия по доле прохождения каждого прогона и пунктирный "
+        + "порог успеха; в шапке — видимое окно (напр. #48–#76 / 76) и средняя доля прохождения.",
+      flakyInfoTitle: "Нестабильные тесты",
+      flakyInfoBody: "Тесты, которые в окне последних прогонов одного dag·task И проходят, И "
+        + "падают. Score — как часто результат скачет (0–1); тренд сравнивает свежую половину "
+        + "со старой; тест уходит в карантин, когда score превышает порог. Сузить список — поиском "
+        + "или тумблером «Только карантин»; строка открывает историю теста. Нестабильность "
+        + "считается по каждому dag·task — один тест из разных тасок может отличаться.",
       kFailuresTip: "Тесты, падающие в последнем прогоне каждого dag·task (уходят после починки)",
       kPassed: "Пройдено", kFailed: "Провалено", kErrors: "Ошибки", kSkipped: "Пропущено",
       sPass: "OK", sFail: "СБОЙ", sError: "ОШИБКА", success: "успех",
@@ -978,7 +1290,13 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       cmp_added: "Добавлены", cmp_removed: "Удалены",
       flakyTitle: "Нестабильные тесты", flakyBtn: "Нестабильные",
       flakyBtnAl: "Нестабильные тесты за последние прогоны", flakyFail: "Не удалось загрузить: ",
+      heatmapTitle: "Тепловая карта тест×прогон", heatmapBtn: "Тепловая карта",
+      heatmapBtnAl: "Тепловая карта исходов тест×прогон для этого dag·task",
+      heatmapFail: "Не удалось загрузить тепловую карту: ",
+      heatmapEmpty: "Пока нет прогонов для карты.",
+      heatmapTrunc: "Показаны {m} самых проблемных из {n} тестов.",
       noFlaky: "Нестабильных тестов за последние прогоны нет.", flkFailed: "падений",
+      flkGroupWarn: "В этой группе есть нестабильные тесты — нажмите, чтобы сфокусироваться",
       flkSearch: "поиск нестабильных тестов…",
       flkNoMatch: "Под фильтр не попал ни один нестабильный тест.",
       flkSelScope: "выбранные группы",
@@ -998,7 +1316,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       slowNoData: "Пока мало истории прогонов.",
       historyTitle: "История теста", historyBtn: "История",
       historyFail: "Не удалось загрузить историю: ", noHistory: "Истории по этому тесту нет.",
-      histDidntRun: "не запускался",
+      histDidntRun: "не запускался", histCount: "за последние {n} запусков",
       caseSearch: "фильтр тестов…", caseGroup: "Группировать по модулю",
       listGroup: "Группировать по dag·task", runsWord: "прогонов", selectGroup: "Выбрать группу",
       groupMore: "Показаны 100 из {n} прогонов — отфильтруйте по этому dag·task.",
@@ -1015,7 +1333,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       selectRow: "Выбрать строку", selectAll: "Выбрать все",
       forbidden: "Нет прав на удаление этого отчёта (нужно право запускать DAG).",
       older: "Старее", newer: "Новее",
-      avgPass: "ср.", avgPassTip: "Средняя доля прохождения по {n} прогонам в окне",
+      avgPass: "ср.", avgPassTip: "Средняя доля прохождения по всем {n} прогонам диаграммы (совпадает с радаром)",
       visibleRuns: "Показаны прогоны #{a}–#{b} из {n}",
       prevPage: "Предыдущая страница", nextPage: "Следующая страница", page: "Страница",
     },
@@ -1294,8 +1612,10 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       }).length;
     }
     var cards = [
-      { label: t("kRuns"), value: runs },
-      { label: t("kPassingRuns"), value: ok + " / " + runs, cls: ok === runs ? "c-pass" : "" },
+      // These two count EVERY run in view (top filters only) and ignore a group selection,
+      // unlike the scoped Failures/Slowdowns -- the "all" chip makes that explicit.
+      { label: t("kRuns"), value: runs, all: true },
+      { label: t("kPassingRuns"), value: ok + " / " + runs, cls: ok === runs ? "c-pass" : "", all: true },
       { label: t("kTests"), value: uniqueTests == null ? "…" : uniqueTests,
         id: "kpi-unique", click: uniqueTests > 0 },
       { label: t("kFailures"), value: failures, cls: failures ? "c-fail" : "c-pass",
@@ -1308,8 +1628,10 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       var attrs = (c.id ? ' id="' + c.id + '"' : "")
         + (c.tip ? ' title="' + esc(c.tip) + '"' : "")
         + (c.click ? ' role="button" tabindex="0"' : "");
+      var allChip = c.all ? ' <span class="kpi-all" title="' + esc(t("kAllTip")) + '">'
+        + esc(t("kAll")) + "</span>" : "";
       return '<div class="kpi' + (c.click ? " clickable" : "") + '"' + attrs
-        + '><div class="label">' + esc(c.label) + '</div>'
+        + '><div class="label">' + esc(c.label) + allChip + '</div>'
         + '<div class="value ' + (c.cls || "") + '">' + esc(c.value) + "</div></div>";
     }).join("");
     var fk = document.getElementById("kpi-failures");
@@ -1428,9 +1750,11 @@ _INDEX_HTML = r"""<!DOCTYPE html>
         .replace("{b}", win[last].seq).replace("{n}", count);
     }
     if (aEl) {
+      // Average over ALL runs in the chart (not just the visible window) so it's the overall
+      // pass rate -- identical to the radar's Pass rate, and stable as you scroll the carousel.
       var sum = 0, k = 0;
       if (passTrend) {
-        for (var i = first; i <= last; i++) {
+        for (var i = 0; i < count; i++) {
           var tot = win[i].total || 0;
           if (tot > 0) { sum += (win[i].passed || 0) / tot; k++; }
         }
@@ -1492,8 +1816,10 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   function tipMove(ev) {
     if (!tipEl) return;
     var pad = 14, w = tipEl.offsetWidth, h = tipEl.offsetHeight;
-    var x = ev.clientX + pad, y = ev.clientY + pad;
-    if (x + w > window.innerWidth - 8) x = ev.clientX - w - pad;
+    // Sit just below the cursor, offset to its left (flips to the other side near an edge).
+    var x = ev.clientX - w - pad;
+    if (x < 8) x = ev.clientX + pad;
+    var y = ev.clientY + pad;
     if (y + h > window.innerHeight - 8) y = ev.clientY - h - pad;
     tipEl.style.left = Math.max(8, x) + "px";
     tipEl.style.top = Math.max(8, y) + "px";
@@ -1701,7 +2027,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     listEl.querySelectorAll(".sel").forEach(function (cb) { cb.checked = false; });
     // Also reset the group-header checkboxes (checked + indeterminate) -- otherwise a
     // ticked group stays ticked after "show all" even though its runs are deselected.
-    syncSelAll(); syncGroupChecks(); updateBulkBar(); renderChart(); renderFlakyBoard(); renderKpis();
+    syncSelAll(); syncGroupChecks(); updateBulkBar(); renderChart(); renderFlakyBoard(); renderKpis(); renderReliability();
   }
 
   // Comparator for a given run-sort state {key, dir} -- reused by the flat list and
@@ -1773,7 +2099,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     return COLS.map(function (c) {
       var asc = sort.key === c.key ? (sort.dir === 1 ? "ascending" : "descending") : "none";
       return '<th class="sortable" data-key="' + c.key + '" aria-sort="' + asc + '">'
-        + esc(t(c.label)) + arrow(c.key) + "</th>";
+        + '<span class="th-lab">' + esc(t(c.label)) + arrow(c.key) + "</span></th>";
     }).join("");
   }
   // A group's full column header -- sorts the runs of THAT group only (class rsort,
@@ -1784,7 +2110,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       var ar = on ? '<span class="arrow">' + (eff.dir === 1 ? "↑" : "↓") + "</span>" : "";
       return '<th class="rsort" data-key="' + c.key + '" data-gkey="' + esc(g.key)
         + '" aria-sort="' + (on ? (eff.dir === 1 ? "ascending" : "descending") : "none") + '">'
-        + esc(t(c.label)) + ar + "</th>";
+        + '<span class="th-lab">' + esc(t(c.label)) + ar + "</span></th>";
     }).join("");
     return '<th class="sel-cell"></th>' + cells + "<th></th>";
   }
@@ -1792,7 +2118,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   function gHeadCell(key, label, cls) {
     var asc = groupSort.key === key ? (groupSort.dir === 1 ? "ascending" : "descending") : "none";
     return '<th class="gsort' + (cls ? " " + cls : "") + '" data-key="' + key
-      + '" aria-sort="' + asc + '">' + esc(t(label)) + groupArrow(key) + "</th>";
+      + '" aria-sort="' + asc + '"><span class="th-lab">' + esc(t(label))
+      + groupArrow(key) + "</span></th>";
   }
   function groupArrow(key) {
     if (groupSort.key !== key) return "";
@@ -1808,6 +2135,14 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     if (groupSort.key === "status") return g.newest.success ? 2 : (g.newest.errors ? 0 : 1);
     return String(g.newest.created_at || "");  // created_at, and the default
   }
+  // Yellow warning chip -- rendered ONLY for groups that have at least one flaky test.
+  function flkGroupChip(g) {
+    var c = flkCountByKey[g.key] || 0;
+    if (!c) return "";
+    return ' <button type="button" class="lgrp-flk" data-key="' + esc(g.key)
+      + '" aria-label="' + esc(t("flkGroupWarn")) + '" title="' + esc(t("flkGroupWarn")) + '">'
+      + ICONS.error + "<span>" + c + "</span></button>";
+  }
   function groupHeaderHtml(g) {
     var exp = !!listExpanded[g.key];
     var nSel = g.runs.filter(function (r) { return selectedIds.has(r.id); }).length;
@@ -1818,12 +2153,19 @@ _INDEX_HTML = r"""<!DOCTYPE html>
         + (nSel === g.runs.length ? " checked" : "") + ' aria-label="' + esc(t("selectGroup")) + '"></td>'
       + '<td class="mono"><span class="chev"' + (exp ? ' style="transform:rotate(90deg)"' : "")
         + ">" + CHEV + "</span> " + esc(g.dag) + "</td>"
-      + '<td class="mono">' + esc(g.task) + "</td>"
+      + '<td class="mono">' + esc(g.task) + flkGroupChip(g) + "</td>"
       + '<td class="num">' + g.runs.length + "</td>"
       + '<td class="num">' + rate + "%</td>"
       + '<td class="num">' + fmtDur(g.avgDur) + "</td>"
       + "<td>" + badge(st, statusLabel(st)) + "</td>"
-      + '<td class="muted">' + fmtTime(g.newest.created_at) + "</td></tr>";
+      + '<td class="muted lgrp-when"><div class="lgrp-when-in">' + fmtTime(g.newest.created_at)
+      + '<button type="button" class="lgrp-hm" data-key="' + esc(g.key)
+      + '" data-i18n-al="heatmapBtnAl" title="' + esc(t("heatmapBtn")) + '">'
+      + '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"'
+      + ' stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+      + '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/>'
+      + '<rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>'
+      + "</svg></button></div></td></tr>";
   }
 
   function renderList() {
@@ -1855,7 +2197,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
         + gHeadCell("task_id", "cTask")
         + gHeadCell("runs", "cRuns") + gHeadCell("pass_rate", "cPassRate")
         + gHeadCell("avg_dur", "cAvgDur") + gHeadCell("status", "cStatus")
-        + gHeadCell("created_at", "cWhen");
+        + gHeadCell("created_at", "cWhen", "gcol-when");
       var groups = groupReports(shown);
       groups.forEach(function (g) { keyMap[g.key] = g; });
       groups.sort(function (a, b) {
@@ -1899,7 +2241,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       listGroup = lg.checked; listExpanded = {}; groupRunSort = {}; listPage = 0; renderList();
     });
     listEl.querySelectorAll("th.sortable").forEach(function (th) {
-      th.addEventListener("click", function () {
+      th.addEventListener("click", function (e) {
+        if (!e.target.closest(".th-lab")) return;  // only the label sorts, not the empty space
         var k = th.getAttribute("data-key");
         if (sort.key === k) sort.dir *= -1; else { sort.key = k; sort.dir = 1; }
         listPage = 0;
@@ -1907,7 +2250,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       });
     });
     listEl.querySelectorAll("th.gsort").forEach(function (th) {  // top header: groups + tests
-      th.addEventListener("click", function () {
+      th.addEventListener("click", function (e) {
+        if (!e.target.closest(".th-lab")) return;  // only the label sorts, not the empty space
         var k = th.getAttribute("data-key");
         if (groupSort.key === k) groupSort.dir *= -1; else { groupSort.key = k; groupSort.dir = 1; }
         groupRunSort = {};  // drop per-group overrides -- the top header is the global control
@@ -1917,7 +2261,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       });
     });
     listEl.querySelectorAll("th.rsort").forEach(function (th) {  // sort one group's runs only
-      th.addEventListener("click", function () {
+      th.addEventListener("click", function (e) {
+        if (!e.target.closest(".th-lab")) return;  // only the label sorts, not the empty space
         var gk = th.getAttribute("data-gkey"), k = th.getAttribute("data-key");
         var cur = groupRunSort[gk] || { key: sort.key, dir: sort.dir };
         groupRunSort[gk] = cur.key === k ? { key: k, dir: -cur.dir } : { key: k, dir: 1 };
@@ -1936,6 +2281,22 @@ _INDEX_HTML = r"""<!DOCTYPE html>
         renderList();
       });
     });
+    listEl.querySelectorAll(".lgrp-hm").forEach(function (b) {
+      b.addEventListener("click", function (e) {
+        e.stopPropagation();  // open the heatmap, don't toggle the group
+        var g = keyMap[b.getAttribute("data-key")];
+        if (g) openHeatmap(g.dag, g.task);
+      });
+    });
+    listEl.querySelectorAll(".lgrp-flk").forEach(function (b) {
+      b.addEventListener("click", function (e) {
+        e.stopPropagation();  // scope the board to this group, don't toggle the expand
+        var cb = b.closest("tr").querySelector(".gsel");
+        if (cb && !cb.checked) { cb.checked = true; cb.dispatchEvent(new Event("change")); }
+        var card = document.getElementById("flaky-card");
+        if (card && !card.hidden) card.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      });
+    });
     listEl.querySelectorAll(".gsel").forEach(function (cb) {
       var g = keyMap[cb.getAttribute("data-key")];
       var nSel = g.runs.filter(function (r) { return selectedIds.has(r.id); }).length;
@@ -1945,7 +2306,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
         g.runs.forEach(function (r) {
           if (cb.checked) selectedIds.add(r.id); else selectedIds.delete(r.id);
         });
-        renderChart(); renderList(); updateBulkBar(); renderFlakyBoard(); renderKpis();
+        renderChart(); renderList(); updateBulkBar(); renderFlakyBoard(); renderKpis(); renderReliability();
       });
     });
     listEl.querySelectorAll(".row-del").forEach(function (b) {
@@ -1966,7 +2327,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       cb.addEventListener("change", function () {
         var id = cb.getAttribute("data-id");
         if (cb.checked) selectedIds.add(id); else selectedIds.delete(id);
-        syncSelAll(); syncGroupChecks(); updateBulkBar(); renderChart(); renderFlakyBoard(); renderKpis();
+        syncSelAll(); syncGroupChecks(); updateBulkBar(); renderChart(); renderFlakyBoard(); renderKpis(); renderReliability();
       });
     });
     var selAll = document.getElementById("sel-all");
@@ -1986,7 +2347,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
         });
       }
       selAll.indeterminate = false;
-      updateBulkBar(); renderChart(); renderFlakyBoard(); renderKpis();
+      updateBulkBar(); renderChart(); renderFlakyBoard(); renderKpis(); renderReliability();
     });
     syncSelAll(); updateBulkBar();
   }
@@ -2038,7 +2399,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     });
   }
 
-  function renderAll() { renderKpis(); renderChart(); renderList(); if (detail) renderDetail(); }
+  function renderAll() { renderKpis(); renderChart(); renderList(); renderReliability(); if (detail) renderDetail(); }
 
   function skeleton() {
     var rows = "";
@@ -2094,6 +2455,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     // Filter resets to the newest runs / first page; a delete keeps the user's place.
     if (!keepPage) { chartScroll = null; listPage = 0; }
     document.getElementById("board").hidden = allReports.length === 0;
+    document.getElementById("board2").hidden = allReports.length === 0;
     renderKpis(); renderChart(); renderList(); renderFlakyBoard();
     refreshUniqueTests();
     refreshSlow();
@@ -2112,9 +2474,28 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   // Flaky panel on the main board: global flaky tests, filtered client-side by the
   // dag/task search; a row opens that test's history.
   var allFlaky = [];
+  // Per-group flaky count, keyed exactly like a group's key (JSON [dag_id, task_id]); drives
+  // the yellow warning chip on the run-list groups. Rebuilt whenever the flaky data changes.
+  var flkCountByKey = {};
+  function rebuildFlkCounts() {
+    flkCountByKey = {};
+    allFlaky.forEach(function (f) {
+      var k = JSON.stringify([f.dag_id, f.task_id]);
+      flkCountByKey[k] = (flkCountByKey[k] || 0) + 1;
+    });
+  }
   function renderFlakyBoard() {
     var box = document.getElementById("flaky-list");
     if (!box) return;
+    // No flaky anywhere -> drop the whole panel so the runs chart takes the full width.
+    // It reappears (with content) the moment any flaky test shows up. When the panel's
+    // presence flips, the chart is re-rendered so its bars re-fill the new (wider/narrower)
+    // width -- otherwise they'd stay sized to the old half-width layout.
+    // No flaky anywhere -> hide the panel; the radar beside it grows to fill the row. The chart
+    // is on its own full-width row now, so its width doesn't depend on the flaky panel.
+    var flakyCard = document.getElementById("flaky-card");
+    if (flakyCard) flakyCard.hidden = !allFlaky.length;
+    if (!allFlaky.length) return;
     var dag = document.getElementById("f-dag").value.trim().toLowerCase();
     var task = document.getElementById("f-task").value.trim().toLowerCase();
     var qEl = document.getElementById("flk-board-q");
@@ -2163,9 +2544,135 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   function loadFlaky() {
     fetch(API + "flaky")
       .then(function (r) { return r.ok ? r.json() : { flaky: [] }; })
-      .then(function (d) { allFlaky = d.flaky || []; renderFlakyBoard(); })
-      .catch(function () { allFlaky = []; renderFlakyBoard(); });
+      .then(function (d) {
+        allFlaky = d.flaky || []; rebuildFlkCounts();
+        renderFlakyBoard(); renderList(); renderReliability();  // stability axis uses flaky
+      })
+      .catch(function () {
+        allFlaky = []; rebuildFlkCounts(); renderFlakyBoard(); renderList(); renderReliability();
+      });
   }
+
+  // -- Reliability radar (pentagon): the 3rd main-board dashboard ---------------------
+  // Five 0-100 axes (higher = better) over the runs in view -- scoped by the top filters and
+  // any group selection, exactly like the chart/flaky panel. Pure read of already-loaded data
+  // (report summaries + flaky list), so it never fires its own request.
+  function reliabilityAxes() {
+    var selKeys = selKeySet();
+    var inScope = function (o) { return !selKeys || selKeys[o.dag_id + "|" + o.task_id]; };
+    var rows = reports.filter(inScope), flk = allFlaky.filter(inScope);
+    var T = 0, E = 0, S = 0, latest = {}, passSum = 0, passK = 0;
+    rows.forEach(function (r) {
+      T += r.total || 0; E += r.errors || 0; S += r.skipped || 0;
+      var tt = r.total || 0;
+      if (tt > 0) { passSum += (r.passed || 0) / tt; passK++; }  // per-run ratio (matches chart)
+      var k = r.dag_id + "|" + r.task_id;
+      if (!latest[k] || String(r.created_at || "") > String(latest[k].created_at || "")) {
+        latest[k] = r;
+      }
+    });
+    var keys = Object.keys(latest), green = 0, uniq = 0;
+    keys.forEach(function (k) { if (latest[k].success) green++; uniq += latest[k].total || 0; });
+    var clamp = function (v) { return Math.max(0, Math.min(100, Math.round(v))); };
+    return [
+      // Pass rate = mean of each run's pass ratio -- the SAME formula as the chart's "avg
+      // pass rate", so one group reads identically on both (chart is the visible window, the
+      // radar is every run in view, so they can differ once the window no longer covers all).
+      { key: "pass", label: t("relPass"), value: passK ? clamp(passSum / passK * 100) : 100 },
+      { key: "robust", label: t("relRobust"), value: T ? clamp(100 - E / T * 100) : 100 },
+      { key: "fresh", label: t("relFresh"), value: keys.length ? clamp(green / keys.length * 100) : 100 },
+      { key: "stable", label: t("relStable"), value: uniq ? clamp(100 - flk.length / uniq * 100) : 100 },
+      { key: "complete", label: t("relComplete"), value: T ? clamp(100 - S / T * 100) : 100 },
+    ];
+  }
+  function pentagonSvg(axes) {
+    // Wide viewBox: labels live INSIDE it, so the whole radar scales as one unit and a long
+    // label never spills over the card edge on a small screen (it just shrinks with the rest).
+    var W = 460, H = 232, cx = W / 2, cy = H / 2 + 2, R = 90, n = axes.length;
+    var ang = function (i) { return (-90 + i * (360 / n)) * Math.PI / 180; };
+    var at = function (i, rr) { var a = ang(i); return [cx + rr * Math.cos(a), cy + rr * Math.sin(a)]; };
+    var ptsAt = function (rr) {
+      return axes.map(function (_, i) { var p = at(i, rr); return p[0].toFixed(1) + "," + p[1].toFixed(1); }).join(" ");
+    };
+    var rings = [0.25, 0.5, 0.75, 1].map(function (f) {
+      return '<polygon class="rel-grid" points="' + ptsAt(R * f) + '"/>';
+    }).join("");
+    var spokes = axes.map(function (_, i) {
+      var p = at(i, R);
+      return '<line class="rel-grid" x1="' + cx + '" y1="' + cy + '" x2="' + p[0].toFixed(1) + '" y2="' + p[1].toFixed(1) + '"/>';
+    }).join("");
+    var dataPts = axes.map(function (a, i) {
+      var p = at(i, R * (a.value / 100)); return p[0].toFixed(1) + "," + p[1].toFixed(1);
+    }).join(" ");
+    var dots = axes.map(function (a, i) {
+      var p = at(i, R * (a.value / 100));
+      return '<circle class="rel-dot" cx="' + p[0].toFixed(1) + '" cy="' + p[1].toFixed(1) + '" r="3"/>';
+    }).join("");
+    var labels = axes.map(function (a, i) {
+      var p = at(i, R + 14), c = Math.cos(ang(i)), s = Math.sin(ang(i));
+      var anchor = Math.abs(c) < 0.3 ? "middle" : (c > 0 ? "start" : "end");
+      var dy = s > 0.3 ? "0.9em" : (s < -0.3 ? "-0.3em" : "0.32em");
+      return '<text class="rel-lab" x="' + p[0].toFixed(1) + '" y="' + p[1].toFixed(1)
+        + '" text-anchor="' + anchor + '" dy="' + dy + '">' + esc(a.label)
+        + '<tspan class="rel-val" dx="4">' + a.value + "</tspan></text>";
+    }).join("");
+    var overall = Math.round(axes.reduce(function (s, a) { return s + a.value; }, 0) / n);
+    var center = '<text class="rel-score" x="' + cx + '" y="' + (cy - 1) + '" text-anchor="middle">' + overall + "</text>"
+      + '<text class="rel-score-cap" x="' + cx + '" y="' + (cy + 12) + '" text-anchor="middle">' + esc(t("relOverall")) + "</text>";
+    return '<svg viewBox="0 0 ' + W + " " + H + '" class="rel-svg" role="img" aria-label="' + esc(t("reliabilityTitle")) + '">'
+      + rings + spokes + '<polygon class="rel-area" points="' + dataPts + '"/>' + dots + center + labels + "</svg>";
+  }
+  function renderReliability() {
+    var el = document.getElementById("pentagon");
+    if (!el) return;
+    var selKeys = selKeySet();
+    var sc = document.getElementById("rel-scope");
+    if (sc) { sc.hidden = !selKeys; if (selKeys) sc.textContent = t("flkSelScope"); }
+    el.innerHTML = pentagonSvg(reliabilityAxes());
+  }
+  // "How the score is computed" popup: each axis with its live value + a plain-language
+  // definition (matches reliabilityAxes exactly), so the radar is self-explaining.
+  var relInfoDlg = document.getElementById("rel-info");
+  var REL_DESC = { pass: "relPassDesc", robust: "relRobustDesc", fresh: "relFreshDesc",
+    stable: "relStableDesc", complete: "relCompleteDesc" };
+  function openRelInfo() {
+    var body = document.getElementById("rel-info-body");
+    body.innerHTML = '<p class="rel-info-intro">' + esc(t("relInfoIntro")) + "</p>"
+      + '<ul class="rel-info-list">' + reliabilityAxes().map(function (a) {
+          return '<li><span class="ri-head"><span class="ri-name">' + esc(a.label) + "</span>"
+            + '<span class="ri-val">' + a.value + "</span></span>"
+            + '<span class="ri-desc">' + esc(t(REL_DESC[a.key])) + "</span></li>";
+        }).join("") + "</ul>";
+    if (typeof relInfoDlg.showModal === "function") { if (!relInfoDlg.open) relInfoDlg.showModal(); }
+    else relInfoDlg.setAttribute("open", "");
+    updateParentDim();
+  }
+  function closeRelInfo() { if (relInfoDlg.open) relInfoDlg.close(); else relInfoDlg.removeAttribute("open"); }
+  // Generic "about this panel" popup (a title + one paragraph from i18n) for the runs chart
+  // and the flaky panel.
+  var panelInfoDlg = document.getElementById("panel-info");
+  function openPanelInfo(titleKey, bodyKey) {
+    document.getElementById("panel-info-title").textContent = t(titleKey);
+    document.getElementById("panel-info-body").innerHTML = "<p>" + esc(t(bodyKey)) + "</p>";
+    if (typeof panelInfoDlg.showModal === "function") { if (!panelInfoDlg.open) panelInfoDlg.showModal(); }
+    else panelInfoDlg.setAttribute("open", "");
+    updateParentDim();
+  }
+  function closePanelInfo() { if (panelInfoDlg.open) panelInfoDlg.close(); else panelInfoDlg.removeAttribute("open"); }
+  (function () {
+    var b = document.getElementById("rel-info-btn");
+    if (b) b.addEventListener("click", openRelInfo);
+    var c = document.getElementById("rel-info-close");
+    if (c) c.addEventListener("click", closeRelInfo);
+    if (relInfoDlg) { relInfoDlg.addEventListener("close", updateParentDim); closeOnBackdrop(relInfoDlg, closeRelInfo); }
+    var ci = document.getElementById("chart-info");
+    if (ci) ci.addEventListener("click", function () { openPanelInfo("chartInfoTitle", "chartInfoBody"); });
+    var fi = document.getElementById("flaky-info");
+    if (fi) fi.addEventListener("click", function () { openPanelInfo("flakyInfoTitle", "flakyInfoBody"); });
+    var pc = document.getElementById("panel-info-close");
+    if (pc) pc.addEventListener("click", closePanelInfo);
+    if (panelInfoDlg) { panelInfoDlg.addEventListener("close", updateParentDim); closeOnBackdrop(panelInfoDlg, closePanelInfo); }
+  })();
   // Duration-regression scan honouring the top dag/task/run filters (like the other
   // KPIs): feeds the "Slowdowns" count and primes the modal so its first open is instant.
   function slowQuery(win) {
@@ -2316,11 +2823,21 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       out += '<button type="button" class="af-link" id="cmp-prev" data-i18n-al="comparePrevAl">'
         + cmp + esc(t("comparePrev")) + "</button>";
     }
-    var zap = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"'
+    // Only offer "Flaky tests" when this dag·task actually has flaky ones (same 30-run window
+    // the modal uses), so the button never opens an empty list.
+    if (flkCountByKey[JSON.stringify([m.dag_id, m.task_id])] > 0) {
+      var zap = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"'
+        + ' stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+        + '<path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z"/></svg>';
+      out += '<button type="button" class="af-link" id="flk-btn" data-i18n-al="flakyBtnAl">'
+        + zap + esc(t("flakyBtn")) + "</button>";
+    }
+    var grid = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"'
       + ' stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
-      + '<path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z"/></svg>';
-    out += '<button type="button" class="af-link" id="flk-btn" data-i18n-al="flakyBtnAl">'
-      + zap + esc(t("flakyBtn")) + "</button>";
+      + '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/>'
+      + '<rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>';
+    out += '<button type="button" class="af-link" id="hm-btn" data-i18n-al="heatmapBtnAl">'
+      + grid + esc(t("heatmapBtn")) + "</button>";
     if ((m.failed || 0) + (m.errors || 0) > 0) {
       var lst = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"'
         + ' stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
@@ -2586,6 +3103,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     if (cmpBtn && prev && rec) cmpBtn.addEventListener("click", function () { openCompare(prev, rec); });
     var flkBtn = document.getElementById("flk-btn");
     if (flkBtn) flkBtn.addEventListener("click", function () { openFlaky(m.dag_id, m.task_id); });
+    var hmBtn = document.getElementById("hm-btn");
+    if (hmBtn) hmBtn.addEventListener("click", function () { openHeatmap(m.dag_id, m.task_id); });
     // Per-run error clusters: a clear toolbar button opens the clusters modal scoped to
     // this run; a cluster's test jumps to its history.
     var clBtn = document.getElementById("cl-btn");
@@ -2664,7 +3183,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     return a.i - b.i;
   }
 
-  function openDetail(id) {
+  function openDetail(id, focusNode) {
     filter = "all"; currentId = id;
     caseQuery = ""; caseGroup = false; caseCollapsed = {};
     caseSort = { key: "time", dir: "desc" };
@@ -2678,10 +3197,28 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     setReportParam(id);
     fetch(API + "reports/" + encodeURIComponent(id))
       .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
-      .then(function (d) { detail = d; detail.cases = d.cases || []; renderDetail(); })
+      .then(function (d) {
+        detail = d; detail.cases = d.cases || []; renderDetail();
+        if (focusNode) focusCaseRow(focusNode);  // jump to + expand a specific test
+      })
       .catch(function (e) {
         dBody.innerHTML = '<div class="state c-fail">' + esc(t("reportFail") + e.message) + "</div>";
       });
+  }
+  // Scroll the case table to a node, expand its output, and flash it (used when a heatmap
+  // cell opens the run). The detail opened with filter=all + no grouping, so the row exists.
+  function focusCaseRow(node) {
+    var labels = dBody.querySelectorAll(".case-table tr.case .case-node");
+    for (var i = 0; i < labels.length; i++) {
+      if (labels[i].textContent === node) {
+        var tr = labels[i].closest("tr.case");
+        if (tr.getAttribute("aria-expanded") !== "true") tr.click();  // expand via its toggle
+        tr.scrollIntoView({ block: "center" });
+        tr.classList.add("case-focus");
+        setTimeout(function () { tr.classList.remove("case-focus"); }, 1600);
+        return;
+      }
+    }
   }
 
   // Deep-link rides the Airflow parent URL when embedded (the iframe's bare path
@@ -2725,7 +3262,14 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       return e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom;
     };
     d.addEventListener("mousedown", function (e) { startedOutside = e.target === d && outside(e); });
-    d.addEventListener("click", function (e) { if (startedOutside && outside(e)) closeFn(); });
+    d.addEventListener("click", function (e) {
+      // Only a genuine backdrop click closes: the target must BE the dialog element (the
+      // backdrop), not a bubbled click from inner content. Without `e.target === d`, a
+      // synthetic inner click (e.g. focusCaseRow's tr.click(), coords 0,0 -> reads as
+      // "outside") would dismiss a just-opened dialog. Reset the flag so it never goes stale.
+      if (startedOutside && e.target === d && outside(e)) closeFn();
+      startedOutside = false;
+    });
   }
 
   // Dim the WHOLE Airflow window (nav included) behind a modal, like Airflow's
@@ -2755,11 +3299,33 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       }
     } catch (e) { /* cross-origin parent: skip */ }
   }
+  // A single full-screen dim inside OUR document (standalone page, or the iframe when
+  // embedded). One overlay no matter how many dialogs stack -- popups opened from inside the
+  // run detail never add a second layer of darkening. Dialogs (top layer) render above it.
+  function setLocalDim(on) {
+    var ID = "apx-local-dim";
+    var ov = document.getElementById(ID);
+    if (on) {
+      if (!ov) {
+        ov = document.createElement("div");
+        ov.id = ID;
+        ov.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.5);"
+          + "z-index:1000;pointer-events:none;";
+        document.body.appendChild(ov);
+      }
+    } else if (ov && ov.parentNode) {
+      ov.parentNode.removeChild(ov);
+    }
+  }
   function updateParentDim() {
-    setParentDim((dlg && dlg.open) || (confirmDlg && confirmDlg.open)
+    var anyOpen = (dlg && dlg.open) || (confirmDlg && confirmDlg.open)
       || (failuresDlg && failuresDlg.open) || (compareDlg && compareDlg.open)
       || (flakyDlg && flakyDlg.open) || (historyDlg && historyDlg.open)
-      || (uniqueDlg && uniqueDlg.open) || (slowDlg && slowDlg.open));
+      || (uniqueDlg && uniqueDlg.open) || (slowDlg && slowDlg.open)
+      || (heatmapDlg && heatmapDlg.open) || (relInfoDlg && relInfoDlg.open)
+      || (panelInfoDlg && panelInfoDlg.open);
+    setLocalDim(anyOpen);   // dim our own page/iframe once
+    setParentDim(anyOpen);  // and (embedded) the Airflow chrome around the iframe
   }
 
   // Copy a deep-link to this report.
@@ -3046,8 +3612,9 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       : '<div class="state">' + esc(t("noCases")) + "</div>";
     listEl.querySelectorAll(".uq-row").forEach(function (row) {
       var open = function () {
-        openHistory(row.getAttribute("data-dag"), row.getAttribute("data-task"),
-          row.getAttribute("data-node"));
+        // Merge across every dag·task this node id ran in -- matches the aggregated count
+        // shown on the row (the same test triggered from two places is one timeline).
+        openHistory(null, null, row.getAttribute("data-node"));
       };
       row.addEventListener("click", open);
       row.addEventListener("keydown", function (e) {
@@ -3175,7 +3742,9 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     listEl.innerHTML = rows.map(function (f) {
       return '<div class="fk-row"><span class="ostrip">'
         + (f.recent || []).map(outcomeDot).join("") + "</span>"
-        + '<span class="node mono">' + esc(f.node_id) + quarantineBadge(f) + "</span>"
+        + '<span class="fk-main"><span class="node mono">' + esc(f.node_id) + "</span>"
+        + (f.quarantined ? '<span class="fk-sub">' + quarantineBadge(f) + "</span>" : "")
+        + "</span>"
         + '<span class="fk-meta">' + flakyMeta(f) + "</span></div>";
     }).join("");
   }
@@ -3277,7 +3846,12 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     else historyDlg.setAttribute("open", "");
     updateParentDim();
     histBody.innerHTML = '<div class="state"><div class="skeleton" style="width:40%;margin:0 auto"></div></div>';
-    var q = new URLSearchParams({ dag_id: dag, task_id: task, node_id: node });
+    // dag/task omitted (Unique tests) -> the server merges this node id across every place
+    // it ran; given -> just that dag·task's runs.
+    var params = { node_id: node };
+    if (dag) params.dag_id = dag;
+    if (task) params.task_id = task;
+    var q = new URLSearchParams(params);
     fetch(API + "test-history?" + q.toString())
       .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
       .then(renderHistory)
@@ -3290,17 +3864,243 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     var rows = d.history || [];
     var head = '<div class="hist-node mono">' + esc(d.node_id) + "</div>";
     if (!rows.length) { histBody.innerHTML = head + '<div class="state">' + esc(t("noHistory")) + "</div>"; return; }
+    // Make the (capped) window explicit: the timeline shows only the newest N runs.
+    head += '<div class="hist-count">' + esc(t("histCount").replace("{n}", rows.length)) + "</div>";
     histBody.innerHTML = head + rows.map(function (h) {
       var label = h.outcome ? outcomeLabel(h.outcome) : t("histDidntRun");
       var dur = h.duration != null ? fmtDur(h.duration) : "";
+      // Merged history (opened from Unique tests) tags each run with its dag·task so it's
+      // clear the same test ran from more than one place.
+      var loc = h.dag_id ? ' · <span class="hist-loc">' + esc(h.dag_id + "·" + h.task_id)
+        + "</span>" : "";
       return '<div class="hist-row">' + outcomeDot(h.outcome)
-        + '<span class="when">' + esc(label) + " · " + esc(fmtTime(h.created_at)) + "</span>"
+        + '<span class="when">' + esc(label) + " · " + esc(fmtTime(h.created_at)) + loc + "</span>"
         + '<span class="dur">' + esc(dur) + "</span></div>";
     }).join("");
   }
   document.getElementById("hist-close").addEventListener("click", closeHistory);
   historyDlg.addEventListener("close", updateParentDim);
   closeOnBackdrop(historyDlg, closeHistory);
+
+  // Test×run heatmap: a per-dag·task matrix (rows = tests sorted most-broken first,
+  // columns = recent runs old→new, cell = outcome) so flaky rows, regression blocks and
+  // a build-breaking run read at a glance. A FIXED test-name column + a drag/scroll cell
+  // carousel (like the runs chart) -- cells slide under the names, never over. Same window
+  // selector as flaky/slow; hover shows the plugin's tooltip; click a cell to open that
+  // run, a test name to open its history. Delegated handlers + closure data (no per-cell
+  // listeners) keep it light at the row/column caps.
+  var heatmapDlg = document.getElementById("heatmap");
+  var hmBody = document.getElementById("hm-body");
+  var hmState = { dag: null, task: null, window: 30 };
+  var hmData = null;  // last rendered {runs, tests}; read by the delegated tooltip + clicks
+  var hmSeq = 0;      // guards against a stale window's response overwriting a newer one
+  var hmSel = { p: true, f: true, e: true, s: true };  // legend focus (mirrors chartSel)
+  var HM_COLOR = { p: "--pass", f: "--fail", e: "--error", s: "--skip" };
+  function hmOutcome(code) {
+    return { p: "passed", f: "failed", e: "error", s: "skipped" }[code] || "";
+  }
+  function hmAllOn() { return hmSel.p && hmSel.f && hmSel.e && hmSel.s; }
+  function applyHmFocus() {
+    // Drive the dimming from container classes (no per-cell work, fine at the caps).
+    var cellsEl = document.querySelector("#hm-grid .hm-cells");
+    if (!cellsEl) return;
+    var on = !hmAllOn();
+    cellsEl.classList.toggle("foc", on);
+    ["p", "f", "e", "s"].forEach(function (k) { cellsEl.classList.toggle("foc-" + k, on && hmSel[k]); });
+  }
+  function renderHmLegend() {
+    var el = document.getElementById("hm-legend");
+    if (!el) return;
+    el.innerHTML = ["p", "f", "e", "s"].map(function (k) {
+        return '<button type="button" class="hm-lg' + (hmSel[k] ? "" : " off")
+          + '" data-o="' + k + '" aria-pressed="' + !!hmSel[k] + '">'
+          + '<span class="hm-cell" style="background:var(' + HM_COLOR[k] + ')"></span>'
+          + esc(outcomeLabel(hmOutcome(k))) + "</button>";
+      }).join("")
+      + '<span class="hm-lg"><span class="hm-cell hm-miss"></span>' + esc(t("histDidntRun")) + "</span>"
+      + (hmAllOn() ? "" : '<button type="button" class="hm-reset">' + esc(t("legendReset")) + "</button>");
+    el.querySelectorAll("button.hm-lg").forEach(function (b) {
+      b.addEventListener("click", function () {
+        // Same "focus" model as the runs-chart legend: click shows only that status;
+        // click more to add/remove; emptying falls back to all-shown.
+        var s = b.getAttribute("data-o");
+        if (hmAllOn()) { ["p", "f", "e", "s"].forEach(function (k) { hmSel[k] = k === s; }); }
+        else {
+          hmSel[s] = !hmSel[s];
+          if (!hmSel.p && !hmSel.f && !hmSel.e && !hmSel.s) hmSel.p = hmSel.f = hmSel.e = hmSel.s = true;
+        }
+        renderHmLegend(); applyHmFocus();
+      });
+    });
+    var rst = el.querySelector(".hm-reset");
+    if (rst) rst.addEventListener("click", function () {
+      hmSel.p = hmSel.f = hmSel.e = hmSel.s = true; renderHmLegend(); applyHmFocus();
+    });
+  }
+  function hmShort(node) {
+    // Drop the file path, keep class::test (the informative tail); full id is in the tooltip.
+    var i = node.indexOf("::");
+    return i >= 0 ? node.slice(i + 2) : node;
+  }
+  function findRun(dag, task, run) {
+    var best = null;  // newest try of this dag·task·run, to open its detail on click
+    allReports.forEach(function (x) {
+      if (x.dag_id === dag && x.task_id === task && x.run_id === run
+          && (!best || (x.try_number || 0) > (best.try_number || 0))) best = x;
+    });
+    return best;
+  }
+  // The heatmap's own drag-to-pan -- deliberately NOT the chart's, whose `chartDragged`
+  // resets on a setTimeout that fires after `click`, so a slightly-draggy cell click would
+  // be swallowed. `hmDragMoved` is read synchronously by the click handler and reset on the
+  // next pointerdown, so a real pan is suppressed but an ordinary click always lands.
+  var hmDrag = null, hmDragMoved = 0;
+  function enableHmDrag(el) {
+    el.addEventListener("pointerdown", function (e) {
+      if (e.pointerType === "touch") return;  // touch/trackpad use native scroll
+      hmDrag = { el: el, x: e.clientX, left: el.scrollLeft };
+      el.classList.add("dragging");
+    });
+  }
+  function hmDragMove(e) {
+    if (!hmDrag) return;
+    var dx = e.clientX - hmDrag.x;
+    if (Math.abs(dx) > hmDragMoved) hmDragMoved = Math.abs(dx);
+    hmDrag.el.scrollLeft = hmDrag.left - dx;
+  }
+  function hmDragEnd() {
+    if (!hmDrag) return;
+    hmDrag.el.classList.remove("dragging");
+    hmDrag = null;  // hmDragMoved persists until the next pointerdown so click() can read it
+  }
+  function hmCellTip(cell, ev) {
+    if (!hmData) return;
+    var r = +cell.getAttribute("data-r"), c = +cell.getAttribute("data-c");
+    var tt = hmData.tests[r], run = hmData.runs[c] || {};
+    if (!tt) return;
+    var code = tt.cells[c], col = HM_COLOR[code] || "--muted";
+    var label = code === "-" ? t("histDidntRun") : outcomeLabel(hmOutcome(code));
+    tipShow(
+      '<div class="tt">' + esc(hmShort(tt.node_id)) + "</div>"
+      + '<div class="tm wrap">' + esc(tt.node_id) + "</div>"
+      + '<div class="tm">#' + (c + 1)
+        + (run.created_at ? " · " + esc(fmtTime(run.created_at)) : "") + "</div>"
+      + '<div class="tr"><span><i style="background:var(' + col + ')"></i>'
+        + esc(label) + "</span></div>",
+      ev,
+    );
+  }
+  function openHeatmap(dag, task) {
+    hmState.dag = dag; hmState.task = task; hmState.window = 30;
+    hmSel.p = hmSel.f = hmSel.e = hmSel.s = true;  // reset the legend focus per open
+    // Inset (narrower than the run dialog) when opened from inside a run; wide otherwise.
+    var det = document.getElementById("detail");
+    heatmapDlg.classList.toggle("hm-inset", !!(det && det.open));
+    if (typeof heatmapDlg.showModal === "function") { if (!heatmapDlg.open) heatmapDlg.showModal(); }
+    else heatmapDlg.setAttribute("open", "");
+    updateParentDim();
+    var title = document.getElementById("hm-title");
+    if (title) title.textContent = t("heatmapTitle") + " · " + dag + "·" + task;
+    hmBody.innerHTML = '<div class="flk-ctrls"><label title="' + esc(t("flkWindowTip")) + '">'
+      + esc(t("flkWindow")) + ' <select id="hm-win">'
+      + FLK_WINDOWS.map(function (w) {
+          return '<option value="' + w + '"' + (w === hmState.window ? " selected" : "") + ">"
+            + esc(t("flkWinOpt").replace("{n}", w)) + "</option>";
+        }).join("")
+      + "</select></label></div>"
+      + '<div class="hm-legend" id="hm-legend"></div>'  // legend on top: visible without scrolling
+      + '<div id="hm-grid"></div>';
+    document.getElementById("hm-win").addEventListener("change", function () {
+      hmState.window = +this.value; loadHeatmap();
+    });
+    var grid = document.getElementById("hm-grid");
+    grid.addEventListener("pointerdown", function () { hmDragMoved = 0; });  // fresh per gesture
+    grid.addEventListener("click", function (e) {
+      if (hmDragMoved > 6) return;  // a real pan shouldn't open anything; a click always does
+      var name = e.target.closest(".hm-name");
+      if (name) { closeHeatmap(); openHistory(hmState.dag, hmState.task, name.getAttribute("data-node")); return; }
+      var cell = e.target.closest(".hm-cell");
+      if (cell && cell.hasAttribute("data-c") && !cell.classList.contains("hm-miss") && hmData) {
+        var run = hmData.runs[+cell.getAttribute("data-c")];
+        var tt = hmData.tests[+cell.getAttribute("data-r")];
+        var rec = run && findRun(hmState.dag, hmState.task, run.run_id);
+        if (rec) { closeHeatmap(); openDetail(rec.id, tt && tt.node_id); }  // jump to that test
+      }
+    });
+    grid.addEventListener("mouseover", function (e) {
+      var cell = e.target.closest(".hm-cell");
+      if (cell && cell.hasAttribute("data-r")) hmCellTip(cell, e);  // instant, no hover delay
+    });
+    grid.addEventListener("mousemove", function (e) {
+      if (tipEl && tipEl.style.display === "block") tipMove(e);
+    });
+    grid.addEventListener("mouseout", function (e) {
+      if (e.target.closest(".hm-cell")) tipHide();
+    });
+    loadHeatmap();
+  }
+  function loadHeatmap() {
+    var gridEl = document.getElementById("hm-grid");
+    if (gridEl) gridEl.innerHTML = '<div class="state"><div class="skeleton" style="width:40%;margin:0 auto"></div></div>';
+    var q = new URLSearchParams({
+      dag_id: hmState.dag, task_id: hmState.task, window: String(hmState.window),
+    });
+    var my = ++hmSeq;
+    fetch(API + "heatmap?" + q.toString())
+      .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+      .then(function (d) { if (my !== hmSeq) return; renderHeatmap(d); })
+      .catch(function (e) {
+        if (my !== hmSeq) return;
+        var el = document.getElementById("hm-grid");
+        if (el) el.innerHTML = '<div class="state c-fail">' + esc(t("heatmapFail") + e.message) + "</div>";
+      });
+  }
+  function renderHeatmap(d) {
+    var gridEl = document.getElementById("hm-grid");
+    if (!gridEl) return;
+    hmData = d;
+    var runs = d.runs || [], tests = d.tests || [], n = runs.length;
+    if (!tests.length) { gridEl.innerHTML = '<div class="state">' + esc(t("heatmapEmpty")) + "</div>"; return; }
+    // Fixed column of test names (short, readable; full id on hover) -- the corner spacer
+    // matches the run-header row height so rows line up with the scrolling pane.
+    var names = '<div class="hm-corner"></div>' + tests.map(function (tt) {
+      return '<button type="button" class="hm-name" data-node="' + esc(tt.node_id)
+        + '" title="' + esc(tt.node_id) + '"><span>' + esc(hmShort(tt.node_id)) + "</span></button>";
+    }).join("");
+    // Scrolling pane: a run-number header row, then one row of cells per test.
+    // Shrink the header font when the largest label has more digits, so e.g. "#100" or
+    // "#1000" stays inside its cell instead of spilling over its neighbour.
+    var digits = String(n).length;
+    var rheadFs = digits <= 2 ? 9 : digits === 3 ? 8 : 6;
+    var head = "";
+    for (var c = 0; c < n; c++) {
+      var show = (c % 5 === 0) || (c === n - 1);  // label every 5th run + the last
+      head += '<div class="hm-rhead">' + (show ? "#" + (c + 1) : "") + "</div>";
+    }
+    var cells = tests.map(function (tt, r) {
+      return (tt.cells || []).map(function (code, c) {
+        var miss = code === "-";
+        var bg = miss ? "" : ' style="background:var(' + (HM_COLOR[code] || "--muted") + ')"';
+        return '<span class="hm-cell' + (miss ? " hm-miss" : "") + '" data-o="' + code
+          + '" data-r="' + r + '" data-c="' + c + '"' + bg + "></span>";
+      }).join("");
+    }).join("");
+    var note = d.truncated
+      ? '<div class="hm-note">' + esc(t("heatmapTrunc").replace("{m}", tests.length).replace("{n}", d.total_tests)) + "</div>"
+      : "";
+    var cols = "grid-template-columns:repeat(" + n + ", var(--hm-cell))";
+    gridEl.innerHTML = '<div class="hm-wrap"><div class="hm-names">' + names + "</div>"
+      + '<div class="hm-scroll">'
+      + '<div class="hm-headrow" style="--hm-rhead-fs:' + rheadFs + "px;" + cols + '">' + head + "</div>"
+      + '<div class="hm-cells" style="' + cols + '">' + cells + "</div>"
+      + "</div></div>" + note;
+    enableHmDrag(gridEl.querySelector(".hm-scroll"));  // heatmap-local drag-to-pan
+    renderHmLegend(); applyHmFocus();  // clickable status focus, like the chart legend
+  }
+  function closeHeatmap() { if (heatmapDlg.open) heatmapDlg.close(); else heatmapDlg.removeAttribute("open"); }
+  document.getElementById("hm-close").addEventListener("click", closeHeatmap);
+  heatmapDlg.addEventListener("close", updateParentDim);
+  closeOnBackdrop(heatmapDlg, closeHeatmap);
 
   document.getElementById("refresh").addEventListener("click", load);
   // Links menu: GitHub + the FastAPI docs. Airflow's iframe sandbox blocks _blank
@@ -3335,6 +4135,9 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   document.addEventListener("pointermove", chartDragMove);
   document.addEventListener("pointerup", chartDragEnd);
   document.addEventListener("pointercancel", chartDragEnd);
+  document.addEventListener("pointermove", hmDragMove);
+  document.addEventListener("pointerup", hmDragEnd);
+  document.addEventListener("pointercancel", hmDragEnd);
   // Debounce the top filters: each keystroke otherwise re-renders the whole page
   // (chart + list + KPIs + flaky) -- costly on large datasets. Call with no arg so it
   // resets to page 1 / newest (binding the listener directly passes the Event as the

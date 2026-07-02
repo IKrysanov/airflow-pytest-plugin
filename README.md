@@ -89,6 +89,15 @@ execution time (slowest first) so the heaviest tests surface immediately.
 
 ![Pytest Reports — slow tests & regressions](https://raw.githubusercontent.com/IKrysanov/airflow-pytest-plugin/main/docs/screenshots/slow.png)
 
+**Test×run heatmap** — the *Heatmap* button on a dag·task group (or a run's toolbar)
+opens a matrix of **tests (rows) × recent runs (columns)**, each cell coloured by that
+test's outcome (`did not run` is an empty dashed cell). Flaky tests read as alternating
+rows, a regression as a block of failures filling in on the right, and a run that broke
+the build as a red/error **column** — all at a glance. Rows sort most-broken first; click
+a cell to open that run, or a test name to open its history.
+
+![Pytest Reports — test×run heatmap](https://raw.githubusercontent.com/IKrysanov/airflow-pytest-plugin/main/docs/screenshots/heatmap.png)
+
 **Unique tests & failures** — the *Unique tests* KPI opens the searchable,
 paginated catalogue of every distinct test (each with its runs / pass-fail-error-skip
 counts / average time); the *Failures* KPI shows what's broken **now** — failures in each
@@ -208,6 +217,7 @@ runtime. Endpoints (relative to the mount):
 | `GET /api/compare?base=&head=` | per-test diff between two runs (newly failed / fixed / …) |
 | `GET /api/flaky?dag_id=&task_id=&window=` | flaky tests with score, trend, and a quarantine flag |
 | `GET /api/slow?dag_id=&task_id=&window=` | duration regressions (tests whose execution time got slower) + the slowest tests by average |
+| `GET /api/heatmap?dag_id=&task_id=&window=` | test×run outcome matrix for one dag·task (rows = tests sorted most-broken first, cells = `p`/`f`/`e`/`s`/`-` aligned to recent runs) |
 | `GET /api/test-history?dag_id=&task_id=&node_id=&limit=` | one test's outcome per run |
 | `GET /api/unique-tests?dag_id=&task_id=&run_id=&full=` | distinct test count (+ when `full`, each test's runs / passed / failed / errors / skipped / avg duration) |
 | `DELETE /api/reports/{report_id}` | delete a report (RBAC-gated) |

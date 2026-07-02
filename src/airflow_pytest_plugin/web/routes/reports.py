@@ -42,6 +42,15 @@ _SLOW_TOP = 50
 #: skipped once exceeded; ``capped`` flags it), so a broad scan can't read every archive.
 _SLOW_SCAN_CAP = 2000
 
+#: /api/heatmap bounds: at most this many recent runs (columns) and tests (rows) per
+#: request, so one dag·task's matrix can't blow up the payload or the read.
+_HEATMAP_MAX_WINDOW = 100
+_HEATMAP_MAX_ROWS = 300
+
+#: Compact single-char cell codes for the heatmap (missing run -> "-").
+_OUTCOME_CODE = {"passed": "p", "failed": "f", "error": "e", "skipped": "s"}
+_FAIL_CODES = ("f", "e")
+
 # -- OpenAPI examples (illustrative; Swagger shows these instead of a bare "string") --
 _EX_SUMMARY = {
     "id": "ZXRsX2RhaWx5fHNjaGVkdWxlZF8yMDI2LTA2LTEwfHVuaXRfdGVzdHN8MXwtMQ",
@@ -170,6 +179,50 @@ def slow_stats(
         "new_avg": round(new_avg, 3) if new_avg is not None else None,
         "ratio": ratio,
         "regressed": regressed,
+    }
+
+
+def build_heatmap(
+    runs: list[dict[str, Any]], *, max_rows: int = _HEATMAP_MAX_ROWS
+) -> dict[str, Any]:
+    """Build a test×run outcome matrix (pure) from a dag·task's runs (oldest→newest).
+
+    ``runs`` items are ``{"run_id", "created_at", "outcomes": {node_id: outcome}}``. Returns
+    one row per distinct test — a ``cells`` list of single-char codes aligned to ``runs``
+    (``-`` where the test didn't run) — sorted most-broken first (fail+error count, then
+    flakiness/flips), capped at ``max_rows`` (``truncated`` flags it). The most-failing and
+    flakiest tests bubble to the top so a regression block or a flaky row is seen at a glance.
+    """
+    n = len(runs)
+    rows: dict[str, list[str]] = {}
+    for ci, r in enumerate(runs):
+        for node, outcome in (r.get("outcomes") or {}).items():
+            row = rows.setdefault(node, ["-"] * n)
+            row[ci] = _OUTCOME_CODE.get(str(outcome), "?")
+
+    def rank(codes: list[str]) -> tuple[int, int]:
+        bad = sum(1 for c in codes if c in _FAIL_CODES)
+        present = [c for c in codes if c != "-"]
+        flips = sum(
+            1
+            for a, b in zip(present, present[1:], strict=False)
+            if (a in _FAIL_CODES) != (b in _FAIL_CODES)
+        )
+        return (bad, flips)
+
+    ranked = {node: rank(codes) for node, codes in rows.items()}
+    ordered = sorted(
+        rows.items(), key=lambda kv: (-ranked[kv[0]][0], -ranked[kv[0]][1], kv[0])
+    )
+    truncated = len(ordered) > max_rows
+    tests = [{"node_id": node, "cells": cells} for node, cells in ordered[:max_rows]]
+    return {
+        "runs": [
+            {"run_id": r["run_id"], "created_at": r.get("created_at")} for r in runs
+        ],
+        "tests": tests,
+        "total_tests": len(rows),
+        "truncated": truncated,
     }
 
 
@@ -325,6 +378,77 @@ def build_router(deps: RouteDeps) -> APIRouter:
         )
 
     @router.get(
+        "/api/heatmap",
+        summary="Test×run outcome matrix",
+        responses={
+            **ok(
+                {
+                    "dag_id": "api_gateway",
+                    "task_id": "integration_tests",
+                    "window": 30,
+                    "runs": [
+                        {
+                            "run_id": "scheduled__2026-06-20",
+                            "created_at": "2026-06-20T07:00:00+00:00",
+                        }
+                    ],
+                    "tests": [
+                        {
+                            "node_id": "tests/api.py::test_auth",
+                            "cells": ["p", "f", "-", "e"],
+                        }
+                    ],
+                    "total_tests": 1,
+                    "truncated": False,
+                }
+            ),
+            **ERR_403,
+        },
+    )
+    def heatmap(
+        dag_id: str,
+        task_id: str,
+        window: int | None = None,
+        user: Any = Depends(user_dep),  # noqa: B008 - FastAPI dependency idiom
+    ) -> JSONResponse:
+        """A test×run outcome matrix for one dag·task: rows = tests, columns = its recent
+        runs (oldest→newest), each cell the test's outcome (``p``/``f``/``e``/``s``; ``-`` =
+        didn't run that time). Rows are sorted most-broken first (fail+error count, then
+        flakiness) so regression blocks and flaky tests surface at the top. ``window``
+        defaults to the flaky window (clamped 2–``100``); rows are capped at ``300``
+        (``truncated`` flags it). ``403`` if the dag isn't readable.
+        """
+        if not read_auth(dag_id, user):
+            raise HTTPException(
+                status_code=403, detail="not authorized to read this dag"
+            )
+        chosen = window if window is not None else get_flaky_window()
+        win = max(2, min(chosen, _HEATMAP_MAX_WINDOW))
+        runs = [
+            s
+            for s in src.list_summaries(dag_id=dag_id)
+            if s.ref.dag_id == dag_id and s.ref.task_id == task_id
+        ]
+        runs.sort(key=lambda s: s.created_at or "", reverse=True)
+        runs = runs[:win]
+        runs.reverse()  # oldest -> newest, so columns read left (old) to right (new)
+        rdata = [
+            {
+                "run_id": s.ref.run_id,
+                "created_at": s.created_at,
+                "outcomes": {
+                    node: info["outcome"]
+                    for node, info in (src.test_outcomes(s.ref) or {}).items()
+                },
+            }
+            for s in runs
+        ]
+        body = build_heatmap(rdata, max_rows=_HEATMAP_MAX_ROWS)
+        return JSONResponse(
+            {"dag_id": dag_id, "task_id": task_id, "window": win, **body}
+        )
+
+    @router.get(
         "/api/reports/{report_id}",
         summary="Get a run",
         responses={
@@ -446,47 +570,88 @@ def build_router(deps: RouteDeps) -> APIRouter:
         },
     )
     def test_history(
-        dag_id: str,
-        task_id: str,
         node_id: str,
+        dag_id: str | None = None,
+        task_id: str | None = None,
         limit: int = 50,
         user: Any = Depends(user_dep),  # noqa: B008 - FastAPI dependency idiom
     ) -> JSONResponse:
-        """One test's outcome and duration across the runs of an exact dag·task.
+        """One test's outcome and duration across runs.
 
-        ``node_id`` is the pytest node id (``file::Class::test``). Returns the
-        newest ``limit`` runs (clamped 1–500), each with the test's outcome and
-        duration (``null`` if it didn't run that time). ``403`` if the dag isn't
-        readable.
+        ``node_id`` is the pytest node id (``file::Class::test``). With both
+        ``dag_id`` and ``task_id`` given, returns the newest ``limit`` runs of that
+        EXACT dag·task (``null`` outcome when the test didn't run that time).
+
+        With dag·task omitted (the *Unique tests* view), the history is MERGED across
+        every readable dag·task where this node id ran — the same test triggered from
+        two places shows a single, unified timeline. Each entry then also carries the
+        ``dag_id``/``task_id`` it came from. Newest ``limit`` runs (clamped 1–500).
         """
-        if not read_auth(dag_id, user):
-            raise HTTPException(
-                status_code=403, detail="not authorized to read this dag"
-            )
         lim = max(1, min(limit, 500))
-        runs = [
-            s
-            for s in src.list_summaries(dag_id=dag_id)
-            if s.ref.dag_id == dag_id and s.ref.task_id == task_id
-        ]
-        runs.sort(key=lambda s: s.created_at or "", reverse=True)
         history: list[dict[str, Any]] = []
-        for s in runs[:lim]:
+
+        if dag_id is not None and task_id is not None:
+            if not read_auth(dag_id, user):
+                raise HTTPException(
+                    status_code=403, detail="not authorized to read this dag"
+                )
+            runs = [
+                s
+                for s in src.list_summaries(dag_id=dag_id)
+                if s.ref.dag_id == dag_id and s.ref.task_id == task_id
+            ]
+            runs.sort(key=lambda s: s.created_at or "", reverse=True)
+            for s in runs[:lim]:
+                info = (src.test_outcomes(s.ref) or {}).get(node_id)
+                history.append(
+                    {
+                        "run_id": s.ref.run_id,
+                        "created_at": s.created_at,
+                        "outcome": info["outcome"] if info else None,
+                        "duration": info["duration"] if info else None,
+                    }
+                )
+            return JSONResponse(
+                {
+                    "node_id": node_id,
+                    "dag_id": dag_id,
+                    "task_id": task_id,
+                    "history": history,
+                }
+            )
+
+        # Merged: newest runs across ALL readable dag·tasks where this node id ran.
+        scanned = 0
+        capped = False
+        for s in src.list_summaries():  # newest first, every dag
+            if not read_auth(s.ref.dag_id, user):
+                continue
+            if scanned >= _UNIQUE_SCAN_CAP:
+                capped = True
+                break
+            scanned += 1
             info = (src.test_outcomes(s.ref) or {}).get(node_id)
+            if info is None:
+                continue  # this test didn't run in this run
             history.append(
                 {
                     "run_id": s.ref.run_id,
                     "created_at": s.created_at,
-                    "outcome": info["outcome"] if info else None,
-                    "duration": info["duration"] if info else None,
+                    "outcome": info.get("outcome"),
+                    "duration": info.get("duration"),
+                    "dag_id": s.ref.dag_id,
+                    "task_id": s.ref.task_id,
                 }
             )
+            if len(history) >= lim:
+                break
         return JSONResponse(
             {
                 "node_id": node_id,
-                "dag_id": dag_id,
-                "task_id": task_id,
+                "dag_id": None,
+                "task_id": None,
                 "history": history,
+                "capped": capped,
             }
         )
 

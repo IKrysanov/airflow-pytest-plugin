@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-02
+
+### Added
+- **Test×run heatmap** — a per-dag·task matrix (rows = tests, columns = recent runs, cells
+  coloured by outcome) that surfaces flaky rows, regression blocks and build-breaking runs at
+  a glance. Fixed name column + drag/scroll cell carousel; rows sort most-broken first; legend
+  is a status focus filter. Opens from each group header and a run's toolbar; a cell opens that
+  run and jumps to the test, a name opens its history. Backed by **`GET /api/heatmap`** (compact
+  cell codes, RBAC-filtered, window 2–100, rows capped 300).
+- **Reliability radar (pentagon)** — a 3rd main-board dashboard: the runs chart is now full width
+  on top, and the radar shares the row below it 50/50 with the flaky panel. Scores the runs in view
+  on five 0–100 axes (pass rate, no-errors, green-now, stability, completeness) with an overall score;
+  its ⓘ popup explains each axis with its live value. Scopes with the top filters + group selection.
+- **ⓘ "about this panel" popups** on the runs chart and the flaky panel (alongside the radar's),
+  explaining what each shows and how it's read.
+- **Merged test history** — opening a test from *Unique tests* now shows one timeline across every
+  dag·task it ran in (each run tagged with its dag·task); `GET /api/test-history` merges when
+  dag/task are omitted, stays scoped when given. The modal states the run count shown.
+
+### Changed
+- **Flaky UI reflects reality** — with no flaky tests the flaky panel disappears and the runs chart
+  takes the full width; a group with flaky tests shows an amber ⚠ chip (click to focus the board on
+  it); a run's *Flaky tests* button appears only when that dag·task has flaky ones.
+- **"all" chip on the RUNS and PASSING RUNS KPIs** — they count every run in view and are not
+  narrowed by a group selection (unlike Failures/Slowdowns), which the chip now makes explicit.
+- **Radar pass rate == chart avg pass rate** — the radar's *Pass rate* uses the same per-run mean
+  as the chart's *avg pass rate* (was a pooled ratio), and the chart's average now spans ALL runs in
+  the chart (not just the visible window), so the two read identically.
+- **UI polish** — modal dimming is one shared full-screen overlay (stacked popups no longer
+  double-darken); chart tooltips sit just below-left of the cursor; **chart bars show an even 2px
+  ring on hover instead of brightening** (no colour flicker/uneven outline when sweeping many bars);
+  **the radar fills its card and scales proportionally** with the screen; **the flaky panel fills its
+  card and scrolls to the bottom** (matched height with the radar) instead of stopping at a fixed
+  cap; the heatmap is a crisp rounded grid with uniform spacing and a soft border-coloured line,
+  adaptive run-number labels, and a uniform inset hover; run-list group columns fill the width with
+  a continuous row separator.
+
+### Fixed
+- Failure-cluster status square keeps its size when a long test name wraps.
+- Removed a `type: ignore` that mypy flagged as unused in some environments.
+
+### Tests
+- Added coverage for merged history (backend + UI), the flaky-absent/chip/button states, the
+  reliability radar (+ pass-rate == chart avg, adaptivity), the "all" KPI chips, the panel ⓘ
+  popups, the single modal dim, the tooltip placement, the bounded-scroll flaky panel, the
+  chart-bar hover ring, and the cluster square; green (no-flaky) + evil (XSS-payload) UI fixtures.
+- **Security regression guards** — an explicit XXE test (external-entity junit → blocked by
+  defusedxml, no leak) and a stored-XSS UI test (a hostile test name / failure message renders as
+  inert escaped text, never executes). Load- and security-smoked a 663-run demo: every API endpoint
+  under ~0.06 s; metrics 404 without a token; traversal/malformed/zero-test inputs handled safely.
+
 ## [0.4.0] - 2026-06-29
 
 ### Added
@@ -279,7 +330,8 @@ the Airflow 3 web UI.
 - CI/CD: lint, type-check, unit (py3.10–3.13) + Airflow 3 integration matrices,
   CodeQL, OpenSSF Scorecard, DCO, and Trusted-Publishing release workflows.
 
-[Unreleased]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.3.0...v0.3.1
