@@ -146,6 +146,10 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .kpi.clickable:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
   .kpi .label { font-size: 12px; color: var(--muted); text-transform: uppercase;
     letter-spacing: .04em; }
+  /* "all" chip: marks a KPI that counts every run in view, ignoring a group selection. */
+  .kpi-all { display: inline-block; margin-left: 6px; padding: 0 6px; border-radius: 999px;
+    background: var(--surface-2); border: 1px solid var(--border); color: var(--muted);
+    font-size: 9.5px; font-weight: 700; letter-spacing: .04em; vertical-align: middle; }
   .kpi .value { font-size: 26px; font-weight: 700; margin-top: 4px; }
 
   .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
@@ -227,12 +231,15 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .chart-bars.dragging .bar { cursor: grabbing; }
   .bars-strip { position: relative; height: 100%; }
   .bar { position: absolute; bottom: 22px; height: 100px; border-radius: 2px;
-    background: var(--surface-2); transition: filter .12s, opacity .12s; cursor: pointer; }
-  .bar:hover { filter: brightness(1.08); }
+    background: var(--surface-2); transition: opacity .12s; cursor: pointer; }
+  /* Hover = an even outline ring, NOT a brightness/colour change: sweeping across many narrow
+     bars must not make their fill colours flicker/"jump". An INTEGER 2px spread keeps the ring
+     the same crisp thickness on every edge (a fractional px anti-aliases unevenly). */
+  .bar:hover { box-shadow: 0 0 0 2px var(--fg); }
   /* With the trend on, bars recede so the line/threshold read clearly; hovering one
      brings it back to full strength. */
   .bars-strip.trend-on .bar { opacity: .26; }
-  .bars-strip.trend-on .bar:hover { opacity: 1; filter: brightness(1.08); }
+  .bars-strip.trend-on .bar:hover { opacity: 1; }
   .bnum { position: absolute; bottom: 0; width: 36px; text-align: center; font-size: 10px;
     color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
   /* Hover tooltip: inverts the page theme. */
@@ -273,7 +280,10 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .flk-board-ctrls .case-q { flex: 1 1 auto; max-width: none; height: 30px; }
   .flk-board-only { display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto;
     white-space: nowrap; color: var(--muted); font-size: 12.5px; cursor: pointer; }
-  .flaky-scroll { flex: 1 1 auto; min-height: 110px; max-height: 132px; overflow-y: auto;
+  /* Fill the card (which stretches to the radar's height next to it) and scroll INSIDE it, so
+     the flaky list runs to the very bottom of the panel instead of stopping at a fixed cap.
+     min-height:0 lets the flex child shrink so overflow scrolls; capped only when stacked. */
+  .flaky-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto;
     overscroll-behavior-y: contain; scrollbar-width: thin; }
   .fb-row { display: flex; align-items: center; gap: 10px; padding: 7px 2px;
     border-bottom: 1px solid var(--border); cursor: pointer; font-size: 12.5px; }
@@ -286,11 +296,51 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .fb-dagtask { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
   .fb-meta { color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; flex: 0 0 auto; }
   .fb-empty { color: var(--muted); font-size: 12.5px; padding: 16px 2px; }
+  /* Reliability radar (pentagon): the 3rd main-board dashboard. Its own row UNDER the
+     full-width chart, sharing that row 50/50 with the flaky panel (both are .board > .card).
+     The SVG has a wide viewBox and scales to the card, so labels never spill on small screens. */
+  .pentagon-card { padding: 14px 16px; display: flex; flex-direction: column; }
+  /* Both cards on this row share a fixed height (driven by the radar's size) so the flaky
+     list scrolls INSIDE its card down to the bottom of the panel -- and can't stretch the
+     row to fit all rows. Height is released on mobile (cards stack + size to content). */
+  #board2 > .card { height: 340px; }
+  /* The radar FILLS its card (no max-width cap): the SVG stretches to the card and the wide
+     viewBox scales the pentagon to fit by height, so it's as large as the card allows and
+     shrinks proportionally with the screen. */
+  #pentagon { flex: 1 1 auto; min-height: 0; }
+  .rel-svg { display: block; width: 100%; height: 100%; }
+  .rel-grid { fill: none; stroke: var(--border); stroke-width: 1; }
+  .rel-area { fill: color-mix(in srgb, var(--primary) 20%, transparent);
+    stroke: var(--primary); stroke-width: 2; stroke-linejoin: round; }
+  .rel-dot { fill: var(--primary); }
+  .rel-lab { fill: var(--muted); font-size: 11px; }
+  .rel-val { fill: var(--fg); font-weight: 700; }
+  .rel-score { fill: var(--fg); font-weight: 700; font-size: 21px;
+    font-variant-numeric: tabular-nums; }
+  .rel-score-cap { fill: var(--muted); font-size: 8.5px; text-transform: uppercase;
+    letter-spacing: .05em; }
+  /* Info (ⓘ) button by the Reliability title -> the "how it's computed" popup. */
+  .rel-info-btn { display: inline-flex; align-items: center; justify-content: center; padding: 0;
+    margin-left: 6px; border: 0; background: none; color: var(--muted); cursor: pointer; }
+  .rel-info-btn svg { width: 16px; height: 16px; }
+  .rel-info-btn:hover { color: var(--primary); }
+  .rel-info-btn:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; border-radius: 50%; }
+  .rel-info-intro { color: var(--muted); font-size: 13px; margin: 0 0 14px; }
+  .rel-info-list { list-style: none; margin: 0; padding: 0; display: flex;
+    flex-direction: column; gap: 12px; }
+  .rel-info-list li { border-left: 2px solid var(--primary); padding: 2px 0 2px 12px; }
+  .ri-head { display: flex; align-items: baseline; gap: 8px; }
+  .ri-name { font-weight: 650; }
+  .ri-val { color: var(--primary); font-weight: 700; font-variant-numeric: tabular-nums; }
+  .ri-desc { display: block; color: var(--muted); font-size: 12.5px; margin-top: 2px; }
   /* Stacked board: cards size to their content (the row layout's flex:1 1 0 would
      collapse them to a sliver in a column, hiding the chart/flaky behind overflow). */
   @media (max-width: 860px) {
     .board { flex-direction: column; }
     .board > .card { flex: 0 0 auto; }
+    /* Stacked (content-sized cards): release the shared height, cap the flaky list instead. */
+    #board2 > .card { height: auto; }
+    .flaky-scroll { max-height: 300px; }
   }
   /* Unique-tests list: one wrapping column, so a long node id never forces a
      horizontal scrollbar (the dialog body scrolls vertically). */
@@ -447,13 +497,18 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   dialog[open] { display: flex; flex-direction: column; }
   /* Popups opened from inside a run sit inset within it -- narrower/shorter than the
      detail dialog so they never touch its borders. */
-  #flaky, #history, #compare, #failures { max-width: min(680px, 84vw); max-height: 82vh; }
+  #flaky, #history, #compare, #failures, #rel-info, #panel-info {
+    max-width: min(680px, 84vw); max-height: 82vh; }
+  #panel-info-body p { margin: 0; color: var(--fg); font-size: 13.5px; line-height: 1.6; }
   /* The heatmap wants width (more run columns visible). Wide when opened on its own;
      inset (narrower than the run dialog) when opened from inside a run, so it doesn't
      touch the run dialog's frame. */
   #heatmap { max-width: min(1040px, 92vw); max-height: 88vh; }
   #heatmap.hm-inset { max-width: min(880px, 86vw); max-height: 82vh; }
-  dialog::backdrop { background: rgba(0, 0, 0, 0.5); }
+  /* The dim comes from ONE shared full-screen overlay (updateParentDim), not per-dialog, so
+     stacking a popup on top of the run detail doesn't double-darken. The ::backdrop stays
+     (transparent) only to keep click-outside-to-close working. */
+  dialog::backdrop { background: transparent; }
   .dlg-head { display: flex; align-items: center; gap: 10px; padding: 16px 20px;
     border-bottom: 1px solid var(--border); flex: 0 0 auto; background: var(--surface);
     border-radius: 14px 14px 0 0; }
@@ -524,10 +579,13 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .fk-sub { display: flex; }
   .hist-row .when { flex: 1 1 auto; overflow-wrap: anywhere; }
   .hist-row .when { color: var(--muted); }
+  .hist-row .hist-loc { color: var(--primary); font-family: ui-monospace, SFMono-Regular,
+    Menlo, Consolas, monospace; font-size: .92em; }
   .fk-row .fk-meta, .hist-row .dur { color: var(--muted); white-space: nowrap;
     font-variant-numeric: tabular-nums; }
   /* Test-history node header wraps so a long node id never scrolls horizontally. */
-  .hist-node { overflow-wrap: anywhere; color: var(--muted); margin-bottom: 8px; }
+  .hist-node { overflow-wrap: anywhere; color: var(--muted); margin-bottom: 4px; }
+  .hist-count { color: var(--muted); font-size: 11.5px; margin-bottom: 8px; }
   /* Flaky-deeper bits: score, trend arrow, quarantine + list badges, modal controls. */
   .flk-score { color: var(--fg); font-variant-numeric: tabular-nums; }
   .flk-trend { font-weight: 700; }
@@ -567,7 +625,10 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     font-variant-numeric: tabular-nums; }
   .cl-sig { flex: 1 1 auto; overflow-wrap: anywhere; }
   .cl-dots { flex: 0 0 auto; display: inline-flex; gap: 3px; }
-  .cl-dots .od, .cl-item .od { width: 9px; height: 9px; border-radius: 2px; }
+  /* flex:0 0 auto so the status square keeps its 9x9 even when a long test name wraps to
+     several lines (otherwise the flex row squeezes it). align-self:start keeps it on line 1. */
+  .cl-dots .od, .cl-item .od { flex: 0 0 auto; align-self: flex-start; width: 9px; height: 9px;
+    border-radius: 2px; }
   .cl-row .chev { flex: 0 0 auto; transition: transform .15s; }
   .cl-row[aria-expanded="true"] .chev { transform: rotate(90deg); }
   /* Tests inside an expanded cluster: clearly separated rows that highlight on hover
@@ -819,6 +880,12 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       <div class="chart-head chart-head-stack">
         <div class="chart-head-row">
           <span data-i18n="history">Recent runs</span>
+          <button id="chart-info" class="rel-info-btn" type="button" data-i18n-al="chartInfoAl"
+            title="About the runs chart">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+              stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
+          </button>
           <span class="chart-filter" id="chart-filter" hidden></span>
           <span class="legend" id="legend"></span>
         </div>
@@ -834,9 +901,30 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       </div>
       <div id="chart"></div>
     </div>
+  </div>
+  <div class="board" id="board2" hidden>
+    <div class="card pentagon-card" id="pentagon-card">
+      <div class="chart-head">
+        <span data-i18n="reliabilityTitle">Reliability</span>
+        <button id="rel-info-btn" class="rel-info-btn" type="button" data-i18n-al="reliabilityInfoAl"
+          title="How the score is computed">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
+        </button>
+        <span class="flk-scope" id="rel-scope" hidden></span>
+      </div>
+      <div id="pentagon"></div>
+    </div>
     <div class="card flaky-card" id="flaky-card" hidden>
       <div class="chart-head">
         <span data-i18n="flakyTitle">Flaky tests</span>
+        <button id="flaky-info" class="rel-info-btn" type="button" data-i18n-al="flakyInfoAl"
+          title="About flaky tests">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
+        </button>
         <span class="flk-scope" id="flk-scope" hidden></span>
         <span style="flex:1"></span>
         <span class="muted" id="flaky-count"></span>
@@ -984,6 +1072,34 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   <div class="dlg-body" id="hist-body"></div>
 </dialog>
 
+<dialog id="rel-info" aria-labelledby="rel-info-title">
+  <div class="dlg-head">
+    <h2 id="rel-info-title" data-i18n="relInfoTitle">How the reliability score is computed</h2>
+    <span class="grow" style="flex:1"></span>
+    <button id="rel-info-close" class="btn icon-btn" type="button" data-i18n-al="closeReport">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M18 6 6 18M6 6l12 12"/>
+      </svg>
+    </button>
+  </div>
+  <div class="dlg-body" id="rel-info-body"></div>
+</dialog>
+
+<dialog id="panel-info" aria-labelledby="panel-info-title">
+  <div class="dlg-head">
+    <h2 id="panel-info-title"></h2>
+    <span class="grow" style="flex:1"></span>
+    <button id="panel-info-close" class="btn icon-btn" type="button" data-i18n-al="closeReport">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M18 6 6 18M6 6l12 12"/>
+      </svg>
+    </button>
+  </div>
+  <div class="dlg-body" id="panel-info-body"></div>
+</dialog>
+
 <dialog id="heatmap" aria-labelledby="hm-title">
   <div class="dlg-head">
     <h2 id="hm-title" data-i18n="heatmapTitle">Test×run heatmap</h2>
@@ -1018,10 +1134,37 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       avgWord: "avg", uqRuns: "Total runs",
       apiDocs: "API docs", linksAl: "Links & documentation", ghItem: "GitHub",
       benchTitle: "Test durations (10s buckets)", uniqueTitle: "Unique tests",
+      reliabilityTitle: "Reliability", reliabilityHint: "higher is better", relOverall: "score",
+      relPass: "Pass rate", relRobust: "No errors", relFresh: "Green now",
+      relStable: "Stability", relComplete: "Completeness",
+      reliabilityInfoAl: "How the reliability score is computed",
+      relInfoTitle: "How the reliability score is computed",
+      relInfoIntro: "Each axis is scored 0–100 over the runs currently in view (the top filters "
+        + "and any group selection apply). Higher is better; the centre is the average of the five.",
+      relPassDesc: "Average of each run's pass rate, across every run in view — the same "
+        + "value as the chart's “avg pass rate”.",
+      relRobustDesc: "Share of results that are NOT errors (a test crashing or its setup failing).",
+      relFreshDesc: "Share of dag·tasks whose LATEST run cleared the success threshold.",
+      relStableDesc: "Share of tests that are NOT flaky — that don't flip pass↔fail over the window.",
+      relCompleteDesc: "Share of tests that actually ran (were not skipped).",
       cId: "ID", cStatus: "Status", cDag: "DAG", cTask: "Task", cRun: "Run", cTry: "Try",
       cTotal: "Total", cPass: "Pass", cFail: "Fail", cErr: "Err", cSkip: "Skip",
       cDuration: "Duration", cWhen: "When", cRuns: "Runs", cPassRate: "Pass %", cAvgDur: "Avg time",
       kRuns: "Runs", kPassingRuns: "Passing runs", kTests: "Unique tests", kFailures: "Failures",
+      kAll: "all", kAllTip: "Counts every run in view — not narrowed by a group selection",
+      chartInfoAl: "About the runs chart", flakyInfoAl: "About flaky tests",
+      chartInfoTitle: "Recent runs chart",
+      chartInfoBody: "One bar per run, stacked by outcome (passed / failed / error / skipped), "
+        + "oldest → newest. Drag, swipe or use the arrows to scroll the carousel. Tick runs in "
+        + "the list to focus the chart on them. Turn on “Pass-rate trend” for a line through each "
+        + "run's pass rate with a dashed success-threshold gridline; the header then shows the "
+        + "visible run window (e.g. #48–#76 / 76) and its average pass rate.",
+      flakyInfoTitle: "Flaky tests",
+      flakyInfoBody: "Tests that BOTH pass and fail across the recent window of one dag·task. "
+        + "Score = how often the result flips (0–1); trend compares the recent half to the older "
+        + "half; a test is quarantined once its score clears the threshold. Use the search box or "
+        + "the “Quarantined only” toggle to narrow the list; a row opens that test's history. "
+        + "Flakiness is per dag·task — the same test run from two tasks can differ.",
       kFailuresTip: "Tests failing in the latest run of each dag·task (drops off when fixed)",
       kPassed: "Passed", kFailed: "Failed", kErrors: "Errors", kSkipped: "Skipped",
       sPass: "PASS", sFail: "FAIL", sError: "ERROR", success: "success",
@@ -1064,7 +1207,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       slowNoData: "Not enough run history yet.",
       historyTitle: "Test history", historyBtn: "History",
       historyFail: "Failed to load history: ", noHistory: "No history for this test.",
-      histDidntRun: "did not run",
+      histDidntRun: "did not run", histCount: "over the last {n} runs",
       caseSearch: "filter tests…", caseGroup: "Group by module",
       listGroup: "Group by dag·task", runsWord: "runs", selectGroup: "Select group",
       groupMore: "Showing 100 of {n} runs — filter to this dag·task to see all.",
@@ -1081,7 +1224,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       selectRow: "Select row", selectAll: "Select all",
       forbidden: "You don't have permission to delete this report (it requires permission to trigger the DAG).",
       older: "Older runs", newer: "Newer runs",
-      avgPass: "avg", avgPassTip: "Average pass rate across the {n} runs in view",
+      avgPass: "avg", avgPassTip: "Average pass rate across all {n} runs in the chart (matches the radar)",
       visibleRuns: "Showing runs #{a}–#{b} of {n}",
       prevPage: "Previous page", nextPage: "Next page", page: "Page",
     },
@@ -1097,10 +1240,37 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       avgWord: "сред.", uqRuns: "Всего прогонов",
       apiDocs: "Документация API", linksAl: "Ссылки и документация", ghItem: "GitHub",
       benchTitle: "Время выполнения тестов (по 10с)", uniqueTitle: "Уникальные тесты",
+      reliabilityTitle: "Надёжность", reliabilityHint: "больше — лучше", relOverall: "оценка",
+      relPass: "Проходимость", relRobust: "Без ошибок", relFresh: "Сейчас зелёные",
+      relStable: "Стабильность", relComplete: "Полнота",
+      reliabilityInfoAl: "Как считается оценка надёжности",
+      relInfoTitle: "Как считается оценка надёжности",
+      relInfoIntro: "Каждая ось — 0–100 по прогонам в поле зрения (учитываются верхние фильтры "
+        + "и выделение групп). Больше — лучше; в центре — среднее из пяти.",
+      relPassDesc: "Средняя доля прохождения по каждому прогону, по всем прогонам в поле "
+        + "зрения — то же значение, что «ср. прохождение» в диаграмме.",
+      relRobustDesc: "Доля результатов без ошибок (падение теста или сбой его настройки).",
+      relFreshDesc: "Доля dag·task, чей ПОСЛЕДНИЙ прогон прошёл порог успеха.",
+      relStableDesc: "Доля тестов, которые НЕ нестабильны — не скачут pass↔fail в окне.",
+      relCompleteDesc: "Доля тестов, которые реально выполнились (не были пропущены).",
       cId: "ID", cStatus: "Статус", cDag: "DAG", cTask: "Задача", cRun: "Запуск", cTry: "Попытка",
       cTotal: "Всего", cPass: "Усп", cFail: "Пров", cErr: "Ошиб", cSkip: "Проп",
       cDuration: "Время", cWhen: "Когда", cRuns: "Прогоны", cPassRate: "Проход %", cAvgDur: "Ср. время",
       kRuns: "Прогонов", kPassingRuns: "Успешных прогонов", kTests: "Уникальные тесты", kFailures: "Падений",
+      kAll: "все", kAllTip: "Считает все прогоны в поле зрения — не сужается выбором группы",
+      chartInfoAl: "О диаграмме прогонов", flakyInfoAl: "О нестабильных тестах",
+      chartInfoTitle: "Диаграмма последних прогонов",
+      chartInfoBody: "Один столбец — один прогон, с накоплением по статусам (passed / failed / "
+        + "error / skipped), от старых к новым. Прокрутка — перетаскиванием, свайпом или "
+        + "стрелками. Отметьте прогоны в списке, чтобы сфокусировать диаграмму на них. Включите "
+        + "«Тренд прохождения» — появится линия по доле прохождения каждого прогона и пунктирный "
+        + "порог успеха; в шапке — видимое окно (напр. #48–#76 / 76) и средняя доля прохождения.",
+      flakyInfoTitle: "Нестабильные тесты",
+      flakyInfoBody: "Тесты, которые в окне последних прогонов одного dag·task И проходят, И "
+        + "падают. Score — как часто результат скачет (0–1); тренд сравнивает свежую половину "
+        + "со старой; тест уходит в карантин, когда score превышает порог. Сузить список — поиском "
+        + "или тумблером «Только карантин»; строка открывает историю теста. Нестабильность "
+        + "считается по каждому dag·task — один тест из разных тасок может отличаться.",
       kFailuresTip: "Тесты, падающие в последнем прогоне каждого dag·task (уходят после починки)",
       kPassed: "Пройдено", kFailed: "Провалено", kErrors: "Ошибки", kSkipped: "Пропущено",
       sPass: "OK", sFail: "СБОЙ", sError: "ОШИБКА", success: "успех",
@@ -1146,7 +1316,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       slowNoData: "Пока мало истории прогонов.",
       historyTitle: "История теста", historyBtn: "История",
       historyFail: "Не удалось загрузить историю: ", noHistory: "Истории по этому тесту нет.",
-      histDidntRun: "не запускался",
+      histDidntRun: "не запускался", histCount: "за последние {n} запусков",
       caseSearch: "фильтр тестов…", caseGroup: "Группировать по модулю",
       listGroup: "Группировать по dag·task", runsWord: "прогонов", selectGroup: "Выбрать группу",
       groupMore: "Показаны 100 из {n} прогонов — отфильтруйте по этому dag·task.",
@@ -1163,7 +1333,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       selectRow: "Выбрать строку", selectAll: "Выбрать все",
       forbidden: "Нет прав на удаление этого отчёта (нужно право запускать DAG).",
       older: "Старее", newer: "Новее",
-      avgPass: "ср.", avgPassTip: "Средняя доля прохождения по {n} прогонам в окне",
+      avgPass: "ср.", avgPassTip: "Средняя доля прохождения по всем {n} прогонам диаграммы (совпадает с радаром)",
       visibleRuns: "Показаны прогоны #{a}–#{b} из {n}",
       prevPage: "Предыдущая страница", nextPage: "Следующая страница", page: "Страница",
     },
@@ -1442,8 +1612,10 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       }).length;
     }
     var cards = [
-      { label: t("kRuns"), value: runs },
-      { label: t("kPassingRuns"), value: ok + " / " + runs, cls: ok === runs ? "c-pass" : "" },
+      // These two count EVERY run in view (top filters only) and ignore a group selection,
+      // unlike the scoped Failures/Slowdowns -- the "all" chip makes that explicit.
+      { label: t("kRuns"), value: runs, all: true },
+      { label: t("kPassingRuns"), value: ok + " / " + runs, cls: ok === runs ? "c-pass" : "", all: true },
       { label: t("kTests"), value: uniqueTests == null ? "…" : uniqueTests,
         id: "kpi-unique", click: uniqueTests > 0 },
       { label: t("kFailures"), value: failures, cls: failures ? "c-fail" : "c-pass",
@@ -1456,8 +1628,10 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       var attrs = (c.id ? ' id="' + c.id + '"' : "")
         + (c.tip ? ' title="' + esc(c.tip) + '"' : "")
         + (c.click ? ' role="button" tabindex="0"' : "");
+      var allChip = c.all ? ' <span class="kpi-all" title="' + esc(t("kAllTip")) + '">'
+        + esc(t("kAll")) + "</span>" : "";
       return '<div class="kpi' + (c.click ? " clickable" : "") + '"' + attrs
-        + '><div class="label">' + esc(c.label) + '</div>'
+        + '><div class="label">' + esc(c.label) + allChip + '</div>'
         + '<div class="value ' + (c.cls || "") + '">' + esc(c.value) + "</div></div>";
     }).join("");
     var fk = document.getElementById("kpi-failures");
@@ -1576,9 +1750,11 @@ _INDEX_HTML = r"""<!DOCTYPE html>
         .replace("{b}", win[last].seq).replace("{n}", count);
     }
     if (aEl) {
+      // Average over ALL runs in the chart (not just the visible window) so it's the overall
+      // pass rate -- identical to the radar's Pass rate, and stable as you scroll the carousel.
       var sum = 0, k = 0;
       if (passTrend) {
-        for (var i = first; i <= last; i++) {
+        for (var i = 0; i < count; i++) {
           var tot = win[i].total || 0;
           if (tot > 0) { sum += (win[i].passed || 0) / tot; k++; }
         }
@@ -1637,32 +1813,23 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     tipEl.style.display = "block";
     tipMove(ev);
   }
-  var tipAnchorEl = null;  // when set, the tooltip pins its Y to this element (follows X only)
   function tipMove(ev) {
     if (!tipEl) return;
     var pad = 14, w = tipEl.offsetWidth, h = tipEl.offsetHeight;
-    var x = ev.clientX + pad;
-    if (x + w > window.innerWidth - 8) x = ev.clientX - w - pad;
-    var y;
-    if (tipAnchorEl) {
-      // Pin Y above the anchor (e.g. the runs-chart strip) so sweeping across bars doesn't
-      // make the tooltip -- and its status dots -- jump up/down with the cursor's wobble.
-      var ar = tipAnchorEl.getBoundingClientRect();
-      y = ar.top - h - 8;
-      if (y < 8) y = ar.bottom + 8;  // no room above -> sit below
-    } else {
-      y = ev.clientY + pad;
-      if (y + h > window.innerHeight - 8) y = ev.clientY - h - pad;
-    }
+    // Sit just below the cursor, offset to its left (flips to the other side near an edge).
+    var x = ev.clientX - w - pad;
+    if (x < 8) x = ev.clientX + pad;
+    var y = ev.clientY + pad;
+    if (y + h > window.innerHeight - 8) y = ev.clientY - h - pad;
     tipEl.style.left = Math.max(8, x) + "px";
     tipEl.style.top = Math.max(8, y) + "px";
   }
-  function tipHide() { if (tipEl) tipEl.style.display = "none"; tipAnchorEl = null; }
-  function bindTip(el, htmlFn, anchorEl) {
+  function tipHide() { if (tipEl) tipEl.style.display = "none"; }
+  function bindTip(el, htmlFn) {
     if (!el) return;
     var timer = null, last = null;
     el.addEventListener("mouseenter", function (ev) {
-      last = ev; tipAnchorEl = anchorEl || null;
+      last = ev;
       // Skip if a re-render detached the element during the delay (no stale tooltip).
       timer = setTimeout(function () { if (el.isConnected) tipShow(htmlFn(), last); }, 320);
     });
@@ -1763,7 +1930,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     strip.querySelectorAll(".bar").forEach(function (bar, i) {
       var r = win[i], id = bar.getAttribute("data-id");
       bar.addEventListener("click", function () { if (!chartDragged) openDetail(id); });
-      bindTip(bar, function () { return barTip(r, r.seq); }, barsEl);  // pin Y above the strip
+      bindTip(bar, function () { return barTip(r, r.seq); });
     });
     renderTrend(chart, strip, win, slot, stripW);
 
@@ -1832,7 +1999,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       bindTip(dot, function () {
         return "<b>#" + p.r.seq + "</b> " + esc(t("passRate")) + ": "
           + Math.round(p.rate * 100) + "% (" + (p.r.passed || 0) + "/" + (p.r.total || 0) + ")";
-      }, strip);  // pin Y above the strip (no vertical jump sweeping dots)
+      });
     });
     // Dashed threshold gridline, pinned (lives in #chart, outside the scrolling strip).
     var th = document.createElement("div");
@@ -1860,7 +2027,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     listEl.querySelectorAll(".sel").forEach(function (cb) { cb.checked = false; });
     // Also reset the group-header checkboxes (checked + indeterminate) -- otherwise a
     // ticked group stays ticked after "show all" even though its runs are deselected.
-    syncSelAll(); syncGroupChecks(); updateBulkBar(); renderChart(); renderFlakyBoard(); renderKpis();
+    syncSelAll(); syncGroupChecks(); updateBulkBar(); renderChart(); renderFlakyBoard(); renderKpis(); renderReliability();
   }
 
   // Comparator for a given run-sort state {key, dir} -- reused by the flat list and
@@ -2139,7 +2306,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
         g.runs.forEach(function (r) {
           if (cb.checked) selectedIds.add(r.id); else selectedIds.delete(r.id);
         });
-        renderChart(); renderList(); updateBulkBar(); renderFlakyBoard(); renderKpis();
+        renderChart(); renderList(); updateBulkBar(); renderFlakyBoard(); renderKpis(); renderReliability();
       });
     });
     listEl.querySelectorAll(".row-del").forEach(function (b) {
@@ -2160,7 +2327,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       cb.addEventListener("change", function () {
         var id = cb.getAttribute("data-id");
         if (cb.checked) selectedIds.add(id); else selectedIds.delete(id);
-        syncSelAll(); syncGroupChecks(); updateBulkBar(); renderChart(); renderFlakyBoard(); renderKpis();
+        syncSelAll(); syncGroupChecks(); updateBulkBar(); renderChart(); renderFlakyBoard(); renderKpis(); renderReliability();
       });
     });
     var selAll = document.getElementById("sel-all");
@@ -2180,7 +2347,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
         });
       }
       selAll.indeterminate = false;
-      updateBulkBar(); renderChart(); renderFlakyBoard(); renderKpis();
+      updateBulkBar(); renderChart(); renderFlakyBoard(); renderKpis(); renderReliability();
     });
     syncSelAll(); updateBulkBar();
   }
@@ -2232,7 +2399,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     });
   }
 
-  function renderAll() { renderKpis(); renderChart(); renderList(); if (detail) renderDetail(); }
+  function renderAll() { renderKpis(); renderChart(); renderList(); renderReliability(); if (detail) renderDetail(); }
 
   function skeleton() {
     var rows = "";
@@ -2288,6 +2455,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     // Filter resets to the newest runs / first page; a delete keeps the user's place.
     if (!keepPage) { chartScroll = null; listPage = 0; }
     document.getElementById("board").hidden = allReports.length === 0;
+    document.getElementById("board2").hidden = allReports.length === 0;
     renderKpis(); renderChart(); renderList(); renderFlakyBoard();
     refreshUniqueTests();
     refreshSlow();
@@ -2323,15 +2491,10 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     // It reappears (with content) the moment any flaky test shows up. When the panel's
     // presence flips, the chart is re-rendered so its bars re-fill the new (wider/narrower)
     // width -- otherwise they'd stay sized to the old half-width layout.
+    // No flaky anywhere -> hide the panel; the radar beside it grows to fill the row. The chart
+    // is on its own full-width row now, so its width doesn't depend on the flaky panel.
     var flakyCard = document.getElementById("flaky-card");
-    if (flakyCard) {
-      var wasHidden = flakyCard.hidden;
-      flakyCard.hidden = !allFlaky.length;
-      // Re-fill the chart to the new width when the panel appears/disappears -- but only if
-      // the carousel is at its default (newest) position, so we never yank a scroll the user
-      // (or a test) just made. A scrolled chart keeps its window until the next natural render.
-      if (flakyCard.hidden !== wasHidden && chartScroll == null) renderChart();
-    }
+    if (flakyCard) flakyCard.hidden = !allFlaky.length;
     if (!allFlaky.length) return;
     var dag = document.getElementById("f-dag").value.trim().toLowerCase();
     var task = document.getElementById("f-task").value.trim().toLowerCase();
@@ -2381,9 +2544,135 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   function loadFlaky() {
     fetch(API + "flaky")
       .then(function (r) { return r.ok ? r.json() : { flaky: [] }; })
-      .then(function (d) { allFlaky = d.flaky || []; rebuildFlkCounts(); renderFlakyBoard(); renderList(); })
-      .catch(function () { allFlaky = []; rebuildFlkCounts(); renderFlakyBoard(); renderList(); });
+      .then(function (d) {
+        allFlaky = d.flaky || []; rebuildFlkCounts();
+        renderFlakyBoard(); renderList(); renderReliability();  // stability axis uses flaky
+      })
+      .catch(function () {
+        allFlaky = []; rebuildFlkCounts(); renderFlakyBoard(); renderList(); renderReliability();
+      });
   }
+
+  // -- Reliability radar (pentagon): the 3rd main-board dashboard ---------------------
+  // Five 0-100 axes (higher = better) over the runs in view -- scoped by the top filters and
+  // any group selection, exactly like the chart/flaky panel. Pure read of already-loaded data
+  // (report summaries + flaky list), so it never fires its own request.
+  function reliabilityAxes() {
+    var selKeys = selKeySet();
+    var inScope = function (o) { return !selKeys || selKeys[o.dag_id + "|" + o.task_id]; };
+    var rows = reports.filter(inScope), flk = allFlaky.filter(inScope);
+    var T = 0, E = 0, S = 0, latest = {}, passSum = 0, passK = 0;
+    rows.forEach(function (r) {
+      T += r.total || 0; E += r.errors || 0; S += r.skipped || 0;
+      var tt = r.total || 0;
+      if (tt > 0) { passSum += (r.passed || 0) / tt; passK++; }  // per-run ratio (matches chart)
+      var k = r.dag_id + "|" + r.task_id;
+      if (!latest[k] || String(r.created_at || "") > String(latest[k].created_at || "")) {
+        latest[k] = r;
+      }
+    });
+    var keys = Object.keys(latest), green = 0, uniq = 0;
+    keys.forEach(function (k) { if (latest[k].success) green++; uniq += latest[k].total || 0; });
+    var clamp = function (v) { return Math.max(0, Math.min(100, Math.round(v))); };
+    return [
+      // Pass rate = mean of each run's pass ratio -- the SAME formula as the chart's "avg
+      // pass rate", so one group reads identically on both (chart is the visible window, the
+      // radar is every run in view, so they can differ once the window no longer covers all).
+      { key: "pass", label: t("relPass"), value: passK ? clamp(passSum / passK * 100) : 100 },
+      { key: "robust", label: t("relRobust"), value: T ? clamp(100 - E / T * 100) : 100 },
+      { key: "fresh", label: t("relFresh"), value: keys.length ? clamp(green / keys.length * 100) : 100 },
+      { key: "stable", label: t("relStable"), value: uniq ? clamp(100 - flk.length / uniq * 100) : 100 },
+      { key: "complete", label: t("relComplete"), value: T ? clamp(100 - S / T * 100) : 100 },
+    ];
+  }
+  function pentagonSvg(axes) {
+    // Wide viewBox: labels live INSIDE it, so the whole radar scales as one unit and a long
+    // label never spills over the card edge on a small screen (it just shrinks with the rest).
+    var W = 460, H = 232, cx = W / 2, cy = H / 2 + 2, R = 90, n = axes.length;
+    var ang = function (i) { return (-90 + i * (360 / n)) * Math.PI / 180; };
+    var at = function (i, rr) { var a = ang(i); return [cx + rr * Math.cos(a), cy + rr * Math.sin(a)]; };
+    var ptsAt = function (rr) {
+      return axes.map(function (_, i) { var p = at(i, rr); return p[0].toFixed(1) + "," + p[1].toFixed(1); }).join(" ");
+    };
+    var rings = [0.25, 0.5, 0.75, 1].map(function (f) {
+      return '<polygon class="rel-grid" points="' + ptsAt(R * f) + '"/>';
+    }).join("");
+    var spokes = axes.map(function (_, i) {
+      var p = at(i, R);
+      return '<line class="rel-grid" x1="' + cx + '" y1="' + cy + '" x2="' + p[0].toFixed(1) + '" y2="' + p[1].toFixed(1) + '"/>';
+    }).join("");
+    var dataPts = axes.map(function (a, i) {
+      var p = at(i, R * (a.value / 100)); return p[0].toFixed(1) + "," + p[1].toFixed(1);
+    }).join(" ");
+    var dots = axes.map(function (a, i) {
+      var p = at(i, R * (a.value / 100));
+      return '<circle class="rel-dot" cx="' + p[0].toFixed(1) + '" cy="' + p[1].toFixed(1) + '" r="3"/>';
+    }).join("");
+    var labels = axes.map(function (a, i) {
+      var p = at(i, R + 14), c = Math.cos(ang(i)), s = Math.sin(ang(i));
+      var anchor = Math.abs(c) < 0.3 ? "middle" : (c > 0 ? "start" : "end");
+      var dy = s > 0.3 ? "0.9em" : (s < -0.3 ? "-0.3em" : "0.32em");
+      return '<text class="rel-lab" x="' + p[0].toFixed(1) + '" y="' + p[1].toFixed(1)
+        + '" text-anchor="' + anchor + '" dy="' + dy + '">' + esc(a.label)
+        + '<tspan class="rel-val" dx="4">' + a.value + "</tspan></text>";
+    }).join("");
+    var overall = Math.round(axes.reduce(function (s, a) { return s + a.value; }, 0) / n);
+    var center = '<text class="rel-score" x="' + cx + '" y="' + (cy - 1) + '" text-anchor="middle">' + overall + "</text>"
+      + '<text class="rel-score-cap" x="' + cx + '" y="' + (cy + 12) + '" text-anchor="middle">' + esc(t("relOverall")) + "</text>";
+    return '<svg viewBox="0 0 ' + W + " " + H + '" class="rel-svg" role="img" aria-label="' + esc(t("reliabilityTitle")) + '">'
+      + rings + spokes + '<polygon class="rel-area" points="' + dataPts + '"/>' + dots + center + labels + "</svg>";
+  }
+  function renderReliability() {
+    var el = document.getElementById("pentagon");
+    if (!el) return;
+    var selKeys = selKeySet();
+    var sc = document.getElementById("rel-scope");
+    if (sc) { sc.hidden = !selKeys; if (selKeys) sc.textContent = t("flkSelScope"); }
+    el.innerHTML = pentagonSvg(reliabilityAxes());
+  }
+  // "How the score is computed" popup: each axis with its live value + a plain-language
+  // definition (matches reliabilityAxes exactly), so the radar is self-explaining.
+  var relInfoDlg = document.getElementById("rel-info");
+  var REL_DESC = { pass: "relPassDesc", robust: "relRobustDesc", fresh: "relFreshDesc",
+    stable: "relStableDesc", complete: "relCompleteDesc" };
+  function openRelInfo() {
+    var body = document.getElementById("rel-info-body");
+    body.innerHTML = '<p class="rel-info-intro">' + esc(t("relInfoIntro")) + "</p>"
+      + '<ul class="rel-info-list">' + reliabilityAxes().map(function (a) {
+          return '<li><span class="ri-head"><span class="ri-name">' + esc(a.label) + "</span>"
+            + '<span class="ri-val">' + a.value + "</span></span>"
+            + '<span class="ri-desc">' + esc(t(REL_DESC[a.key])) + "</span></li>";
+        }).join("") + "</ul>";
+    if (typeof relInfoDlg.showModal === "function") { if (!relInfoDlg.open) relInfoDlg.showModal(); }
+    else relInfoDlg.setAttribute("open", "");
+    updateParentDim();
+  }
+  function closeRelInfo() { if (relInfoDlg.open) relInfoDlg.close(); else relInfoDlg.removeAttribute("open"); }
+  // Generic "about this panel" popup (a title + one paragraph from i18n) for the runs chart
+  // and the flaky panel.
+  var panelInfoDlg = document.getElementById("panel-info");
+  function openPanelInfo(titleKey, bodyKey) {
+    document.getElementById("panel-info-title").textContent = t(titleKey);
+    document.getElementById("panel-info-body").innerHTML = "<p>" + esc(t(bodyKey)) + "</p>";
+    if (typeof panelInfoDlg.showModal === "function") { if (!panelInfoDlg.open) panelInfoDlg.showModal(); }
+    else panelInfoDlg.setAttribute("open", "");
+    updateParentDim();
+  }
+  function closePanelInfo() { if (panelInfoDlg.open) panelInfoDlg.close(); else panelInfoDlg.removeAttribute("open"); }
+  (function () {
+    var b = document.getElementById("rel-info-btn");
+    if (b) b.addEventListener("click", openRelInfo);
+    var c = document.getElementById("rel-info-close");
+    if (c) c.addEventListener("click", closeRelInfo);
+    if (relInfoDlg) { relInfoDlg.addEventListener("close", updateParentDim); closeOnBackdrop(relInfoDlg, closeRelInfo); }
+    var ci = document.getElementById("chart-info");
+    if (ci) ci.addEventListener("click", function () { openPanelInfo("chartInfoTitle", "chartInfoBody"); });
+    var fi = document.getElementById("flaky-info");
+    if (fi) fi.addEventListener("click", function () { openPanelInfo("flakyInfoTitle", "flakyInfoBody"); });
+    var pc = document.getElementById("panel-info-close");
+    if (pc) pc.addEventListener("click", closePanelInfo);
+    if (panelInfoDlg) { panelInfoDlg.addEventListener("close", updateParentDim); closeOnBackdrop(panelInfoDlg, closePanelInfo); }
+  })();
   // Duration-regression scan honouring the top dag/task/run filters (like the other
   // KPIs): feeds the "Slowdowns" count and primes the modal so its first open is instant.
   function slowQuery(win) {
@@ -2534,11 +2823,15 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       out += '<button type="button" class="af-link" id="cmp-prev" data-i18n-al="comparePrevAl">'
         + cmp + esc(t("comparePrev")) + "</button>";
     }
-    var zap = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"'
-      + ' stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
-      + '<path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z"/></svg>';
-    out += '<button type="button" class="af-link" id="flk-btn" data-i18n-al="flakyBtnAl">'
-      + zap + esc(t("flakyBtn")) + "</button>";
+    // Only offer "Flaky tests" when this dag·task actually has flaky ones (same 30-run window
+    // the modal uses), so the button never opens an empty list.
+    if (flkCountByKey[JSON.stringify([m.dag_id, m.task_id])] > 0) {
+      var zap = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"'
+        + ' stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+        + '<path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z"/></svg>';
+      out += '<button type="button" class="af-link" id="flk-btn" data-i18n-al="flakyBtnAl">'
+        + zap + esc(t("flakyBtn")) + "</button>";
+    }
     var grid = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"'
       + ' stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
       + '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/>'
@@ -3006,12 +3299,33 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       }
     } catch (e) { /* cross-origin parent: skip */ }
   }
+  // A single full-screen dim inside OUR document (standalone page, or the iframe when
+  // embedded). One overlay no matter how many dialogs stack -- popups opened from inside the
+  // run detail never add a second layer of darkening. Dialogs (top layer) render above it.
+  function setLocalDim(on) {
+    var ID = "apx-local-dim";
+    var ov = document.getElementById(ID);
+    if (on) {
+      if (!ov) {
+        ov = document.createElement("div");
+        ov.id = ID;
+        ov.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.5);"
+          + "z-index:1000;pointer-events:none;";
+        document.body.appendChild(ov);
+      }
+    } else if (ov && ov.parentNode) {
+      ov.parentNode.removeChild(ov);
+    }
+  }
   function updateParentDim() {
-    setParentDim((dlg && dlg.open) || (confirmDlg && confirmDlg.open)
+    var anyOpen = (dlg && dlg.open) || (confirmDlg && confirmDlg.open)
       || (failuresDlg && failuresDlg.open) || (compareDlg && compareDlg.open)
       || (flakyDlg && flakyDlg.open) || (historyDlg && historyDlg.open)
       || (uniqueDlg && uniqueDlg.open) || (slowDlg && slowDlg.open)
-      || (heatmapDlg && heatmapDlg.open));
+      || (heatmapDlg && heatmapDlg.open) || (relInfoDlg && relInfoDlg.open)
+      || (panelInfoDlg && panelInfoDlg.open);
+    setLocalDim(anyOpen);   // dim our own page/iframe once
+    setParentDim(anyOpen);  // and (embedded) the Airflow chrome around the iframe
   }
 
   // Copy a deep-link to this report.
@@ -3298,8 +3612,9 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       : '<div class="state">' + esc(t("noCases")) + "</div>";
     listEl.querySelectorAll(".uq-row").forEach(function (row) {
       var open = function () {
-        openHistory(row.getAttribute("data-dag"), row.getAttribute("data-task"),
-          row.getAttribute("data-node"));
+        // Merge across every dag·task this node id ran in -- matches the aggregated count
+        // shown on the row (the same test triggered from two places is one timeline).
+        openHistory(null, null, row.getAttribute("data-node"));
       };
       row.addEventListener("click", open);
       row.addEventListener("keydown", function (e) {
@@ -3531,7 +3846,12 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     else historyDlg.setAttribute("open", "");
     updateParentDim();
     histBody.innerHTML = '<div class="state"><div class="skeleton" style="width:40%;margin:0 auto"></div></div>';
-    var q = new URLSearchParams({ dag_id: dag, task_id: task, node_id: node });
+    // dag/task omitted (Unique tests) -> the server merges this node id across every place
+    // it ran; given -> just that dag·task's runs.
+    var params = { node_id: node };
+    if (dag) params.dag_id = dag;
+    if (task) params.task_id = task;
+    var q = new URLSearchParams(params);
     fetch(API + "test-history?" + q.toString())
       .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
       .then(renderHistory)
@@ -3544,11 +3864,17 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     var rows = d.history || [];
     var head = '<div class="hist-node mono">' + esc(d.node_id) + "</div>";
     if (!rows.length) { histBody.innerHTML = head + '<div class="state">' + esc(t("noHistory")) + "</div>"; return; }
+    // Make the (capped) window explicit: the timeline shows only the newest N runs.
+    head += '<div class="hist-count">' + esc(t("histCount").replace("{n}", rows.length)) + "</div>";
     histBody.innerHTML = head + rows.map(function (h) {
       var label = h.outcome ? outcomeLabel(h.outcome) : t("histDidntRun");
       var dur = h.duration != null ? fmtDur(h.duration) : "";
+      // Merged history (opened from Unique tests) tags each run with its dag·task so it's
+      // clear the same test ran from more than one place.
+      var loc = h.dag_id ? ' · <span class="hist-loc">' + esc(h.dag_id + "·" + h.task_id)
+        + "</span>" : "";
       return '<div class="hist-row">' + outcomeDot(h.outcome)
-        + '<span class="when">' + esc(label) + " · " + esc(fmtTime(h.created_at)) + "</span>"
+        + '<span class="when">' + esc(label) + " · " + esc(fmtTime(h.created_at)) + loc + "</span>"
         + '<span class="dur">' + esc(dur) + "</span></div>";
     }).join("");
   }

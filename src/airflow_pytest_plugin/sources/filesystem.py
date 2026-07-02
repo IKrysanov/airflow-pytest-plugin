@@ -382,18 +382,24 @@ class FileSystemReportSource(ReportSource):
             _log.warning("Skipping meta with missing/invalid identity: %r", meta)
             return None
 
-        summary = meta.get("summary") or {}
-        passed = int(summary.get("passed", 0))
-        failed = int(summary.get("failed", 0))
-        errors = int(summary.get("errors", 0))
+        # The counts/duration come from a semi-trusted sidecar (written by the test code
+        # the operator ran). A single corrupt value (non-numeric count, inf/NaN duration)
+        # must NOT crash the whole scan or leak non-spec JSON -- coerce defensively and
+        # keep the run, mirroring the identity skip above and test_outcomes' finite guard.
+        summary = meta.get("summary")
+        if not isinstance(summary, dict):
+            summary = {}
+        passed = _safe_int(summary.get("passed"))
+        failed = _safe_int(summary.get("failed"))
+        errors = _safe_int(summary.get("errors"))
         return ReportSummary(
             ref=ref,
-            total=int(summary.get("total", 0)),
+            total=_safe_int(summary.get("total")),
             passed=passed,
             failed=failed,
-            skipped=int(summary.get("skipped", 0)),
+            skipped=_safe_int(summary.get("skipped")),
             errors=errors,
-            duration=float(summary.get("duration", 0.0)),
+            duration=_safe_finite_float(summary.get("duration")),
             # success is reader-derived from the pass-rate threshold, not the stored flag.
             success=run_succeeds(passed, failed, errors, threshold),
             created_at=_opt_str(meta.get("created_at")),
@@ -404,3 +410,21 @@ class FileSystemReportSource(ReportSource):
 
 def _opt_str(value: Any) -> str | None:
     return str(value) if value is not None else None
+
+
+def _safe_int(value: Any) -> int:
+    """A summary count coerced to a non-negative int; ``0`` for anything unparseable."""
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _safe_finite_float(value: Any) -> float:
+    """A summary duration coerced to a finite float; ``0.0`` for bad/inf/NaN values
+    (non-finite floats are not JSON-spec and would 500 the serializer)."""
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return f if math.isfinite(f) else 0.0

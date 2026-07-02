@@ -1259,6 +1259,56 @@ def test_test_history_requires_node_id(client):
     assert client.get("/api/test-history?dag_id=d&task_id=t").status_code == 422
 
 
+def test_test_history_merges_across_dag_tasks(reports_root):
+    # The SAME node id, run from two different dag·tasks (e.g. shared conftest test).
+    write_tests(
+        reports_root,
+        ReportRef("dag1", "r1", "unit", 1),
+        [["shared", "passed", 0.1]],
+        created_at="2026-06-01T00:00:00+00:00",
+    )
+    write_tests(
+        reports_root,
+        ReportRef("dag2", "r1", "smoke", 1),
+        [["shared", "failed", 0.2]],
+        created_at="2026-06-02T00:00:00+00:00",
+    )
+    # No dag/task -> merged timeline across every place the node ran.
+    d = (
+        TestClient(make_app(reports_root))
+        .get("/api/test-history?node_id=shared")
+        .json()
+    )
+    assert d["node_id"] == "shared"
+    assert d["dag_id"] is None and d["task_id"] is None  # merged, not scoped
+    assert [h["outcome"] for h in d["history"]] == ["failed", "passed"]  # newest first
+    assert {(h["dag_id"], h["task_id"]) for h in d["history"]} == {
+        ("dag1", "unit"),
+        ("dag2", "smoke"),
+    }
+
+
+def test_test_history_merged_respects_rbac(reports_root):
+    write_tests(
+        reports_root,
+        ReportRef("dag1", "r1", "unit", 1),
+        [["shared", "passed"]],
+        created_at="2026-06-01T00:00:00+00:00",
+    )
+    write_tests(
+        reports_root,
+        ReportRef("dag2", "r1", "smoke", 1),
+        [["shared", "failed"]],
+        created_at="2026-06-02T00:00:00+00:00",
+    )
+    # Only dag1 is readable -> the merged timeline excludes dag2's run.
+    c = TestClient(
+        make_app(reports_root, read_authorizer=lambda dag_id, user: dag_id == "dag1")
+    )
+    d = c.get("/api/test-history?node_id=shared").json()
+    assert {(h["dag_id"], h["task_id"]) for h in d["history"]} == {("dag1", "unit")}
+
+
 def test_unique_tests_counts_distinct_node_ids(reports_root):
     write_tests(
         reports_root,

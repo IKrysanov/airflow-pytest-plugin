@@ -570,47 +570,88 @@ def build_router(deps: RouteDeps) -> APIRouter:
         },
     )
     def test_history(
-        dag_id: str,
-        task_id: str,
         node_id: str,
+        dag_id: str | None = None,
+        task_id: str | None = None,
         limit: int = 50,
         user: Any = Depends(user_dep),  # noqa: B008 - FastAPI dependency idiom
     ) -> JSONResponse:
-        """One test's outcome and duration across the runs of an exact dag·task.
+        """One test's outcome and duration across runs.
 
-        ``node_id`` is the pytest node id (``file::Class::test``). Returns the
-        newest ``limit`` runs (clamped 1–500), each with the test's outcome and
-        duration (``null`` if it didn't run that time). ``403`` if the dag isn't
-        readable.
+        ``node_id`` is the pytest node id (``file::Class::test``). With both
+        ``dag_id`` and ``task_id`` given, returns the newest ``limit`` runs of that
+        EXACT dag·task (``null`` outcome when the test didn't run that time).
+
+        With dag·task omitted (the *Unique tests* view), the history is MERGED across
+        every readable dag·task where this node id ran — the same test triggered from
+        two places shows a single, unified timeline. Each entry then also carries the
+        ``dag_id``/``task_id`` it came from. Newest ``limit`` runs (clamped 1–500).
         """
-        if not read_auth(dag_id, user):
-            raise HTTPException(
-                status_code=403, detail="not authorized to read this dag"
-            )
         lim = max(1, min(limit, 500))
-        runs = [
-            s
-            for s in src.list_summaries(dag_id=dag_id)
-            if s.ref.dag_id == dag_id and s.ref.task_id == task_id
-        ]
-        runs.sort(key=lambda s: s.created_at or "", reverse=True)
         history: list[dict[str, Any]] = []
-        for s in runs[:lim]:
+
+        if dag_id is not None and task_id is not None:
+            if not read_auth(dag_id, user):
+                raise HTTPException(
+                    status_code=403, detail="not authorized to read this dag"
+                )
+            runs = [
+                s
+                for s in src.list_summaries(dag_id=dag_id)
+                if s.ref.dag_id == dag_id and s.ref.task_id == task_id
+            ]
+            runs.sort(key=lambda s: s.created_at or "", reverse=True)
+            for s in runs[:lim]:
+                info = (src.test_outcomes(s.ref) or {}).get(node_id)
+                history.append(
+                    {
+                        "run_id": s.ref.run_id,
+                        "created_at": s.created_at,
+                        "outcome": info["outcome"] if info else None,
+                        "duration": info["duration"] if info else None,
+                    }
+                )
+            return JSONResponse(
+                {
+                    "node_id": node_id,
+                    "dag_id": dag_id,
+                    "task_id": task_id,
+                    "history": history,
+                }
+            )
+
+        # Merged: newest runs across ALL readable dag·tasks where this node id ran.
+        scanned = 0
+        capped = False
+        for s in src.list_summaries():  # newest first, every dag
+            if not read_auth(s.ref.dag_id, user):
+                continue
+            if scanned >= _UNIQUE_SCAN_CAP:
+                capped = True
+                break
+            scanned += 1
             info = (src.test_outcomes(s.ref) or {}).get(node_id)
+            if info is None:
+                continue  # this test didn't run in this run
             history.append(
                 {
                     "run_id": s.ref.run_id,
                     "created_at": s.created_at,
-                    "outcome": info["outcome"] if info else None,
-                    "duration": info["duration"] if info else None,
+                    "outcome": info.get("outcome"),
+                    "duration": info.get("duration"),
+                    "dag_id": s.ref.dag_id,
+                    "task_id": s.ref.task_id,
                 }
             )
+            if len(history) >= lim:
+                break
         return JSONResponse(
             {
                 "node_id": node_id,
-                "dag_id": dag_id,
-                "task_id": task_id,
+                "dag_id": None,
+                "task_id": None,
                 "history": history,
+                "capped": capped,
             }
         )
 

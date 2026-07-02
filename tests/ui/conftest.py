@@ -165,6 +165,76 @@ def _seed(root: str, specs: list[tuple[str, bool]], nruns: int) -> None:
             _write_run(root, dag, f"r{ri:03d}", when, _cases_for(dag, ri, nruns, rich))
 
 
+def _seed_green(root: str, nruns: int = 8) -> None:
+    """All-passing runs of one dag·task: no flips -> no flaky, no failures -> no clusters.
+
+    Used to check that the flaky panel / group chips / run-detail flaky button all disappear
+    when there is nothing flaky (and the runs chart then takes the full board width).
+    """
+    cases = [(f"tests/g.py::test_ok_{ti:02d}", "passed", 0.1) for ti in range(4)]
+    for ri in range(nruns):
+        when = (_BASE + timedelta(hours=ri)).isoformat()
+        _write_run(root, "green_dag", f"r{ri:03d}", when, cases)
+
+
+#: XSS payload embedded in a test node id + failure message (the failure decodes to live HTML),
+#: to regression-test that the UI escapes user-supplied strings client-side.
+_XSS_NODE = "tests/x.py::test_<script>window.__xss=1</script>_case"
+_XSS_MSG = '"><img src=x onerror="window.__xss=1">'
+
+
+def _seed_evil(root: str, nruns: int = 3) -> None:
+    """One dag·task whose test carries an XSS payload in its node id + failure message.
+
+    The junit is valid (payload XML-escaped, so it parses), but the DECODED strings are hostile
+    HTML — the viewer must render them as inert text, never execute them.
+    """
+    import xml.sax.saxutils as su
+
+    name_attr = su.quoteattr(_XSS_NODE.split("::", 1)[1])
+    junit = (
+        '<?xml version="1.0"?><testsuites>'
+        '<testsuite name="p" tests="1" failures="1" errors="0" skipped="0" time="0.1">'
+        f'<testcase classname="tests/x.py" name={name_attr} time="0.1">'
+        f"<failure message={su.quoteattr(_XSS_MSG)}>{su.escape(_XSS_MSG)}</failure>"
+        "</testcase></testsuite></testsuites>"
+    )
+    for ri in range(nruns):
+        ref = ReportRef("evil", f"r{ri:03d}", "suite", 1, -1)
+        out = ReportLayout().dir_for(root, ref)
+        os.makedirs(out, exist_ok=True)
+        Path(out, "junit.xml").write_text(junit, encoding="utf-8")
+        when = (_BASE + timedelta(hours=ri)).isoformat()
+        Path(out, META_FILENAME).write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "dag_id": "evil",
+                    "run_id": f"r{ri:03d}",
+                    "task_id": "suite",
+                    "try_number": 1,
+                    "map_index": -1,
+                    "logical_date": when,
+                    "created_at": when,
+                    "report_file": "junit.xml",
+                    "summary": {
+                        "total": 1,
+                        "passed": 0,
+                        "failed": 1,
+                        "skipped": 0,
+                        "errors": 0,
+                        "duration": 0.1,
+                        "exit_code": 1,
+                        "success": False,
+                        "failed_node_ids": [_XSS_NODE],
+                    },
+                    "tests": [[_XSS_NODE, "failed", 0.1]],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+
 # --- dev server ---------------------------------------------------------------
 def _free_port() -> int:
     s = socket.socket()
@@ -238,6 +308,22 @@ def large_base_url(tmp_path_factory):
     yield from _boot(str(root))
 
 
+@pytest.fixture(scope="session")
+def green_base_url(tmp_path_factory):
+    """All-green seed (no flaky, no failures) -> flaky UI absent, chart full width."""
+    root = tmp_path_factory.mktemp("ui-reports-green")
+    _seed_green(str(root))
+    yield from _boot(str(root))
+
+
+@pytest.fixture(scope="session")
+def evil_base_url(tmp_path_factory):
+    """Seed with an XSS payload in a test name/message -> verify the UI escapes it."""
+    root = tmp_path_factory.mktemp("ui-reports-evil")
+    _seed_evil(str(root))
+    yield from _boot(str(root))
+
+
 @dataclass
 class Dash:
     page: object
@@ -269,6 +355,18 @@ def dash(page, base_url) -> Dash:
 def large_dash(page, large_base_url) -> Dash:
     """A loaded LARGE dashboard (3200 runs / 40 groups) for layout-at-scale checks."""
     return _load_dash(page, large_base_url)
+
+
+@pytest.fixture
+def green_dash(page, green_base_url) -> Dash:
+    """A loaded dashboard with no flaky tests -> flaky panel/chips/buttons should be absent."""
+    return _load_dash(page, green_base_url)
+
+
+@pytest.fixture
+def evil_dash(page, evil_base_url) -> Dash:
+    """A loaded dashboard whose data carries an XSS payload -> the UI must escape it."""
+    return _load_dash(page, evil_base_url)
 
 
 # --- real Airflow (embedded) --------------------------------------------------

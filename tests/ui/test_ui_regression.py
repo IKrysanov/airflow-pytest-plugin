@@ -25,6 +25,7 @@ rather than translatable text, so they don't break on copy or locale changes.
 from __future__ import annotations
 
 import math
+import re
 
 import pytest
 from playwright.sync_api import expect
@@ -180,19 +181,26 @@ def test_mobile_has_no_horizontal_scroll(dash):
     assert dash.errors == []
 
 
-def test_chart_tooltip_anchored_above_bars(dash):
-    # The runs-chart tooltip pins its Y above the bars (follows the cursor's X only) so it
-    # doesn't jump up/down as the cursor sweeps -- regression guard.
+def test_chart_tooltip_below_left_of_cursor(dash):
+    # The runs-chart tooltip appears just BELOW the cursor, offset to its left (flips to the
+    # right only near the left edge). Regression guard against the old "pinned far above" look.
     page = dash.page
-    page.locator(".chart-bars .bar").first.hover()
-    page.wait_for_timeout(450)
+    # Hover a bar toward the right so there's room on the left for the tooltip.
+    bars = page.locator(".chart-bars .bar")
+    n = bars.count()
+    box = bars.nth(max(0, n - 2)).bounding_box()
+    cx = box["x"] + box["width"] / 2
+    cy = box["y"] + box["height"] / 2
+    page.mouse.move(cx, cy)
+    page.wait_for_timeout(500)
     r = page.evaluate(
-        "() => { const t=document.getElementById('tip'), s=document.querySelector('.chart-bars');"
+        "() => { const t=document.getElementById('tip');"
         " if(!t || getComputedStyle(t).display==='none') return null;"
-        " return {tb: t.getBoundingClientRect().bottom, st: s.getBoundingClientRect().top}; }"
+        " const b=t.getBoundingClientRect(); return {top: b.top, right: b.right}; }"
     )
     assert r is not None, "chart tooltip did not show"
-    assert r["tb"] <= r["st"] + 2, "tooltip should sit above the bars (stable Y anchor)"
+    assert r["top"] > cy, "tooltip should sit below the cursor"
+    assert r["right"] <= cx + 2, "tooltip should sit to the left of the cursor"
 
 
 def test_list_header_only_label_sorts(dash):
@@ -229,3 +237,269 @@ def test_case_table_long_names_wrap(dash):
         ".case-table", "el => el.querySelector('table').scrollWidth - el.clientWidth"
     )
     assert overflow <= 3, f"case table overflows horizontally by {overflow}px"
+
+
+def test_group_flaky_chip_shown_for_flaky_groups(dash):
+    # Every seeded group has a flaky test -> each group row shows the amber warning chip
+    # (with a warning icon). Guard for the per-group flaky indicator.
+    page = dash.page
+    expect(page.locator("tr.lgrp")).to_have_count(3)
+    chips = page.locator(".lgrp-flk")
+    expect(chips).to_have_count(3)
+    assert chips.first.locator("svg").count() == 1  # warning triangle icon
+
+
+def test_nested_modal_single_dim(dash):
+    # A popup opened from inside the run detail must not stack a second dim -- exactly one
+    # full-screen overlay regardless of how many dialogs are open. Regression for double-dark.
+    page = dash.page
+    page.click("tr.lgrp:has-text('alpha')")
+    page.locator("tr.clickable").first.click()
+    expect(page.locator("dialog#detail")).to_be_visible()
+    page.click("#hm-btn")
+    expect(page.locator("dialog#heatmap")).to_be_visible()
+    open_dialogs = page.evaluate(
+        "() => [...document.querySelectorAll('dialog')].filter(d => d.open).length"
+    )
+    assert open_dialogs == 2, "both the detail and the heatmap should be open"
+    assert page.locator("#apx-local-dim").count() == 1, "dim must not double up"
+
+
+def test_cluster_status_square_does_not_shrink(dash):
+    # In the failure-clusters list a long test name wraps -- the status square must keep its
+    # fixed size (flex:0 0 auto), not get squeezed by the wrapping name.
+    page = dash.page
+    page.click("#kpi-failures")
+    expect(page.locator("dialog#failures")).to_be_visible()
+    page.wait_for_selector("#cl-list .cl-row")
+    page.locator("#cl-list .cl-row").first.click()
+    page.wait_for_selector(".cl-item .od")
+    st = page.eval_on_selector(
+        ".cl-item .od",
+        "el => ({shrink: getComputedStyle(el).flexShrink,"
+        " w: Math.round(el.getBoundingClientRect().width),"
+        " h: Math.round(el.getBoundingClientRect().height)})",
+    )
+    assert st["shrink"] == "0", "status square must not shrink"
+    assert st["w"] == 9 and st["h"] == 9, f"status square should stay 9x9, got {st}"
+
+
+def test_flaky_ui_absent_when_no_flaky(green_dash):
+    # No flaky anywhere: the flaky panel is dropped, the runs chart takes the full board
+    # width, and no group shows a flaky chip.
+    page = green_dash.page
+    expect(page.locator("#flaky-card")).to_be_hidden()
+    full = page.evaluate(
+        "() => { const c=document.getElementById('chart-card'),"
+        " b=document.getElementById('board');"
+        " return Math.abs(c.getBoundingClientRect().width - b.getBoundingClientRect().width)"
+        " <= 2; }"
+    )
+    assert full, "chart should span the full board width when the flaky panel is hidden"
+    assert page.locator(".lgrp-flk").count() == 0, (
+        "no flaky chips when nothing is flaky"
+    )
+    assert green_dash.errors == [], f"JS/console errors: {green_dash.errors}"
+
+
+def test_flk_button_absent_in_run_with_no_flaky(green_dash):
+    # Opening a run whose dag·task has no flaky tests must NOT show the "Flaky tests" button.
+    page = green_dash.page
+    page.locator("tr.lgrp").first.click()
+    page.locator("tr.clickable").first.click()
+    expect(page.locator("dialog#detail")).to_be_visible()
+    assert page.locator("#flk-btn").count() == 0
+
+
+def test_unique_history_merges_across_dag_tasks(dash):
+    # Opening a test's history from the Unique-tests list shows the MERGED timeline across
+    # every dag·task the node ran in -- each row is tagged with its dag·task (.hist-loc),
+    # which is rendered ONLY in merged mode (scoped history omits it).
+    page = dash.page
+    expect(page.locator("#kpi-unique .value")).not_to_have_text("…", timeout=15000)
+    page.click("#kpi-unique")
+    expect(page.locator("dialog#unique")).to_be_visible()
+    page.wait_for_selector(".uq-row")
+    row = page.locator(".uq-row").first
+    expect(row).to_be_visible()
+    page.wait_for_timeout(
+        300
+    )  # let the async catalogue settle so the row doesn't detach
+    row.click()
+    expect(page.locator("dialog#history")).to_be_visible()
+    page.wait_for_selector(".hist-row")
+    assert page.locator(".hist-row .hist-loc").count() > 0, (
+        "merged history should tag each run with its dag·task"
+    )
+
+
+def test_history_shows_run_count(dash):
+    # The history modal states over how many runs the (capped) timeline is shown.
+    page = dash.page
+    expect(page.locator("#flaky-count")).to_have_text("3")  # flaky loaded
+    page.locator("#flaky-list .fb-row").first.click()
+    expect(page.locator("dialog#history")).to_be_visible()
+    page.wait_for_selector(".hist-count")
+    assert page.locator(".hist-row").count() >= 1
+    assert re.search(r"\d", page.locator(".hist-count").inner_text())
+
+
+def test_reliability_pentagon_renders(dash):
+    # The 3rd main-board dashboard: a 5-axis reliability radar under the chart.
+    page = dash.page
+    expect(page.locator("#board2")).to_be_visible()
+    expect(page.locator(".rel-svg")).to_be_visible()
+    assert page.locator(".rel-lab").count() == 5, "pentagon has 5 axes"
+    score = int(page.locator(".rel-score").text_content().strip())  # SVG <text>
+    assert 0 <= score <= 100
+    # It sits on its own row UNDER the full-width chart, narrower than it (shares the row with
+    # flaky), and its labels stay inside the SVG viewBox (adaptive -> never clipped).
+    geo = page.evaluate(
+        "() => { const c=document.getElementById('chart-card').getBoundingClientRect(),"
+        " p=document.getElementById('pentagon-card').getBoundingClientRect(),"
+        " svg=document.querySelector('.rel-svg'), vb=svg.viewBox.baseVal;"
+        " let lo=1e9, hi=-1e9;"
+        " svg.querySelectorAll('.rel-lab').forEach(t => { const b=t.getBBox();"
+        " lo=Math.min(lo,b.x); hi=Math.max(hi,b.x+b.width); });"
+        " return {below: p.top >= c.bottom - 2, narrower: p.width < c.width - 40,"
+        " labelsFit: lo >= 0 && hi <= vb.width}; }"
+    )
+    assert geo["below"], "radar should sit under the chart"
+    assert geo["narrower"], "radar should be narrower than the full-width chart"
+    assert geo["labelsFit"], "radar labels should stay inside the viewBox (adaptive)"
+    assert dash.errors == [], f"JS/console errors: {dash.errors}"
+
+
+def test_reliability_pentagon_scopes_to_selection(dash):
+    # Selecting a group scopes the radar (like the chart/flaky) and shows the scope chip.
+    page = dash.page
+    expect(page.locator(".rel-svg")).to_be_visible()
+    page.locator("tr.lgrp:has-text('beta') .gsel").check()
+    expect(page.locator("#rel-scope")).to_be_visible()
+    expect(page.locator(".rel-svg")).to_be_visible()  # still rendered after re-scope
+    assert dash.errors == []
+
+
+def test_reliability_info_modal_explains_each_metric(dash):
+    # The ⓘ button opens a popup describing all five axes (with their live values).
+    page = dash.page
+    page.click("#rel-info-btn")
+    expect(page.locator("dialog#rel-info")).to_be_visible()
+    page.wait_for_selector("#rel-info-body .rel-info-list li")
+    assert page.locator("#rel-info-body .rel-info-list li").count() == 5
+    assert page.locator("#rel-info-body .ri-desc").first.inner_text().strip() != ""
+    assert dash.errors == []
+
+
+def test_kpi_all_chip_on_global_counters(dash):
+    # RUNS + PASSING RUNS carry an "all" chip: they count every run in view and ignore a
+    # group selection (unlike the scoped Failures/Slowdowns).
+    page = dash.page
+    expect(page.locator("#kpis .kpi-all")).to_have_count(2)
+
+
+def test_panel_info_popups_open(dash):
+    # ⓘ on the runs chart and the flaky panel each open a description popup.
+    page = dash.page
+    page.click("#chart-info")
+    expect(page.locator("dialog#panel-info")).to_be_visible()
+    assert page.locator("#panel-info-body p").inner_text().strip() != ""
+    page.click("#panel-info-close")
+    expect(page.locator("dialog#panel-info")).to_be_hidden()
+    page.click("#flaky-info")
+    expect(page.locator("dialog#panel-info")).to_be_visible()
+    assert page.locator("#panel-info-body p").inner_text().strip() != ""
+    assert dash.errors == []
+
+
+def test_radar_pass_rate_matches_chart_avg_for_a_group(dash):
+    # The radar's Pass rate uses the SAME per-run-mean formula as the chart's "avg pass rate",
+    # so scoping to one group (whose runs all fit the chart window) reads identically on both.
+    page = dash.page
+    page.locator("tr.lgrp:has-text('alpha') .gsel").check()
+    page.check("#trend-toggle")
+    expect(page.locator("#chart-avg")).to_be_visible()
+    chart_avg = int(
+        re.search(r"(\d+)", page.locator("#chart-avg").inner_text()).group(1)
+    )
+    radar_pass = int(
+        page.locator(".rel-val").first.text_content().strip()
+    )  # first axis = pass
+    assert abs(chart_avg - radar_pass) <= 1, (
+        f"chart avg {chart_avg}% vs radar pass {radar_pass}"
+    )
+
+
+def test_radar_pass_rate_matches_chart_avg_globally(dash):
+    # With no selection the chart's avg pass rate now spans ALL runs (not just the visible
+    # window), so it equals the radar's Pass rate exactly.
+    page = dash.page
+    page.check("#trend-toggle")
+    expect(page.locator("#chart-avg")).to_be_visible()
+    chart_avg = int(
+        re.search(r"(\d+)", page.locator("#chart-avg").inner_text()).group(1)
+    )
+    radar_pass = int(page.locator(".rel-val").first.text_content().strip())
+    assert chart_avg == radar_pass, (
+        f"global: chart avg {chart_avg}% vs radar pass {radar_pass}%"
+    )
+
+
+def test_flaky_panel_scrolls_within_bounded_card(large_dash):
+    # Many flaky tests: the panel fills its (bounded) card and scrolls INSIDE it, rather than
+    # stretching the row to fit every row.
+    page = large_dash.page
+    expect(page.locator(".flaky-scroll")).to_be_visible()
+    r = page.evaluate(
+        "() => { const fs=document.querySelector('.flaky-scroll'),"
+        " fc=document.getElementById('flaky-card');"
+        " return {cardH: fc.getBoundingClientRect().height,"
+        " scrollable: fs.scrollHeight > fs.clientHeight + 2}; }"
+    )
+    assert r["cardH"] < 600, f"flaky card must stay bounded, got {r['cardH']}px"
+    assert r["scrollable"], "a long flaky list should scroll inside the card"
+
+
+def test_malicious_test_name_and_message_are_escaped(evil_dash):
+    # Security: a test node id / failure message carrying HTML must render as inert text, never
+    # execute. Guards the viewer's client-side escaping against stored XSS.
+    page = evil_dash.page
+    fired = []
+    page.on("dialog", lambda d: (fired.append(d.message), d.dismiss()))
+    page.click("tr.lgrp")  # expand the evil group
+    page.locator("tr.clickable").first.click()
+    expect(page.locator("dialog#detail")).to_be_visible()
+    page.wait_for_selector("#detail tr.case")
+    page.locator(
+        "#detail tr.case"
+    ).first.click()  # expand -> render the failure message
+    page.wait_for_timeout(300)
+    state = page.evaluate(
+        "() => ({ xss: !!window.__xss,"
+        " injected: document.querySelectorAll('img[onerror], #detail script').length,"
+        " node: (document.querySelector('#detail .case-node') || {}).textContent || '' })"
+    )
+    assert state["xss"] is False, "XSS payload executed"
+    assert fired == [], f"unexpected dialog(s): {fired}"
+    assert state["injected"] == 0, "hostile HTML was injected as live nodes"
+    assert "<script>" in state["node"], "node id should be shown as escaped text"
+    assert evil_dash.errors == [], f"JS errors: {evil_dash.errors}"
+
+
+def test_chart_bar_hover_does_not_change_fill(dash):
+    # Hovering a bar must NOT brighten/recolour it (colours "jumping" as you sweep) — it shows
+    # a ring instead.
+    page = dash.page
+    box = page.locator(".chart-bars .bar").nth(3).bounding_box()
+    page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+    page.wait_for_timeout(150)
+    st = page.evaluate(
+        "() => { const el=[...document.querySelectorAll('.bar')].find(e => e.matches(':hover'));"
+        " return el ? {filter: getComputedStyle(el).filter,"
+        " shadow: getComputedStyle(el).boxShadow} : null; }"
+    )
+    assert st is not None, "no bar hovered"
+    assert st["filter"] in ("none", ""), (
+        f"bar hover must not filter the fill, got {st['filter']}"
+    )
+    assert st["shadow"] not in ("none", ""), "bar hover should show a ring"
