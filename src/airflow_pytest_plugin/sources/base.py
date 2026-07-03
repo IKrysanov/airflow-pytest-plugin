@@ -67,3 +67,13 @@ class ReportSource(ABC):
         leaves the size policy inert for sources that can't measure themselves).
         """
         return 0
+
+    def record_alert(self, ref: ReportRef, entry: dict[str, Any]) -> bool:
+        """Append one email-notification record to the run's stored history.
+
+        ``entry`` carries ``at``/``kind``/``recipients``/``ok``/``manual``; the history
+        surfaces in :class:`~..models.ReportDetail.alerts`. Optional capability
+        (default: unsupported -> ``False``); implementations must be best-effort and
+        never raise for ordinary storage problems.
+        """
+        return False

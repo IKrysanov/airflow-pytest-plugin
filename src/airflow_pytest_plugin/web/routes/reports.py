@@ -32,17 +32,21 @@ from ...config import (
     get_slow_min_delta,
     get_success_threshold,
 )
-from ...notifications import AlertPolicy, build_mailer, build_run_alert
+from ...notifications import (
+    AlertPolicy,
+    allure_attachment,
+    build_mailer,
+    build_run_alert,
+    dedupe_emails,
+    is_valid_email,
+    record_sent_alert,
+)
 from .common import ERR_400, ERR_403, ERR_404, RouteDeps, ok, ref_from_token
 
 _log = logging.getLogger(__name__)
 
 TAG = "reports"
 
-#: Basic email-shape check for user-supplied recipients (one @, a dotted domain, no spaces).
-#: Not RFC-perfect on purpose — it rejects the abuse cases (spaces, CR/LF, header tricks)
-#: while accepting ordinary addresses; the transport also strips control chars from headers.
-_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 #: Cap recipients per email so the endpoint can't be turned into a mass-mailer.
 _MAX_EMAIL_RECIPIENTS = 10
 
@@ -85,13 +89,15 @@ async def _json_body(request: Request) -> dict[str, Any]:
 def _resolve_recipients(body: dict[str, Any]) -> tuple[str, ...]:
     """Validated recipients from the body, or the configured default when omitted.
 
-    Accepts a list or a comma/semicolon string. Each address must look like an email and
-    the list is capped -- raises HTTP ``400`` otherwise (so the endpoint can't be abused as
-    an open mailer). Deduplicated, order preserved.
+    Accepts a list or a comma/semicolon string. Every address is checked with the same
+    strict validator the alerting layer uses (``is_valid_email``) and rejected with a
+    plain-language HTTP ``400`` naming the bad address; the list is capped so the endpoint
+    can't be abused as a mass-mailer. Duplicates (case-insensitive) collapse to one send.
     """
     raw = body.get("recipients")
     if raw is None or raw == "":
-        return tuple(get_alerts_recipients())
+        # The configured default, normalized the same way (invalid dropped, deduped).
+        return dedupe_emails([a for a in get_alerts_recipients() if is_valid_email(a)])
     if isinstance(raw, str):
         raw = re.split(r"[,;]", raw)
     if not isinstance(raw, list):
@@ -99,15 +105,19 @@ def _resolve_recipients(body: dict[str, Any]) -> tuple[str, ...]:
             status_code=400, detail="recipients must be a list of email addresses"
         )
     cleaned = [str(r).strip() for r in raw if str(r).strip()]
-    bad = next((r for r in cleaned if not _EMAIL_RE.match(r)), None)
+    bad = next((r for r in cleaned if not is_valid_email(r)), None)
     if bad is not None:
-        raise HTTPException(status_code=400, detail=f"invalid email address: {bad!r}")
-    if len(cleaned) > _MAX_EMAIL_RECIPIENTS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"invalid email address: {bad[:100]!r} — use name@example.com",
+        )
+    deduped = dedupe_emails(cleaned)
+    if len(deduped) > _MAX_EMAIL_RECIPIENTS:
         raise HTTPException(
             status_code=400,
             detail=f"too many recipients (max {_MAX_EMAIL_RECIPIENTS})",
         )
-    return tuple(dict.fromkeys(cleaned))
+    return deduped
 
 
 #: Cap on how many (newest) runs /api/unique-tests reads per-test maps from, so the
@@ -650,13 +660,16 @@ def build_router(deps: RouteDeps) -> APIRouter:
                 body=alert.body,
                 html=alert.html,
                 recipients=recipients,
+                attachments=allure_attachment(src, ref),
             )
         except Exception as exc:
             _log.warning("emailing run %s failed: %s", report_id, exc)
+            record_sent_alert(src, ref, alert, recipients, ok=False, manual=True)
             # Surface a short, safe reason (type + message, no traceback/password) so the caller
             # can act -- e.g. "SMTPAuthenticationError: (535, ...)" or a connection timeout. The
             # endpoint is RBAC-gated and the mailer never echoes the password, so this is safe.
             raise HTTPException(status_code=502, detail=_safe_reason(exc)) from exc
+        record_sent_alert(src, ref, alert, recipients, ok=True, manual=True)
         # Audit: who emailed which run to how many recipients (count only -- no addresses).
         _log.info(
             "emailed run %s·%s·%s to %d recipient(s) (user=%s)",

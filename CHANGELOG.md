@@ -31,7 +31,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recipients are optional (default the configured ones), validated as addresses, capped, and the
   subject is header-sanitized; the send is audited and its failure reason is surfaced.
 
+- **Email-send log per run (✉ bench)** — every send attempt (automatic or manual) is recorded in
+  the run's `meta.json` (`alerts`: timestamp, kind, recipients, delivered-ok, manual; sanitized
+  and capped at the newest 50). The run's toolbar shows an ✉ **Emails N** bench; clicking it opens
+  the log listing who was mailed with a ✓ delivered / ✗ failed mark per send. Exposed via the run
+  detail payload (`alerts`) and a new optional `ReportSource.record_alert` capability.
+- **Allure results attached to notification emails** — when the run has raw Allure results, the
+  email carries them as `allure-results.zip` (skipped above 10 MB so mail servers don't reject
+  the message; a failure to build the archive never blocks the email).
+- **Run-health trend is time-explicit** — the sparkline now shows its time axis (dates of the
+  first and last run in view under the line), the big number is calibrated to the CURRENT health
+  (the line's right edge, tooltip'd), and the ⓘ popup explains the reading left-to-right.
+- **Case table sorts by Outcome** — the run detail's OUTCOME column sorts like the other columns:
+  ascending puts broken tests first, descending puts passing ones first.
+
+- **`email_only_fail` parser flag** — `ArchivingResultParser(email_only_fail=True)` emails only
+  when a run failed or turned flaky (no success mail); it wins over `email=True` when both are
+  set. The default (both off) still sends nothing.
+
 ### Changed
+- **Recipient validation & dedupe hardened** — one strict RFC-bounded validator
+  (`is_valid_email`: length limits, dot/label rules, no control characters) is shared by the
+  config path, the API endpoint and (mirrored) the UI dialog. Invalid configured recipients are
+  dropped with a warning instead of failing every send; duplicates collapse case-insensitively
+  everywhere, so one mailbox always gets exactly one email. The dialog now validates before any
+  request and names the bad address in the user's language; the server answers a plain `400`.
+- **Run toolbar adapts to any viewport** — the action chips wrap and compact on narrow screens
+  (≤640px), so an action-heavy run never overlaps or overflows the dialog.
 - **Reliability card grows to fit the trend** (340→384px) so the radar stays large; the flaky
   panel matches the new height. The trend line uses a non-scaling 2px stroke (even thickness).
 - **Explicit SMTP wins over Airflow's `send_email`** — if `AIRFLOW_PYTEST_SMTP_HOST` is set the
@@ -52,6 +78,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the producer `email=` gate (fires only when True). The `POST /api/reports/{id}/email`
   endpoint: RBAC 403, 400 on bad/too-many/injection recipients, 404/503/502, HTML delivered. UI
   tests for the run-health trend and the Email button (hidden without a transport; dialog + validation).
+- **Send-log + attachment tests** — history recorded for delivered and failed sends (not on
+  dry-run), visible in the detail payload; the history is capped at 50 and hostile entry fields
+  are truncated; Allure zip attached when present, skipped when oversized; `multipart` transport;
+  UI tests for the ✉ bench, its modal (recipients + ✓/✗), the trend's date axis, and Outcome
+  sorting. **A real end-to-end suite**: 10 archived runs of an actual pytest test marked
+  `@pytest.mark.flaky(reruns=3)` — every run settles green, parses cleanly, stays invisible to
+  the cross-run flaky detector (junit stores only the final outcome), and notifies as "passed".
 
 ## [0.5.0] - 2026-07-02
 

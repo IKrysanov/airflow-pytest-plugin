@@ -154,12 +154,18 @@ class CaseView:
 
 @dataclass(frozen=True)
 class ReportDetail:
-    """A summary plus its per-case rows -- the detail view's payload."""
+    """A summary plus its per-case rows -- the detail view's payload.
+
+    ``alerts`` is the run's email-notification history (oldest first), read from the
+    ``meta.json`` sidecar; each entry carries ``at``/``kind``/``recipients``/``ok``/``manual``.
+    """
 
     summary: ReportSummary
     cases: tuple[CaseView, ...] = field(default_factory=tuple)
+    alerts: tuple[dict[str, Any], ...] = field(default_factory=tuple)
 
     def to_dict(self) -> dict[str, Any]:
         data = self.summary.to_dict()
         data["cases"] = [c.to_dict() for c in self.cases]
+        data["alerts"] = list(self.alerts)
         return data

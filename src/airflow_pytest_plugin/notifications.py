@@ -36,7 +36,10 @@ default ``always=False`` (email only on a failed / flaky run).
 from __future__ import annotations
 
 import logging
+import os
+import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from html import escape
 from typing import TYPE_CHECKING, Any, Protocol
 from urllib.parse import quote
@@ -65,6 +68,46 @@ _log = logging.getLogger(__name__)
 _MAX_LISTED = 12
 
 
+# -- recipients: validation + dedupe ----------------------------------------------------------
+#: Pragmatic, RFC-5321-bounded address shape: a printable local part (letters, digits and the
+#: common special characters; dots only BETWEEN atoms -- so no leading/trailing/double dots),
+#: then dot-separated LDH domain labels (start/end alphanumeric) and an alphabetic TLD. The
+#: charset excludes whitespace and control characters, which also blocks header injection.
+#: ``\Z`` (not ``$``) so a trailing newline can never sneak past the anchor.
+_EMAIL_RE = re.compile(
+    r"[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+)*"
+    r"@"
+    r"(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
+    r"[A-Za-z]{2,63}\Z"
+)
+
+
+def is_valid_email(address: str) -> bool:
+    """Whether ``address`` is a sane, safely-mailable email address.
+
+    Enforces the RFC 5321 length limits (local part <= 64, total <= 254) on top of the
+    shape check, so an address that passes here can be put in a header verbatim.
+    """
+    if not address or len(address) > 254:
+        return False
+    local, sep, _domain = address.partition("@")
+    if not sep or len(local) > 64:
+        return False
+    return _EMAIL_RE.match(address) is not None
+
+
+def dedupe_emails(addresses: Sequence[str]) -> tuple[str, ...]:
+    """Case-insensitively deduped (one mailbox = one send), first spelling kept, order kept."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for a in addresses:
+        key = a.lower()
+        if key not in seen:
+            seen.add(key)
+            out.append(a)
+    return tuple(out)
+
+
 # -- policy -----------------------------------------------------------------------------------
 @dataclass(frozen=True)
 class AlertPolicy:
@@ -82,9 +125,22 @@ class AlertPolicy:
 
     @classmethod
     def from_config(cls) -> AlertPolicy:
-        """Build from env vars / Airflow cfg."""
+        """Build from env vars / Airflow cfg.
+
+        Configured recipients are normalized: invalid addresses are dropped (with a
+        warning -- one typo must not poison every send) and duplicates collapse
+        case-insensitively so one mailbox is mailed once.
+        """
+        valid = []
+        for address in get_alerts_recipients():
+            if is_valid_email(address):
+                valid.append(address)
+            else:
+                _log.warning(
+                    "dropping invalid alert recipient from config: %r", address
+                )
         return cls(
-            recipients=get_alerts_recipients(),
+            recipients=dedupe_emails(valid),
             success_threshold=get_success_threshold(),
             flaky_window=get_flaky_window(),
             flaky_min_score=get_flaky_min_score(),
@@ -327,6 +383,14 @@ def _render_html(
 
 
 # -- transport --------------------------------------------------------------------------------
+#: One email attachment: (filename, payload bytes).
+Attachment = tuple[str, bytes]
+
+#: Attachments above this size are skipped (mail servers commonly reject ~25 MB messages,
+#: and a huge Allure archive must not stall the producer or the API worker).
+_MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
+
+
 class Mailer(Protocol):
     """Sends one alert email. May raise on delivery errors; the orchestrator guards."""
 
@@ -337,6 +401,7 @@ class Mailer(Protocol):
         body: str,
         recipients: Sequence[str],
         html: str | None = None,
+        attachments: Sequence[Attachment] = (),
     ) -> None: ...
 
 
@@ -360,14 +425,26 @@ class AirflowMailer:
         body: str,
         recipients: Sequence[str],
         html: str | None = None,
+        attachments: Sequence[Attachment] = (),
     ) -> None:
+        import tempfile
+
         from airflow.utils.email import send_email
 
-        send_email(
-            to=list(recipients),
-            subject=_header_safe(subject),
-            html_content=html or _as_html(body),
-        )
+        # ``send_email`` takes file PATHS; stage byte attachments in a throwaway dir.
+        with tempfile.TemporaryDirectory(prefix="apx-mail-") as tmp:
+            files = []
+            for name, payload in attachments:
+                path = os.path.join(tmp, os.path.basename(name) or "attachment.bin")
+                with open(path, "wb") as fh:
+                    fh.write(payload)
+                files.append(path)
+            send_email(
+                to=list(recipients),
+                subject=_header_safe(subject),
+                html_content=html or _as_html(body),
+                files=files or None,
+            )
 
 
 @dataclass(frozen=True)
@@ -384,7 +461,6 @@ class SmtpConfig:
     @classmethod
     def from_config(cls) -> SmtpConfig | None:
         """Build from env / cfg, or ``None`` when no SMTP host is configured."""
-        import os
 
         def val(env: str, key: str) -> str | None:
             raw = os.environ.get(env)
@@ -428,6 +504,7 @@ class SmtpMailer:
         body: str,
         recipients: Sequence[str],
         html: str | None = None,
+        attachments: Sequence[Attachment] = (),
     ) -> None:
         import smtplib
         from email.message import EmailMessage
@@ -440,6 +517,13 @@ class SmtpMailer:
         msg.set_content(body)
         if html:
             msg.add_alternative(html, subtype="html")
+        for name, payload in attachments:
+            msg.add_attachment(
+                payload,
+                maintype="application",
+                subtype="zip" if name.endswith(".zip") else "octet-stream",
+                filename=os.path.basename(name) or "attachment.bin",
+            )
         with smtplib.SMTP(cfg.host, cfg.port, timeout=10) as smtp:
             if cfg.starttls:
                 smtp.starttls()
@@ -573,20 +657,79 @@ def build_run_alert(
 
 
 # -- orchestration ----------------------------------------------------------------------------
-def _deliver(alert: Alert, policy: AlertPolicy, mailer: Mailer | None) -> None:
+def allure_attachment(source: ReportSource, ref: ReportRef) -> tuple[Attachment, ...]:
+    """The run's raw Allure results as a zip attachment, when present and small enough.
+
+    Empty when the run has no Allure results, the source can't produce them, or the archive
+    exceeds ``_MAX_ATTACHMENT_BYTES`` (mail servers reject huge messages; skipping keeps the
+    notification deliverable instead of failing it).
+    """
+    try:
+        payload = source.allure_archive(ref)
+    except Exception:  # a corrupt archive must not break the notification itself
+        _log.exception("failed to build the Allure attachment for %s", ref.token)
+        return ()
+    if not payload:
+        return ()
+    if len(payload) > _MAX_ATTACHMENT_BYTES:
+        _log.warning(
+            "Allure archive for %s is %d bytes (> %d); sending the email without it",
+            ref.token,
+            len(payload),
+            _MAX_ATTACHMENT_BYTES,
+        )
+        return ()
+    return (("allure-results.zip", payload),)
+
+
+def record_sent_alert(
+    source: ReportSource,
+    ref: ReportRef,
+    alert: Alert,
+    recipients: Sequence[str],
+    *,
+    ok: bool,
+    manual: bool,
+) -> None:
+    """Best-effort: append this send to the run's stored notification history."""
+    try:
+        source.record_alert(
+            ref,
+            {
+                "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "kind": alert.kind,
+                "recipients": list(recipients),
+                "ok": ok,
+                "manual": manual,
+            },
+        )
+    except Exception:  # history is informational; never fail the send path over it
+        _log.exception("failed to record the alert history for %s", ref.token)
+
+
+def _deliver(
+    alert: Alert,
+    policy: AlertPolicy,
+    mailer: Mailer | None,
+    attachments: Sequence[Attachment] = (),
+) -> bool:
+    """Send one alert; ``True`` on success, ``False`` when skipped or failed (logged)."""
     transport = mailer if mailer is not None else build_mailer()
     if transport is None:
         _log.warning("alert raised but no mail transport is configured; not sending")
-        return
+        return False
     try:
         transport.send(
             subject=alert.subject,
             body=alert.body,
             html=alert.html,
             recipients=policy.recipients,
+            attachments=attachments,
         )
+        return True
     except Exception:
         _log.exception("failed to send %s alert email", alert.kind)
+        return False
 
 
 def notify_for_run(
@@ -600,8 +743,10 @@ def notify_for_run(
 ) -> list[Alert]:
     """Build and (unless ``dry_run``) send the alert for the run at ``ref``.
 
-    Returns the alert(s) raised (whether or not sent). A send failure is logged and skipped -- it
-    never propagates, so a broken mailer can't fail the surrounding task.
+    The email carries the run's Allure results as a zip attachment when available (size-capped),
+    and every real send attempt is appended to the run's stored notification history. Returns the
+    alert(s) raised (whether or not sent). A send failure is logged and skipped -- it never
+    propagates, so a broken mailer can't fail the surrounding task.
     """
     resolved = policy if policy is not None else AlertPolicy.from_config()
     if not resolved.is_active:  # no recipients -> nothing to do
@@ -610,7 +755,8 @@ def notify_for_run(
     if alert is None:
         return []
     if not dry_run:
-        _deliver(alert, resolved, mailer)
+        ok = _deliver(alert, resolved, mailer, allure_attachment(source, ref))
+        record_sent_alert(source, ref, alert, resolved.recipients, ok=ok, manual=False)
     _log.info(
         "alert: %s for %s·%s (always=%s, dry_run=%s)",
         alert.kind,

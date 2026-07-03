@@ -532,7 +532,7 @@ class _SpyMailer:
     def __init__(self) -> None:
         self.sent: list[dict] = []
 
-    def send(self, *, subject, body, recipients, html=None) -> None:
+    def send(self, *, subject, body, recipients, html=None, attachments=()) -> None:
         self.sent.append(
             {"subject": subject, "recipients": list(recipients), "html": html}
         )
@@ -575,10 +575,11 @@ def test_email_run_accepts_and_dedups_supplied_recipients(client, monkeypatch):
     monkeypatch.setattr(reports_mod, "build_mailer", lambda: spy)
     r = client.post(
         f"/api/reports/{_first_token(client)}/email",
-        json={"recipients": ["a@x.io", "b@x.io", "a@x.io"]},
+        json={"recipients": ["a@x.io", "b@x.io", "a@x.io", "A@X.IO"]},
     )
     assert r.status_code == 200
-    assert r.json()["recipients"] == ["a@x.io", "b@x.io"]  # deduped, order kept
+    # Deduped case-insensitively (one mailbox = one send), first spelling kept, order kept.
+    assert r.json()["recipients"] == ["a@x.io", "b@x.io"]
     assert spy.sent[0]["recipients"] == ["a@x.io", "b@x.io"]
 
 
@@ -631,7 +632,7 @@ def test_email_run_send_failure_is_502(client, monkeypatch):
     import airflow_pytest_plugin.web.routes.reports as reports_mod
 
     class _Boom:
-        def send(self, *, subject, body, recipients, html=None):
+        def send(self, *, subject, body, recipients, html=None, attachments=()):
             raise RuntimeError("smtp down")
 
     monkeypatch.setattr(reports_mod, "build_mailer", lambda: _Boom())
@@ -650,6 +651,24 @@ def test_email_run_bad_token_is_400_and_unknown_is_404(client, monkeypatch):
     assert client.post("/api/reports/%21%21bad/email").status_code == 400
     gone = ReportRef("nope", "nope", "nope", 9).token
     assert client.post(f"/api/reports/{gone}/email").status_code == 404
+
+
+def test_email_run_records_history_visible_in_detail(client, monkeypatch):
+    import airflow_pytest_plugin.web.routes.reports as reports_mod
+
+    monkeypatch.setattr(reports_mod, "build_mailer", lambda: _SpyMailer())
+    token = _first_token(client)
+    assert client.get(f"/api/reports/{token}").json()["alerts"] == []  # empty at first
+    assert (
+        client.post(
+            f"/api/reports/{token}/email", json={"recipients": ["a@x.io"]}
+        ).status_code
+        == 200
+    )
+    alerts = client.get(f"/api/reports/{token}").json()["alerts"]
+    assert len(alerts) == 1
+    assert alerts[0]["manual"] is True and alerts[0]["ok"] is True
+    assert alerts[0]["recipients"] == ["a@x.io"] and alerts[0]["kind"] == "failed"
 
 
 def test_email_run_requires_read_permission(reports_root, monkeypatch):

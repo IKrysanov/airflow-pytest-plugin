@@ -333,7 +333,11 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .rt-delta.rt-flat { color: var(--muted); }
   /* Non-uniform scale (preserveAspectRatio=none) makes the line fill the width; the
      non-scaling stroke keeps it an even 2px everywhere (no thickness "walk"). */
-  .rt-spark { flex: 1 1 auto; height: 34px; min-width: 0; display: block; }
+  .rt-graph { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
+  .rt-spark { width: 100%; height: 30px; display: block; }
+  /* The line's time axis: dates of the first and last run in view. */
+  .rt-axis { display: flex; justify-content: space-between; color: var(--muted);
+    font-size: 10px; margin-top: 2px; font-variant-numeric: tabular-nums; }
   .rt-line { fill: none; stroke: var(--primary); stroke-width: 2; stroke-linejoin: round;
     stroke-linecap: round; vector-effect: non-scaling-stroke; }
   .rt-fill { fill: color-mix(in srgb, var(--primary) 14%, transparent); stroke: none; }
@@ -410,7 +414,15 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     color: var(--fg); text-decoration: none; transition: background .12s, border-color .12s; }
   .af-link:hover { border-color: var(--primary); background: var(--border); }
   .af-link:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
-  .af-link svg { width: 13px; height: 13px; color: var(--muted); }
+  .af-link svg { width: 13px; height: 13px; color: var(--muted); flex: 0 0 auto; }
+  .af-link { max-width: 100%; }
+  /* Narrow screens: the toolbar wraps (flex-wrap) AND its chips compact, so however many
+     actions a run accumulates they never collide or overflow the dialog. */
+  @media (max-width: 640px) {
+    .af-links { gap: 6px; }
+    .af-link { padding: 4px 7px; font-size: 12px; gap: 4px; }
+    .af-link svg { width: 12px; height: 12px; }
+  }
 
   .row-del { background: none; border: 0; color: var(--muted); cursor: pointer;
     padding: 4px; border-radius: 6px; display: inline-flex; opacity: .5;
@@ -531,6 +543,20 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     max-width: min(680px, 84vw); max-height: 82vh; }
   /* The email form is small; keep it clearly inset from the run dialog's frame. */
   #email-dlg { max-width: min(460px, 84vw); max-height: 82vh; }
+  /* The email-send log is a narrow list, also inset from the run dialog. */
+  #alerts-dlg { max-width: min(560px, 84vw); max-height: 82vh; }
+  .al-row { display: flex; align-items: flex-start; gap: 10px; padding: 10px 4px;
+    border-bottom: 1px solid var(--border); font-size: 13px; }
+  .al-row:last-child { border-bottom: 0; }
+  .al-ok { color: var(--pass); font-weight: 700; flex: 0 0 auto; }
+  .al-fail { color: var(--fail); font-weight: 700; flex: 0 0 auto; }
+  .al-main { flex: 1 1 auto; min-width: 0; }
+  .al-rcpts { overflow-wrap: anywhere; }
+  .al-meta { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  /* Count chip inside the toolbar "Emails" button. */
+  .af-count { background: var(--surface-2); border: 1px solid var(--border);
+    border-radius: 999px; padding: 0 7px; font-size: 11px; font-weight: 700;
+    font-variant-numeric: tabular-nums; }
   #panel-info-body p { margin: 0; color: var(--fg); font-size: 13.5px; line-height: 1.6; }
   /* The heatmap wants width (more run columns visible). Wide when opened on its own;
      inset (narrower than the run dialog) when opened from inside a run, so it doesn't
@@ -1044,6 +1070,20 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   </div>
 </dialog>
 
+<dialog id="alerts-dlg" aria-labelledby="al-title">
+  <div class="dlg-head">
+    <h2 id="al-title" data-i18n="alertsTitle">Email notifications</h2>
+    <span style="flex:1"></span>
+    <button id="al-close" class="btn icon-btn" type="button" data-i18n-al="closeReport">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M18 6 6 18M6 6l12 12"/>
+      </svg>
+    </button>
+  </div>
+  <div class="dlg-body"><div id="al-list"></div></div>
+</dialog>
+
 <dialog id="failures" aria-labelledby="fl-title">
   <div class="dlg-head">
     <h2 id="fl-title" data-i18n="failuresTitle">Failed tests</h2>
@@ -1204,12 +1244,14 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       relStableDesc: "Share of tests that are NOT flaky — that don't flip pass↔fail over the window.",
       relCompleteDesc: "Share of tests that actually ran (were not skipped).",
       relTrend: "Run health", relTrendCollecting: "Collecting data…",
-      relTrendVs: "Recent half vs the older half of the runs in view",
-      relTrendDesc: "The line under the radar tracks run health over time — per run, the mean of the "
-        + "three continuous axes (pass rate, no errors, completeness), drawn as a moving average so "
-        + "it reads as a trend. Green-now and Flaky/Stability are radar-only snapshots (one is "
-        + "binary per run, the other a window metric), so they're not in the line. The number is "
-        + "the recent half's average health; the arrow is its change vs the older half.",
+      relTrendVs: "Change: the recent half of the runs vs the older half",
+      relTrendNowTip: "Current run health — the value at the right edge of the line",
+      relTrendDesc: "The line under the radar tracks run health over time, oldest run on the left "
+        + "to the newest on the right — the dates under the line show the span. Per run, health is "
+        + "the mean of the three continuous axes (pass rate, no errors, completeness), drawn as a "
+        + "moving average so it reads as a trend. The big number is the CURRENT health (the line's "
+        + "right edge); the arrow is the recent half's change vs the older half. Green-now and "
+        + "Flaky/Stability are radar-only snapshots, so they're not in the line.",
       cId: "ID", cStatus: "Status", cDag: "DAG", cTask: "Task", cRun: "Run", cTry: "Try",
       cTotal: "Total", cPass: "Pass", cFail: "Fail", cErr: "Err", cSkip: "Skip",
       cDuration: "Duration", cWhen: "When", cRuns: "Runs", cPassRate: "Pass %", cAvgDur: "Avg time",
@@ -1286,6 +1328,11 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       emailHint: "Comma-separated. Leave empty to use the configured recipients.",
       emailSend: "Send", emailSending: "Sending…", emailSent: "Sent ✓",
       emailFail: "Couldn't send the email.",
+      emailInvalid: "Invalid email address: “{a}”. Use name@example.com",
+      alertsBtn: "Emails", alertsBtnAl: "Email notifications sent for this run",
+      alertsTitle: "Email notifications", alertsSentOk: "delivered",
+      alertsSentFail: "send failed", alertsAuto: "automatic", alertsManual: "manual",
+      alertsEmpty: "No emails were sent for this run.",
       deleteFail: "Failed to delete: ",
       deleteFailedN: "{n} could not be deleted (no permission).",
       nSelected: "{n} selected", deleteSelected: "Delete", clearSel: "Clear",
@@ -1322,12 +1369,14 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       relStableDesc: "Доля тестов, которые НЕ нестабильны — не скачут pass↔fail в окне.",
       relCompleteDesc: "Доля тестов, которые реально выполнились (не были пропущены).",
       relTrend: "Здоровье прогонов", relTrendCollecting: "Собираем данные…",
-      relTrendVs: "Недавняя половина против ранней половины прогонов в поле зрения",
-      relTrendDesc: "Линия под радаром показывает здоровье прогонов во времени — по каждому прогону "
-        + "среднее трёх непрерывных осей (доля прохождения, отсутствие ошибок, полнота), нарисованное "
-        + "скользящим средним, чтобы читалось как тренд. «Зелёный» и Нестабильность/Стабильность — "
-        + "снимки только на радаре (одна бинарна по прогону, другая оконная), поэтому в линию не "
-        + "входят. Число — среднее здоровье недавней половины; стрелка — изменение против ранней.",
+      relTrendVs: "Изменение: недавняя половина прогонов против ранней",
+      relTrendNowTip: "Текущее здоровье прогонов — значение у правого края линии",
+      relTrendDesc: "Линия под радаром показывает здоровье прогонов во времени: слева самый старый "
+        + "прогон, справа самый новый — даты под линией показывают период. Здоровье прогона — "
+        + "среднее трёх непрерывных осей (доля прохождения, отсутствие ошибок, полнота), "
+        + "нарисованное скользящим средним, чтобы читалось как тренд. Большое число — ТЕКУЩЕЕ "
+        + "здоровье (правый край линии); стрелка — изменение недавней половины против ранней. "
+        + "«Зелёный» и Нестабильность — снимки только на радаре, в линию не входят.",
       cId: "ID", cStatus: "Статус", cDag: "DAG", cTask: "Задача", cRun: "Запуск", cTry: "Попытка",
       cTotal: "Всего", cPass: "Усп", cFail: "Пров", cErr: "Ошиб", cSkip: "Проп",
       cDuration: "Время", cWhen: "Когда", cRuns: "Прогоны", cPassRate: "Проход %", cAvgDur: "Ср. время",
@@ -1409,6 +1458,11 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       emailHint: "Через запятую. Пусто — отправить настроенным получателям.",
       emailSend: "Отправить", emailSending: "Отправка…", emailSent: "Отправлено ✓",
       emailFail: "Не удалось отправить письмо.",
+      emailInvalid: "Неверный адрес почты: «{a}». Формат: name@example.com",
+      alertsBtn: "Письма", alertsBtnAl: "Отправки письма по этому запуску",
+      alertsTitle: "Отправки на почту", alertsSentOk: "отправлено",
+      alertsSentFail: "ошибка отправки", alertsAuto: "автоматически", alertsManual: "вручную",
+      alertsEmpty: "По этому запуску писем не отправлялось.",
       nSelected: "Выбрано: {n}", deleteSelected: "Удалить", clearSel: "Снять",
       selectRow: "Выбрать строку", selectAll: "Выбрать все",
       forbidden: "Нет прав на удаление этого отчёта (нужно право запускать DAG).",
@@ -2716,13 +2770,31 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       return String(a.created_at || "") < String(b.created_at || "") ? -1 : 1;  // oldest -> newest
     });
     var clamp = function (v) { return Math.max(0, Math.min(100, v)); };
-    return rows.map(function (r) {
+    var values = rows.map(function (r) {
       var tt = r.total || 0;
       var pass = tt ? (r.passed || 0) / tt * 100 : 100;
       var robust = tt ? 100 - (r.errors || 0) / tt * 100 : 100;
       var complete = tt ? 100 - (r.skipped || 0) / tt * 100 : 100;
       return clamp(Math.round((pass + robust + complete) / 3));
     });
+    // The time range the line spans (first/last run in view) -- shown as the X-axis labels,
+    // so the "over time" reading is explicit instead of implied.
+    return {
+      values: values,
+      from: rows.length ? rows[0].created_at : null,
+      to: rows.length ? rows[rows.length - 1].created_at : null,
+    };
+  }
+  // Short, locale-aware day-month label for the trend's time axis ("31 May" / "31 мая").
+  function fmtTrendDate(iso) {
+    if (!iso) return "";
+    var d = new Date(iso);
+    if (isNaN(d)) return "";
+    try {
+      var opts = { day: "numeric", month: "short" };
+      if (d.getFullYear() !== new Date().getFullYear()) opts.year = "numeric";
+      return d.toLocaleDateString(LOCALE === "ru" ? "ru-RU" : "en-GB", opts);
+    } catch (e) { return iso.slice(0, 10); }
   }
   // Trailing moving average so the line reads as a trend, not per-run jitter. Window scales
   // with the run count (none for short histories, up to 9 for long ones).
@@ -2764,15 +2836,22 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   function renderRelTrend() {
     var box = document.getElementById("rel-trend");
     if (!box) return;
-    var series = reliabilityTrend(), d = trendDelta(series);
+    var tr = reliabilityTrend(), series = tr.values, d = trendDelta(series);
     if (!d) { box.innerHTML = '<span class="rt-hint">' + esc(t("relTrendCollecting")) + "</span>"; return; }
+    // The headline number is the CURRENT health -- the last point of the smoothed line --
+    // so it always matches what the right edge of the graph shows.
+    var smoothed = smoothSeries(series);
+    var now = Math.round(smoothed[smoothed.length - 1]);
     var cls = d.delta > 0 ? "rt-up" : (d.delta < 0 ? "rt-down" : "rt-flat");
     var arrow = d.delta > 0 ? "▲" : (d.delta < 0 ? "▼" : "→");
     var sign = d.delta > 0 ? "+" : "";
+    // X-axis: the dates of the first and last run in view, so the time span is explicit.
+    var axis = '<div class="rt-axis"><span>' + esc(fmtTrendDate(tr.from)) + "</span><span>"
+      + esc(fmtTrendDate(tr.to)) + "</span></div>";
     box.innerHTML = '<div class="rt-meta"><span class="rt-label">' + esc(t("relTrend")) + "</span>"
-      + '<span class="rt-now">' + d.now + "</span>"
+      + '<span class="rt-now" title="' + esc(t("relTrendNowTip")) + '">' + now + "</span>"
       + '<span class="rt-delta ' + cls + '" title="' + esc(t("relTrendVs")) + '">' + arrow + " " + sign + d.delta
-      + "</span></div>" + trendSparkline(series);
+      + '</span></div><div class="rt-graph">' + trendSparkline(series) + axis + "</div>";
   }
   function renderReliability() {
     var el = document.getElementById("pentagon");
@@ -2998,6 +3077,14 @@ _INDEX_HTML = r"""<!DOCTYPE html>
         + '<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>';
       out += '<button type="button" class="af-link" id="cl-btn" data-i18n-al="clBtnAl">'
         + lst + esc(t("clBtn")) + "</button>";
+    }
+    // Email-notification bench: how many times this run was mailed; opens the send log.
+    if ((m.alerts || []).length > 0) {
+      var mail = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"'
+        + ' stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+        + '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg>';
+      out += '<button type="button" class="af-link" id="alerts-btn" data-i18n-al="alertsBtnAl">'
+        + mail + esc(t("alertsBtn")) + ' <span class="af-count">' + m.alerts.length + "</span></button>";
     }
     return out + "</div>";
   }
@@ -3274,6 +3361,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
         openHistory(it.dag_id, it.task_id, it.node_id);
       });
     });
+    var alertsBtn = document.getElementById("alerts-btn");
+    if (alertsBtn) alertsBtn.addEventListener("click", function () { openAlertsLog(m); });
     dBody.querySelectorAll(".dseg").forEach(function (seg) {
       seg.addEventListener("click", function () {
         var s = seg.getAttribute("data-status");
@@ -3308,7 +3397,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   function renderCaseHead() {
     var head = document.getElementById("case-head");
     if (!head) return;
-    head.innerHTML = "<th>" + esc(t("hOutcome")) + "</th>"
+    head.innerHTML = caseHeadCell("outcome", t("hOutcome"), "")
       + caseHeadCell("node", t("hTest"), "")
       + caseHeadCell("time", t("hTime"), "right") + "<th></th>";
     head.querySelectorAll("th.sortable").forEach(function (th) {
@@ -3324,13 +3413,20 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       });
     });
   }
-  // Compares two {c, i} case entries by the active sort (time numeric / node string),
-  // with a stable tiebreak so equal rows keep a deterministic order.
+  // Outcome severity for sorting: ascending puts the broken tests first.
+  var OUTCOME_RANK = { failed: 0, error: 1, skipped: 2, passed: 3 };
+  // Compares two {c, i} case entries by the active sort (time numeric / outcome rank /
+  // node string), with a stable tiebreak so equal rows keep a deterministic order.
   function caseCmp(a, b) {
     var dir = caseSort.dir === "asc" ? 1 : -1;
     if (caseSort.key === "time") {
       var d = (+a.c.time || 0) - (+b.c.time || 0);
       if (d) return d > 0 ? dir : -dir;
+    } else if (caseSort.key === "outcome") {
+      var ra = OUTCOME_RANK[a.c.outcome], rb = OUTCOME_RANK[b.c.outcome];
+      if (ra === undefined) ra = 9;
+      if (rb === undefined) rb = 9;
+      if (ra !== rb) return (ra - rb) * dir;
     } else if (a.c.node_id !== b.c.node_id) {
       return (a.c.node_id < b.c.node_id ? -1 : 1) * dir;
     }
@@ -3478,7 +3574,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       || (flakyDlg && flakyDlg.open) || (historyDlg && historyDlg.open)
       || (uniqueDlg && uniqueDlg.open) || (slowDlg && slowDlg.open)
       || (heatmapDlg && heatmapDlg.open) || (relInfoDlg && relInfoDlg.open)
-      || (panelInfoDlg && panelInfoDlg.open) || (emailDlg && emailDlg.open);
+      || (panelInfoDlg && panelInfoDlg.open) || (emailDlg && emailDlg.open)
+      || (alertsDlg && alertsDlg.open);
     setLocalDim(anyOpen);   // dim our own page/iframe once
     setParentDim(anyOpen);  // and (embedded) the Airflow chrome around the iframe
   }
@@ -3594,11 +3691,33 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     emTo.focus();
   }
   function closeEmail() { if (emailDlg.open) emailDlg.close(); else emailDlg.removeAttribute("open"); }
+  // Mirrors the backend validator (the server re-checks anyway); instant, readable feedback.
+  var EMAIL_JS_RE = /^[A-Za-z0-9!#$%&'*+\/=?^_`{|}~-]+(?:\.[A-Za-z0-9!#$%&'*+\/=?^_`{|}~-]+)*@(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$/;
+  function validEmail(s) {
+    return s.length <= 254 && s.indexOf("@") > 0
+      && s.slice(0, s.indexOf("@")).length <= 64 && EMAIL_JS_RE.test(s);
+  }
   function sendEmail() {
     if (!currentId) return;
     var raw = emTo.value.trim();
     var body = {};
-    if (raw) body.recipients = raw.split(/[,;]/).map(function (s) { return s.trim(); }).filter(Boolean);
+    if (raw) {
+      var list = raw.split(/[,;]/).map(function (s) { return s.trim(); }).filter(Boolean);
+      // Validate BEFORE any request: name the bad address in the user's language.
+      for (var i = 0; i < list.length; i++) {
+        if (!validEmail(list[i])) {
+          setEmStatus(t("emailInvalid").replace("{a}", list[i]), "err");
+          return;
+        }
+      }
+      // Dedupe case-insensitively so one mailbox gets one email.
+      var seen = {}, uniq = [];
+      list.forEach(function (a) {
+        var k = a.toLowerCase();
+        if (!seen[k]) { seen[k] = 1; uniq.push(a); }
+      });
+      body.recipients = uniq;
+    }
     emSend.disabled = true; setEmStatus(t("emailSending"), "");
     fetch(API + "reports/" + encodeURIComponent(currentId) + "/email", {
       method: "POST",
@@ -3625,6 +3744,30 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   emTo.addEventListener("keydown", function (e) { if (e.key === "Enter") sendEmail(); });
   emailDlg.addEventListener("close", updateParentDim);
   closeOnBackdrop(emailDlg, closeEmail);
+
+  // Email-send log: the run's stored notification history (who was mailed, and whether the
+  // handoff to the mail server succeeded), newest first.
+  var alertsDlg = document.getElementById("alerts-dlg");
+  function openAlertsLog(m) {
+    var rows = (m.alerts || []).slice().reverse();
+    document.getElementById("al-list").innerHTML = rows.map(function (a) {
+      var mark = a.ok
+        ? '<span class="al-ok" title="' + esc(t("alertsSentOk")) + '">✓</span>'
+        : '<span class="al-fail" title="' + esc(t("alertsSentFail")) + '">✗</span>';
+      var who = (a.recipients || []).map(function (r) { return esc(r); }).join(", ");
+      var meta = [a.at ? fmtTime(a.at) : "", a.kind || "", t(a.manual ? "alertsManual" : "alertsAuto")]
+        .filter(Boolean).map(esc).join(" · ");
+      return '<div class="al-row">' + mark + '<div class="al-main">'
+        + '<div class="al-rcpts">' + who + '</div><div class="al-meta">' + meta + "</div></div></div>";
+    }).join("") || '<div class="state">' + esc(t("alertsEmpty")) + "</div>";
+    if (typeof alertsDlg.showModal === "function") { if (!alertsDlg.open) alertsDlg.showModal(); }
+    else alertsDlg.setAttribute("open", "");
+    updateParentDim();
+  }
+  function closeAlertsLog() { if (alertsDlg.open) alertsDlg.close(); else alertsDlg.removeAttribute("open"); }
+  document.getElementById("al-close").addEventListener("click", closeAlertsLog);
+  alertsDlg.addEventListener("close", updateParentDim);
+  closeOnBackdrop(alertsDlg, closeAlertsLog);
 
   // Failures modal: clicking the FAILURES KPI groups every failed/errored case across
   // the visible runs into clusters by normalized error (see /api/failure-clusters), so

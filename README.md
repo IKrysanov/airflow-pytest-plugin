@@ -390,9 +390,19 @@ the default `email=False` sends **nothing**, so a noisy ping / smoke suite can't
 ```python
 from airflow_pytest_plugin import ArchivingResultParser
 
-parser = ArchivingResultParser(email=True)    # this task: email me when each run finishes
-parser = ArchivingResultParser()              # default email=False: never auto-emails (ping-safe)
+parser = ArchivingResultParser(email=True)            # email me when each run finishes
+parser = ArchivingResultParser(email_only_fail=True)  # email ONLY on a failed / flaky run
+parser = ArchivingResultParser()                      # default: never auto-emails (ping-safe)
 ```
+
+`email_only_fail=True` is for teams that don't want success mail: nothing arrives while runs
+are green, a red/amber notification arrives the moment a run fails or turns flaky (it wins
+over `email=True` when both are set).
+
+Recipients are validated (RFC-bounded addresses; invalid configured entries are dropped with
+a warning) and deduplicated case-insensitively — listing the same mailbox twice, in the env or
+in the UI dialog, sends **one** email. The UI dialog also validates as you submit and names the
+bad address before anything is sent; the server re-validates and answers a plain-language `400`.
 
 A run is "failing" below `AIRFLOW_PYTEST_SUCCESS_THRESHOLD` (the same 0–1 bar the *Passing runs*
 KPI uses; default `0.85`) — which is what colours the email. Recipients + transport are configured
@@ -425,6 +435,12 @@ toolbar to email that run's summary. Recipients are optional (leave the field em
 configured `AIRFLOW_PYTEST_ALERTS_EMAIL_TO`); any you type are validated as email addresses and
 capped. The button appears only when a mail transport is configured. The action is **RBAC-gated**
 — it needs permission to *read* the run's DAG — and backed by `POST /api/reports/{id}/email`.
+
+**Every send is logged on the run.** Each attempt (automatic or manual) lands in the run's
+`meta.json`; the run's toolbar then shows an ✉ **Emails N** bench that opens the send log —
+who was mailed, when, and a ✓ delivered / ✗ failed mark per send (newest 50 kept). When the run
+has raw Allure results, the notification email carries them as an `allure-results.zip`
+attachment (skipped above 10 MB so mail servers accept the message).
 
 **Transport precedence:** if you set `AIRFLOW_PYTEST_SMTP_HOST`, that standalone SMTP client is
 used directly — **even inside Airflow** — so your explicit config always wins. Otherwise mail goes

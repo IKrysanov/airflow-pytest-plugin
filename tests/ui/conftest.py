@@ -314,11 +314,39 @@ def _boot(root: str, *, extra_env: dict | None = None):
             proc.kill()
 
 
+def _add_alert_history(root: str, dag: str, run: str) -> None:
+    """Give one seeded run a stored email-send history (for the ✉ bench + its modal)."""
+    ref = ReportRef(dag, run, "suite", 1, -1)
+    meta_path = os.path.join(ReportLayout().dir_for(root, ref), META_FILENAME)
+    with open(meta_path, encoding="utf-8") as fh:
+        meta = json.load(fh)
+    meta["alerts"] = [
+        {
+            "at": "2026-01-02T10:00:00+00:00",
+            "kind": "failed",
+            "recipients": ["team@example.com"],
+            "ok": True,
+            "manual": False,
+        },
+        {
+            "at": "2026-01-02T11:00:00+00:00",
+            "kind": "failed",
+            "recipients": ["me@example.com", "boss@example.com"],
+            "ok": False,
+            "manual": True,
+        },
+    ]
+    with open(meta_path, "w", encoding="utf-8") as fh:
+        json.dump(meta, fh)
+
+
 @pytest.fixture(scope="session")
 def base_url(tmp_path_factory):
     """Small seed (3 dag·tasks x 6 runs) -> precise assertions."""
     root = tmp_path_factory.mktemp("ui-reports-small")
     _seed(str(root), _SMALL, _SMALL_NRUNS)
+    # The newest "alpha" run carries an email-send history for the ✉ bench tests.
+    _add_alert_history(str(root), "alpha", f"r{_SMALL_NRUNS - 1:03d}")
     yield from _boot(str(root))
 
 

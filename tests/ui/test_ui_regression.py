@@ -511,20 +511,174 @@ def test_email_button_hidden_without_transport(dash):
     assert dash.errors == []
 
 
-def test_email_button_opens_dialog_and_validates(email_dash):
-    # With SMTP configured the Email button shows; the dialog surfaces server-side validation
-    # (a malformed recipient is rejected) and never sends on rejection.
+def test_alerts_bench_lists_recipients_and_status(dash):
+    # The run's toolbar shows an ✉ bench with the send count; clicking it opens the log
+    # listing each send's recipients with a delivered ✓ / failed ✗ mark.
+    page = dash.page
+    page.click("tr.lgrp:has-text('alpha')")
+    page.locator(
+        "tr.clickable"
+    ).first.click()  # alpha's newest run carries 2 alert entries
+    expect(page.locator("dialog#detail")).to_be_visible()
+    btn = page.locator("#alerts-btn")
+    expect(btn).to_be_visible()
+    assert btn.locator(".af-count").inner_text().strip() == "2"
+    btn.click()
+    expect(page.locator("dialog#alerts-dlg")).to_be_visible()
+    rows = page.locator("#al-list .al-row")
+    assert rows.count() == 2
+    # Newest first: the manual failed send (2 recipients, ✗) then the auto delivered one (✓).
+    first, second = rows.nth(0), rows.nth(1)
+    assert (
+        "me@example.com" in first.inner_text()
+        and "boss@example.com" in first.inner_text()
+    )
+    expect(first.locator(".al-fail")).to_be_visible()
+    assert "team@example.com" in second.inner_text()
+    expect(second.locator(".al-ok")).to_be_visible()
+    page.click("#al-close")
+    expect(page.locator("dialog#alerts-dlg")).to_be_hidden()
+    assert dash.errors == []
+
+
+def test_alerts_bench_absent_without_history(dash):
+    # A run that was never emailed shows no ✉ bench at all.
+    page = dash.page
+    page.click("tr.lgrp:has-text('beta')")
+    page.locator("tr.clickable").first.click()
+    expect(page.locator("dialog#detail")).to_be_visible()
+    expect(page.locator("#alerts-btn")).to_have_count(0)
+
+
+def test_trend_shows_its_time_span(dash):
+    # The run-health line now carries an explicit time axis: the dates of the first and
+    # last run in view sit under the sparkline, so "over time" is visible, not implied.
+    page = dash.page
+    expect(page.locator("#rel-trend .rt-spark")).to_be_visible()
+    labels = page.locator(".rt-axis span")
+    assert labels.count() == 2
+    assert labels.nth(0).inner_text().strip() != ""
+    assert labels.nth(1).inner_text().strip() != ""
+    # The axis must sit inside the reliability card (no overflow).
+    card = page.locator("#pentagon-card").bounding_box()
+    axis = page.locator(".rt-axis").bounding_box()
+    assert axis["x"] >= card["x"] - 1
+    assert axis["x"] + axis["width"] <= card["x"] + card["width"] + 1
+
+
+def test_trend_dates_differ_over_a_long_history(large_dash):
+    # 3200 runs spread over months: the left (oldest) and right (newest) dates differ.
+    page = large_dash.page
+    expect(page.locator("#rel-trend .rt-spark")).to_be_visible()
+    labels = page.locator(".rt-axis span")
+    assert labels.nth(0).inner_text().strip() != labels.nth(1).inner_text().strip()
+
+
+def test_case_table_sorts_by_outcome(dash):
+    # OUTCOME sorts like the other case columns: ascending puts broken tests first,
+    # descending puts passing ones first.
+    page = dash.page
+    page.click("tr.lgrp:has-text('alpha')")
+    page.locator("tr.clickable").first.click()  # 17 pass / 1 fail / 1 error
+    expect(page.locator("dialog#detail")).to_be_visible()
+    page.wait_for_selector("#case-head th.sortable[data-key='outcome']")
+    page.click("#case-head th.sortable[data-key='outcome']")  # asc: worst first
+    first_badge = (
+        page.locator("#d-body tbody tr").first.locator("td").first.inner_text()
+    )
+    assert "pass" not in first_badge.lower(), f"worst-first sort, got {first_badge!r}"
+    page.click("#case-head th.sortable[data-key='outcome']")  # desc: passing first
+    first_badge = (
+        page.locator("#d-body tbody tr").first.locator("td").first.inner_text()
+    )
+    assert "pass" in first_badge.lower(), f"passing-first sort, got {first_badge!r}"
+    assert dash.errors == []
+
+
+def test_email_dialog_validates_client_side_before_any_request(email_dash):
+    # A malformed recipient is rejected INSTANTLY in the dialog (readable message naming the
+    # address) and no request is even sent -- the server still re-validates as defence.
     page = email_dash.page
     _open_first_run(page)
     expect(page.locator("#d-email")).to_be_visible()
     page.click("#d-email")
     expect(page.locator("dialog#email-dlg")).to_be_visible()
-    page.fill("#em-to", "not-an-email")
+    posts: list = []
+    page.on(
+        "request",
+        lambda r: (
+            posts.append(r.url) if "/email" in r.url and r.method == "POST" else None
+        ),
+    )
+    page.fill("#em-to", "good@example.com, not-an-email")
     page.click("#em-send")
-    expect(page.locator("#em-status.err")).to_be_visible()  # the server 400 is surfaced
+    expect(page.locator("#em-status.err")).to_be_visible()
+    assert (
+        "not-an-email" in page.locator("#em-status").inner_text()
+    )  # names the bad address
+    page.wait_for_timeout(300)
+    assert posts == [], "invalid input must never reach the server"
     page.click("#em-cancel")
     expect(page.locator("dialog#email-dlg")).to_be_hidden()
-    # NB: no dash.errors assertion -- the intentional 400 logs a console "failed to load" line.
+    assert email_dash.errors == []  # no console 400s: nothing was sent
+
+
+def test_email_dialog_dedupes_duplicate_addresses(email_dash):
+    # Two identical addresses (any case) -> the request carries the mailbox once.
+    page = email_dash.page
+    _open_first_run(page)
+    page.click("#d-email")
+    expect(page.locator("dialog#email-dlg")).to_be_visible()
+    payloads: list = []
+    page.on(
+        "request",
+        lambda r: (
+            payloads.append(r.post_data)
+            if "/email" in r.url and r.method == "POST"
+            else None
+        ),
+    )
+    page.fill("#em-to", "dup@example.com, DUP@example.com; dup@example.com")
+    page.click("#em-send")
+    expect(page.locator("#em-status")).to_be_visible()
+    page.wait_for_timeout(400)
+    assert len(payloads) == 1
+    assert (
+        payloads[0].count("dup@example.com") + payloads[0].count("DUP@example.com") == 1
+    )
+
+
+def test_toolbar_buttons_adapt_to_any_viewport(dash):
+    # A run accumulates many toolbar actions (links, compare, flaky, heatmap, clusters,
+    # emails) -- at ANY width they must wrap into rows without overlapping or overflowing.
+    page = dash.page
+    page.click("tr.lgrp:has-text('alpha')")
+    page.locator("tr.clickable").first.click()  # the busiest run (incl. the ✉ bench)
+    expect(page.locator("dialog#detail")).to_be_visible()
+    for width in (1280, 900, 640, 480, 375):
+        page.set_viewport_size({"width": width, "height": 900})
+        page.wait_for_timeout(200)
+        geo = page.evaluate(
+            "() => { const d=document.getElementById('detail');"
+            " const boxes=[...d.querySelectorAll('.af-link')].map(e=>e.getBoundingClientRect());"
+            " let overlap=false;"
+            " for (let i=0;i<boxes.length;i++) for (let j=i+1;j<boxes.length;j++) {"
+            "   const a=boxes[i], b=boxes[j];"
+            "   if (a.left < b.right-1 && b.left < a.right-1 && a.top < b.bottom-1 && b.top < a.bottom-1) overlap=true; }"
+            " const dr=d.getBoundingClientRect();"
+            " const outside=boxes.some(b=>b.right > dr.right+1 || b.left < dr.left-1);"
+            " return {n: boxes.length, overlap, outside,"
+            "  hscroll: d.scrollWidth - d.clientWidth}; }"
+        )
+        assert geo["n"] >= 5, f"expected a busy toolbar, got {geo['n']} buttons"
+        assert not geo["overlap"], f"toolbar buttons overlap at {width}px"
+        assert not geo["outside"], (
+            f"toolbar buttons spill out of the dialog at {width}px"
+        )
+        assert geo["hscroll"] <= 2, (
+            f"horizontal scroll at {width}px: {geo['hscroll']}px"
+        )
+    assert dash.errors == []
 
 
 def test_flaky_panel_scrolls_within_bounded_card(large_dash):

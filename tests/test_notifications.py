@@ -42,6 +42,7 @@ from airflow_pytest_plugin.notifications import (
     run_is_failing,
 )
 from airflow_pytest_plugin.sources import FileSystemReportSource
+from conftest import write_allure
 
 _WHEN = "2026-06-01T00:00:00+00:00"
 _ACTIVE = AlertPolicy(recipients=("team@example.com",))
@@ -101,25 +102,44 @@ def _write_run(root, dag, task, run, rows, when) -> None:
     }
     with open(os.path.join(out, META_FILENAME), "w", encoding="utf-8") as fh:
         json.dump(meta, fh)
+    # A minimal matching junit.xml so ``get_detail`` (which requires it) also works.
+    cases = []
+    for node, o in rows:
+        cls, _, name = node.partition("::")
+        body = {
+            "failed": "<failure/>",
+            "error": "<error/>",
+            "skipped": "<skipped/>",
+        }.get(o, "")
+        cases.append(
+            f'<testcase classname="{cls}" name="{name or node}" time="0.1">{body}</testcase>'
+        )
+    xml = (
+        f'<testsuites><testsuite name="pytest" tests="{len(rows)}" failures="{f}" '
+        f'errors="{e}" skipped="{sk}" time="1.0">{"".join(cases)}</testsuite></testsuites>'
+    )
+    with open(os.path.join(out, "junit.xml"), "w", encoding="utf-8") as fh:
+        fh.write(xml)
 
 
 class SpyMailer:
     def __init__(self) -> None:
         self.sends: list[dict] = []
 
-    def send(self, *, subject, body, recipients, html=None) -> None:
+    def send(self, *, subject, body, recipients, html=None, attachments=()) -> None:
         self.sends.append(
             {
                 "subject": subject,
                 "body": body,
                 "html": html,
                 "recipients": list(recipients),
+                "attachments": [(n, len(p)) for n, p in attachments],
             }
         )
 
 
 class BoomMailer:
-    def send(self, *, subject, body, recipients, html=None) -> None:
+    def send(self, *, subject, body, recipients, html=None, attachments=()) -> None:
         raise RuntimeError("smtp down")
 
 
@@ -218,6 +238,68 @@ def test_alert_to_dict_roundtrip():
         "body": "body",
         "html": "<b>html</b>",
     }
+
+
+# --- recipients: validation + dedupe -----------------------------------------------------------
+def test_is_valid_email_accepts_ordinary_addresses():
+    from airflow_pytest_plugin.notifications import is_valid_email
+
+    for addr in (
+        "a@x.io",
+        "first.last@example.com",
+        "user+tag@sub.domain.co.uk",
+        "UPPER.case@Example.COM",
+        "num123@x9.dev",
+    ):
+        assert is_valid_email(addr), addr
+
+
+def test_is_valid_email_rejects_garbage_and_abuse():
+    from airflow_pytest_plugin.notifications import is_valid_email
+
+    for addr in (
+        "",
+        "no-at",
+        "a@b",  # no TLD
+        "a b@x.io",  # space
+        "a@x.io\nBcc: evil@x.io",  # header injection
+        "a@x\x00.io",  # control char
+        ".dot@x.io",  # leading dot in local part
+        "dot.@x.io",  # trailing dot
+        "do..t@x.io",  # consecutive dots
+        "a@-bad.com",  # label starts with hyphen
+        "a@bad-.com",  # label ends with hyphen
+        "a@x..io",  # empty domain label
+        "x" * 65 + "@x.io",  # local part > 64
+        "a@" + "x" * 250 + ".io",  # total > 254
+    ):
+        assert not is_valid_email(addr), addr
+
+
+def test_env_recipients_deduped_and_invalid_dropped(monkeypatch):
+    # Duplicates (case-insensitive) collapse to one send; invalid entries are dropped
+    # (logged) instead of poisoning every send.
+    monkeypatch.setenv(
+        "AIRFLOW_PYTEST_ALERTS_EMAIL_TO",
+        "team@x.io, TEAM@X.IO; not-an-email, b@x.io, team@x.io",
+    )
+    p = AlertPolicy.from_config()
+    assert p.recipients == ("team@x.io", "b@x.io")
+
+
+def test_duplicate_env_recipients_mail_once(reports_root, monkeypatch):
+    # The same address twice in the env -> the email goes out with ONE copy of it.
+    monkeypatch.setenv("AIRFLOW_PYTEST_ALERTS_EMAIL_TO", "team@x.io, team@x.io")
+    _write_run(reports_root, "dag", "suite", "r0", [("b", "failed")], _WHEN)
+    src = FileSystemReportSource(report_root=reports_root, scan_cache_ttl=0)
+    spy = SpyMailer()
+    notify_for_run(
+        src,
+        ReportRef("dag", "r0", "suite", 1, -1),
+        policy=AlertPolicy.from_config(),
+        mailer=spy,
+    )
+    assert spy.sends[0]["recipients"] == ["team@x.io"]
 
 
 # --- config ------------------------------------------------------------------------------------
@@ -563,6 +645,133 @@ def test_alerting_is_bounded_on_a_large_history(reports_root):
     )
 
 
+# --- alert history (meta.json) + allure attachment ---------------------------------------------
+def test_notify_records_history_in_meta(reports_root):
+    _write_run(reports_root, "dag", "suite", "r0", [("b", "failed")], _WHEN)
+    src = FileSystemReportSource(report_root=reports_root, scan_cache_ttl=0)
+    ref = ReportRef("dag", "r0", "suite", 1, -1)
+    notify_for_run(src, ref, policy=_ACTIVE, mailer=SpyMailer())
+    alerts = src.get_detail(ref).alerts
+    assert len(alerts) == 1
+    entry = alerts[0]
+    assert entry["ok"] is True and entry["manual"] is False
+    assert entry["kind"] == "failed"
+    assert entry["recipients"] == ["team@example.com"]
+    assert entry["at"]  # ISO timestamp present
+
+
+def test_notify_records_failed_send_too(reports_root):
+    _write_run(reports_root, "dag", "suite", "r0", [("b", "failed")], _WHEN)
+    src = FileSystemReportSource(report_root=reports_root, scan_cache_ttl=0)
+    ref = ReportRef("dag", "r0", "suite", 1, -1)
+    notify_for_run(src, ref, policy=_ACTIVE, mailer=BoomMailer())
+    alerts = src.get_detail(ref).alerts
+    assert len(alerts) == 1 and alerts[0]["ok"] is False
+
+
+def test_notify_dry_run_records_nothing(reports_root):
+    _write_run(reports_root, "dag", "suite", "r0", [("b", "failed")], _WHEN)
+    src = FileSystemReportSource(report_root=reports_root, scan_cache_ttl=0)
+    ref = ReportRef("dag", "r0", "suite", 1, -1)
+    notify_for_run(src, ref, policy=_ACTIVE, mailer=SpyMailer(), dry_run=True)
+    assert src.get_detail(ref).alerts == ()
+
+
+def test_notify_attaches_allure_zip(reports_root):
+
+    _write_run(reports_root, "dag", "suite", "r0", [("b", "failed")], _WHEN)
+    ref = ReportRef("dag", "r0", "suite", 1, -1)
+    write_allure(reports_root, ref)
+    src = FileSystemReportSource(report_root=reports_root, scan_cache_ttl=0)
+    spy = SpyMailer()
+    notify_for_run(src, ref, policy=_ACTIVE, mailer=spy)
+    atts = spy.sends[0]["attachments"]
+    assert len(atts) == 1 and atts[0][0] == "allure-results.zip" and atts[0][1] > 0
+
+
+def test_no_allure_means_no_attachment(reports_root):
+    _write_run(reports_root, "dag", "suite", "r0", [("b", "failed")], _WHEN)
+    src = FileSystemReportSource(report_root=reports_root, scan_cache_ttl=0)
+    spy = SpyMailer()
+    notify_for_run(
+        src, ReportRef("dag", "r0", "suite", 1, -1), policy=_ACTIVE, mailer=spy
+    )
+    assert spy.sends[0]["attachments"] == []
+
+
+def test_oversized_allure_archive_is_skipped(reports_root, monkeypatch):
+    # LOAD/SECURITY: a huge archive must not be mailed (servers reject it) nor fail the send.
+    from airflow_pytest_plugin import notifications as notif
+
+    _write_run(reports_root, "dag", "suite", "r0", [("b", "failed")], _WHEN)
+    src = FileSystemReportSource(report_root=reports_root, scan_cache_ttl=0)
+    monkeypatch.setattr(
+        type(src),
+        "allure_archive",
+        lambda self, ref: b"x" * (notif._MAX_ATTACHMENT_BYTES + 1),
+    )
+    spy = SpyMailer()
+    out = notify_for_run(
+        src, ReportRef("dag", "r0", "suite", 1, -1), policy=_ACTIVE, mailer=spy
+    )
+    assert (
+        out and spy.sends[0]["attachments"] == []
+    )  # sent, but without the oversized zip
+
+
+def test_record_alert_caps_history_and_sanitizes(reports_root):
+    # LOAD: 60 appends keep only the newest 50. SECURITY: hostile fields are truncated.
+    from airflow_pytest_plugin.sources.filesystem import _ALERTS_CAP
+
+    _write_run(reports_root, "dag", "suite", "r0", [("a", "passed")], _WHEN)
+    src = FileSystemReportSource(report_root=reports_root, scan_cache_ttl=0)
+    ref = ReportRef("dag", "r0", "suite", 1, -1)
+    for i in range(60):
+        assert src.record_alert(ref, {"at": f"t{i}", "kind": "passed", "ok": True})
+    hostile = {
+        "at": "x" * 500,
+        "kind": "k" * 500,
+        "recipients": [f"r{i}@x.io" * 100 for i in range(40)],
+        "ok": "truthy-string",
+        "manual": 1,
+        "extra_field": "dropped",
+    }
+    assert src.record_alert(ref, hostile)
+    alerts = src.get_detail(ref).alerts
+    assert len(alerts) == _ALERTS_CAP  # capped
+    last = alerts[-1]
+    assert len(last["at"]) <= 64 and len(last["kind"]) <= 32
+    assert len(last["recipients"]) <= 20
+    assert all(len(r) <= 200 for r in last["recipients"])
+    assert "extra_field" not in last
+    assert last["ok"] is True and last["manual"] is True  # coerced to bool
+
+
+def test_record_alert_missing_run_is_false(reports_root):
+    src = FileSystemReportSource(report_root=reports_root, scan_cache_ttl=0)
+    assert src.record_alert(ReportRef("dag", "nope", "t", 1, -1), {"ok": True}) is False
+
+
+def test_detail_tolerates_corrupt_alerts_field(reports_root):
+    # A meta whose "alerts" is garbage must not break the detail view.
+    import json as _json
+
+    _write_run(reports_root, "dag", "suite", "r0", [("a", "passed")], _WHEN)
+    out = ReportLayout().dir_for(reports_root, ReportRef("dag", "r0", "suite", 1, -1))
+    meta_path = os.path.join(out, META_FILENAME)
+    with open(meta_path, encoding="utf-8") as fh:
+        meta = _json.load(fh)
+    meta["alerts"] = {"not": "a list"}
+    with open(meta_path, "w", encoding="utf-8") as fh:
+        _json.dump(meta, fh)
+    # junit.xml is required by get_detail; _write_run doesn't create one -> use test_outcomes path
+    src = FileSystemReportSource(report_root=reports_root, scan_cache_ttl=0)
+    from airflow_pytest_plugin.sources.filesystem import _alerts_from_meta
+
+    assert _alerts_from_meta(meta) == ()
+    assert src.record_alert(ReportRef("dag", "r0", "suite", 1, -1), {"ok": True})
+
+
 # --- producer hook -----------------------------------------------------------------------------
 def test_parser_email_true_notifies(monkeypatch, reports_root):
     from airflow_pytest_plugin import notifications
@@ -593,3 +802,36 @@ def test_parser_email_false_is_silent(monkeypatch, reports_root):
     parser._pending_ref = ReportRef("dag", "run1", "task", 1, -1)
     parser._maybe_notify()
     assert calls == []
+
+
+def test_parser_email_only_fail_notifies_failures_only(monkeypatch, reports_root):
+    # email_only_fail=True turns notifications on, but only for a failed / flaky run
+    # (always=False downstream) -- teams that don't want success mail use this.
+    from airflow_pytest_plugin import notifications
+    from airflow_pytest_plugin.producer import ArchivingResultParser
+
+    calls: list = []
+    monkeypatch.setattr(
+        notifications, "notify_after_archive", lambda ref, **kw: calls.append(kw)
+    )
+    parser = ArchivingResultParser(report_root=reports_root, email_only_fail=True)
+    parser._pending_ref = ReportRef("dag", "run1", "task", 1, -1)
+    parser._maybe_notify()
+    assert len(calls) == 1 and calls[0]["always"] is False
+
+
+def test_parser_email_only_fail_overrides_email_true(monkeypatch, reports_root):
+    # Both flags set: only-fail wins -- no success mail even though email=True.
+    from airflow_pytest_plugin import notifications
+    from airflow_pytest_plugin.producer import ArchivingResultParser
+
+    calls: list = []
+    monkeypatch.setattr(
+        notifications, "notify_after_archive", lambda ref, **kw: calls.append(kw)
+    )
+    parser = ArchivingResultParser(
+        report_root=reports_root, email=True, email_only_fail=True
+    )
+    parser._pending_ref = ReportRef("dag", "run1", "task", 1, -1)
+    parser._maybe_notify()
+    assert len(calls) == 1 and calls[0]["always"] is False

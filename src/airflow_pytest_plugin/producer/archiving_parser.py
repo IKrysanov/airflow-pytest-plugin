@@ -53,6 +53,7 @@ class ArchivingResultParser(JUnitResultParser):  # type: ignore[misc, unused-ign
         layout: ReportLayout | None = None,
         allure: bool = False,
         email: bool = False,
+        email_only_fail: bool = False,
     ) -> None:
         super().__init__()  # base report_dir stays None; we compute per-run
         self._report_root = os.path.abspath(report_root or get_reports_root())
@@ -61,12 +62,16 @@ class ArchivingResultParser(JUnitResultParser):  # type: ignore[misc, unused-ign
         # the worker, else pytest errors on the unknown arg) so raw Allure results
         # are archived alongside junit.xml for Allure TestOps export.
         self._allure = allure
-        # Per-task switch for AUTOMATIC email notifications. When True, a mail is sent after
-        # EVERY run -- a "run finished" notice styled by outcome (green pass / amber flaky /
-        # red fail) -- so a team gets notified without watching the run. When False (the default)
-        # nothing is emailed, so a noisy ping/smoke suite can't spam the mailbox. Needs
-        # ``AIRFLOW_PYTEST_ALERTS_EMAIL_TO`` (recipients) + a mail transport configured.
+        # Per-task switches for AUTOMATIC email notifications (both need
+        # ``AIRFLOW_PYTEST_ALERTS_EMAIL_TO`` recipients + a mail transport configured):
+        #   email=True           -> a "run finished" mail after EVERY run (styled by outcome),
+        #                           for teams that want completion notices without watching.
+        #   email_only_fail=True -> mail ONLY when the run failed or is flaky -- no success
+        #                           mail (takes precedence when both flags are set).
+        # Both False (the default) -> nothing is emailed, so a noisy ping/smoke suite can't
+        # spam the mailbox.
         self._email = email
+        self._email_only_fail = email_only_fail
         # Ref resolved in report_request, reused by parse() to name the sidecar.
         # One parser instance serves one task, so a single slot suffices.
         self._pending_ref: ReportRef | None = None
@@ -121,18 +126,24 @@ class ArchivingResultParser(JUnitResultParser):  # type: ignore[misc, unused-ign
     # -- internals -------------------------------------------------------
 
     def _maybe_notify(self) -> None:
-        """Email a completion notification for the run just archived, but ONLY when this parser
-        opted in with ``email=True``. Then a mail goes out for EVERY run (a "run finished" notice
-        styled by outcome -- green pass / amber flaky / red fail) so a team needn't watch the run.
-        The default ``email=False`` sends nothing, so a noisy ping/smoke suite can't spam the
-        mailbox. Imported lazily; the default path does no work at all.
+        """Email a notification for the run just archived, per the parser's opt-in flags.
+
+        ``email=True`` -> a "run finished" mail for EVERY run (styled by outcome).
+        ``email_only_fail=True`` -> mail only when the run FAILED or is FLAKY (wins over
+        ``email=True``, so success mail can be switched off). Both off (the default) ->
+        nothing, so a noisy ping/smoke suite can't spam the mailbox. Imported lazily;
+        the default path does no work at all.
         """
-        if not self._email:
+        if not self._email and not self._email_only_fail:
             return
         from ..notifications import notify_after_archive
 
         ref = self._pending_ref or self._resolve_ref(get_current_context())
-        notify_after_archive(ref, report_root=self._report_root, always=True)
+        notify_after_archive(
+            ref,
+            report_root=self._report_root,
+            always=self._email and not self._email_only_fail,
+        )
 
     def _resolve_ref(self, context: dict[str, Any] | None) -> ReportRef:
         """Build a :class:`ReportRef` from context, or a synthetic ref off-task."""

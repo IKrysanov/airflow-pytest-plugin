@@ -200,7 +200,9 @@ class FileSystemReportSource(ReportSource):
             )
             for c in result.cases
         )
-        return ReportDetail(summary=summary, cases=cases)
+        return ReportDetail(
+            summary=summary, cases=cases, alerts=_alerts_from_meta(meta)
+        )
 
     def test_outcomes(self, ref: ReportRef) -> dict[str, dict[str, Any]] | None:
         report_dir = self._safe_dir(ref)
@@ -253,6 +255,34 @@ class FileSystemReportSource(ReportSource):
         self._invalidate_scan()  # the deleted run must drop out of the list at once
         _log.info("Deleted report %s", target)
         return True
+
+    def record_alert(self, ref: ReportRef, entry: dict[str, Any]) -> bool:
+        """Append one sanitized email-notification record to the run's ``meta.json``.
+
+        Best-effort and bounded: the entry is reduced to the known fields, the history is
+        capped at the newest ``_ALERTS_CAP`` records (so repeated sends can't grow the
+        sidecar without limit), and the write is atomic (tmp + ``os.replace``) so a
+        concurrent scan never sees a half-written file. Never raises for storage problems.
+        """
+        report_dir = self._safe_dir(ref)
+        if report_dir is None:
+            return False
+        meta_file = Path(os.path.join(report_dir, META_FILENAME))
+        meta = self._load_meta(meta_file)
+        if meta is None:
+            return False
+        try:
+            history = [a for a in meta.get("alerts", []) if isinstance(a, dict)]
+            history.append(_sanitize_alert_entry(entry))
+            meta["alerts"] = history[-_ALERTS_CAP:]
+            tmp = f"{meta_file}.{os.getpid()}.tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(meta, fh, ensure_ascii=False)
+            os.replace(tmp, meta_file)
+            return True
+        except Exception:
+            _log.exception("Failed to record an alert in %s", meta_file)
+            return False
 
     def report_size(self, ref: ReportRef) -> int:
         """Total bytes of the report's directory (``0`` if it resolves nowhere)."""
@@ -406,6 +436,35 @@ class FileSystemReportSource(ReportSource):
             logical_date=_opt_str(meta.get("logical_date")),
             has_allure=bool(meta.get("allure")),
         )
+
+
+#: Newest email-notification records kept per run (older ones are dropped on append).
+_ALERTS_CAP = 50
+
+
+def _sanitize_alert_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    """Reduce an alert record to its known, bounded fields (never trust the caller blindly)."""
+    recipients = entry.get("recipients") or []
+    if not isinstance(recipients, (list, tuple)):
+        recipients = []
+    return {
+        "at": str(entry.get("at") or "")[:64],
+        "kind": str(entry.get("kind") or "")[:32],
+        "recipients": [str(r)[:200] for r in list(recipients)[:20]],
+        "ok": bool(entry.get("ok")),
+        "manual": bool(entry.get("manual")),
+    }
+
+
+def _alerts_from_meta(meta: dict[str, Any] | None) -> tuple[dict[str, Any], ...]:
+    """The sanitized alert history stored in a run's meta (empty when absent/corrupt)."""
+    if not isinstance(meta, dict) or not isinstance(meta.get("alerts"), list):
+        return ()
+    return tuple(
+        _sanitize_alert_entry(a)
+        for a in meta["alerts"][-_ALERTS_CAP:]
+        if isinstance(a, dict)
+    )
 
 
 def _opt_str(value: Any) -> str | None:
