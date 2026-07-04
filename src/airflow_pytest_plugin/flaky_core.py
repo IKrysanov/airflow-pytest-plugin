@@ -14,16 +14,16 @@
 
 """Pure flaky-scoring logic, shared by the ``/api/flaky`` route and the alerting layer.
 
-No web / Airflow / FastAPI imports -- just outcome sequences in, stats out -- so both the reader
-route and the producer-side email alerts score flakiness identically without the producer having
-to import the web layer.
+No web/Airflow/FastAPI imports -- outcome sequences in, stats out -- so the reader route and
+producer-side email alerts score flakiness identically without the producer pulling in the
+web layer.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-#: Outcomes that count as "not a pass" for flakiness / failure detection.
+#: Outcomes that count as failures for flakiness detection.
 FAIL_OUTCOMES = ("failed", "error")
 
 
@@ -40,7 +40,7 @@ def flip_rate(seq: list[str]) -> float:
 
 
 def trend(seq: list[str]) -> str:
-    """Is the test flipping more lately? ``up`` (worse) / ``down`` (calmer) / ``flat``."""
+    """Flipping more lately? ``up`` (worse) / ``down`` (calmer) / ``flat``."""
     if len(seq) < 4:
         return "flat"
     mid = len(seq) // 2
@@ -53,8 +53,8 @@ def trend(seq: list[str]) -> str:
 
 
 def is_flaky(seq: list[str], *, min_score: float = 0.0) -> bool:
-    """Whether one test's outcome sequence counts as flaky: the window holds BOTH a pass and a
-    fail/error AND the flip rate clears ``min_score`` (a lone blip in a steady history is not)."""
+    """True if the window holds BOTH a pass and a fail/error AND the flip rate clears
+    ``min_score`` -- so a lone blip in an otherwise steady history is not flaky."""
     if not any(o in FAIL_OUTCOMES for o in seq):
         return False
     if not any(o == "passed" for o in seq):
@@ -71,18 +71,18 @@ def flaky_stats(
 ) -> dict[str, Any] | None:
     """Flakiness stats for one test's outcomes (oldest→newest), or ``None`` if stable.
 
-    A test counts as flaky only if the window holds both a pass and a fail/error AND
-    its ``score`` clears ``min_score`` -- so a lone blip in a long history (a near-zero
-    flip rate) is filtered out. ``score`` is the flip rate (0–1), normalised by run
-    count so it's comparable across histories; ``trend`` compares the recent half to
-    the older half; ``quarantined`` marks scores at/above ``quarantine_score``.
-    ``recent`` is the last ``strip`` outcomes (for the UI strip).
+    Flaky only if the window holds both a pass and a fail/error AND ``score`` clears
+    ``min_score`` -- filtering out a lone blip in a long history (near-zero flip rate).
+    ``score`` is the flip rate (0–1), normalised by run count so it's comparable across
+    histories; ``trend`` compares the recent half to the older half; ``quarantined``
+    marks scores at/above ``quarantine_score``; ``recent`` is the last ``strip``
+    outcomes for the UI strip.
     """
     fails = sum(1 for o in seq if o in FAIL_OUTCOMES)
     if not fails or not any(o == "passed" for o in seq):
         return None
     score = round(flip_rate(seq), 3)
-    if score < min_score:  # too steady to count as flaky
+    if score < min_score:  # too steady to be flaky
         return None
     flips = sum(
         1

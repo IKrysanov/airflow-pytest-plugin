@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""The single-page viewer (dependency-free HTML/CSS/JS, no build step)."""
+"""Single-page viewer: dependency-free HTML/CSS/JS, no build step."""
 
 from __future__ import annotations
 
@@ -26,36 +26,36 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   /* Palette tracks Airflow 3's Chakra theme; page bg re-read live from parent when embedded. */
   :root {
     --bg: #ffffff; --surface: #ffffff; --surface-2: #f4f4f5;
-    --surface-glass: #ffffffc7;  /* translucent surface so a chip doesn't fully hide data */
+    --surface-glass: #ffffffc7;  /* translucent so a chip doesn't fully hide data */
     --fg: #18181b; --muted: #52525b; --border: #e4e4e7;
     --primary: #017cee; --on-primary: #ffffff; --ring: #017cee40;
     --pass: #008000; --fail: #ff0000; --skip: #ff69b4; --error: #9370db;
     --pass-bg: #0080001a; --fail-bg: #ff00001a; --skip-bg: #ff69b41f; --error-bg: #9370db1f;
-    --warn: #a16207; --warn-bg: #fef08a;  /* amber "flaky" warning chip (readable on yellow) */
-    --trend: #0891b2;  /* cyan pass-rate trend line (darker for contrast on white) */
-    --thresh: #d97706;  /* amber success-threshold (label text -- must stay readable) */
-    --thresh-soft: #d9770659;  /* muted amber for the gridline so it recedes behind data */
+    --warn: #a16207; --warn-bg: #fef08a;  /* flaky chip: readable on yellow */
+    --trend: #0891b2;  /* pass-rate line: darker for contrast on white */
+    --thresh: #d97706;  /* threshold label text -- must stay readable */
+    --thresh-soft: #d9770659;  /* gridline: recedes behind data */
     --shadow: 0 1px 2px #0000000d, 0 1px 3px #00000014;
-    /* Tooltip inverts the page: dark bubble on the light theme. */
+    /* Tooltip inverts the page: dark bubble on light. */
     --tip-bg: #18181b; --tip-fg: #fafafa; --tip-border: #3f3f46;
   }
   html[data-theme="dark"] {
     --bg: #07121e; --surface: #1c2a3a; --surface-2: #243651;
-    --surface-glass: #1c2a3ac7;  /* translucent surface so a chip doesn't fully hide data */
+    --surface-glass: #1c2a3ac7;  /* translucent so a chip doesn't fully hide data */
     --fg: #e6edf3; --muted: #94a3b8; --border: #2c4262;
     --primary: #4ba3f5; --on-primary: #07121e; --ring: #017cee66;
     --pass: #2ecc71; --fail: #ff6b6b; --skip: #ff8ecb; --error: #b39ddb;
     --pass-bg: #2ecc711f; --fail-bg: #ff6b6b1f; --skip-bg: #ff8ecb1f; --error-bg: #b39ddb1f;
-    --warn: #fcd34d; --warn-bg: #fcd34d2e;  /* amber "flaky" warning chip on the dark theme */
-    --trend: #22d3ee;  /* cyan pass-rate trend line (brighter on the navy theme) */
-    --thresh: #fbbf24;  /* amber success-threshold (label text -- must stay readable) */
-    --thresh-soft: #fbbf2459;  /* muted amber for the gridline so it recedes behind data */
+    --warn: #fcd34d; --warn-bg: #fcd34d2e;
+    --trend: #22d3ee;  /* brighter on navy */
+    --thresh: #fbbf24;
+    --thresh-soft: #fbbf2459;
     --shadow: 0 1px 3px #00000040, 0 2px 8px #00000033;
-    /* ...and a white bubble on the dark theme. */
+    /* ...white bubble on dark. */
     --tip-bg: #fafafa; --tip-fg: #18181b; --tip-border: #d4d4d8;
   }
   * { box-sizing: border-box; }
-  /* Force the hidden attribute to win over display:grid/flex (e.g. .kpis). */
+  /* [hidden] must beat display:grid/flex (e.g. .kpis). */
   [hidden] { display: none !important; }
   body {
     margin: 0; background: var(--bg); color: var(--fg);
@@ -86,13 +86,13 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   }
   .brand { font-weight: 600; font-size: 18px; letter-spacing: -.01em;
     white-space: nowrap; color: var(--fg); flex: 0 0 auto; }
-  /* min-width:0 lets the group actually shrink (Safari otherwise pins flex items
-     to their intrinsic width and overflows); wrap is the final safety valve. */
+  /* min-width:0 lets the group shrink (Safari otherwise pins flex items to their
+     intrinsic width and overflows); wrap is the final safety valve. */
   .controls { display: flex; align-items: center; gap: 10px;
     flex: 1 1 auto; min-width: 0; flex-wrap: wrap; justify-content: flex-end; }
   input, button { font: inherit; color: var(--fg); }
-  /* Each filter input + its custom suggestions dropdown live in a positioned wrap;
-     the wrap carries the adaptive flex sizing, the input fills it. */
+  /* Filter input + its suggestions dropdown share a positioned wrap that carries the
+     flex sizing; the input fills it. */
   .field-wrap { position: relative; display: flex; flex: 1 1 150px; min-width: 0; max-width: 200px; }
   .field {
     height: 36px; background: var(--surface-2); border: 1px solid var(--border);
@@ -112,8 +112,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .menu-item:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
   .menu-item svg { width: 16px; height: 16px; flex: 0 0 auto; color: var(--muted); }
   .field:focus { outline: 2px solid var(--ring); outline-offset: 1px; border-color: var(--primary); }
-  /* Suggestions: a tidy dropdown anchored under the input (replaces the native
-     <datalist>, whose popup escapes the iframe with a detached system shadow). */
+  /* Suggestions dropdown anchored under the input -- replaces the native <datalist>,
+     whose popup escapes the iframe with a detached system shadow. */
   .suggest {
     position: absolute; top: calc(100% + 5px); left: 0; right: 0; z-index: 60;
     background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
@@ -132,7 +132,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .btn.primary { background: var(--primary); border-color: var(--primary); color: var(--on-primary); }
   .btn.primary:hover { filter: brightness(1.08); }
   .icon-btn { height: auto; padding: 7px; }
-  /* Allure button: same height as the neighbouring icon buttons (32px), only wider. */
+  /* Allure button: matches the neighbouring icon buttons' 32px height, just wider. */
   #d-allure { height: 32px; padding: 0 10px; gap: 6px; font-size: 12.5px; }
 
   main { padding: 18px 20px 40px; max-width: 1600px; margin: 0 auto; }
@@ -157,17 +157,16 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .chart-card { margin-bottom: 18px; padding: 14px 16px 8px; }
   .chart-head { display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
     font-size: 13px; font-weight: 600; color: var(--muted); margin-bottom: 6px; }
-  /* Runs chart header in two fixed rows so controls don't reflow/jump on resize:
-     row 1 = title + legend (+reset); row 2 = trend toggle (left) + carousel arrows (right). */
+  /* Two fixed rows so controls don't reflow on resize: row 1 = title + legend (+reset),
+     row 2 = trend toggle (left) + carousel arrows (right). */
   .chart-head-stack { flex-direction: column; align-items: stretch; gap: 8px; }
   .chart-head-stack .chart-head-row { display: flex; align-items: center; gap: 12px;
     flex-wrap: wrap; min-width: 0; }
-  /* Right cluster (window range + carousel arrows) hugs the right edge, and drops to
-     its own line on narrow widths instead of overflowing -- fully adaptive. */
+  /* Right cluster (window range + arrows) hugs the right edge, dropping to its own line
+     on narrow widths rather than overflowing. */
   .chart-meta-right { margin-left: auto; display: inline-flex; align-items: center;
     gap: 8px; min-width: 0; }
-  /* Visible-window range "#48-#76 / 76" and average pass rate "avg 92%": quiet,
-     tabular figures so the numbers don't jiggle while scrolling. */
+  /* Window range "#48-#76 / 76" and "avg 92%": tabular figures so they don't jiggle. */
   .chart-range, .chart-avg { font-size: 12px; font-weight: 500; color: var(--muted);
     white-space: nowrap; font-variant-numeric: tabular-nums; }
   .chart-range b { color: var(--fg); font-weight: 600; }
@@ -180,11 +179,11 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     font: inherit; font-weight: 600; text-decoration: underline; padding: 0; }
   .chart-clear:hover { opacity: .8; }
   .chart-clear:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; border-radius: 3px; }
-  /* "scoped to the selected group(s)" chip on the flaky panel -- mirrors the chart's
-     selection so picking a group filters BOTH the chart and the flaky list. */
+  /* "scoped to the selected group(s)" chip -- picking a group filters BOTH the chart
+     and the flaky list. */
   .flk-scope { font-size: 11px; font-weight: 600; color: var(--primary);
     background: var(--ring); padding: 1px 8px; border-radius: 999px; }
-  /* Pass-rate trend: checkbox toggle + the cyan line/dots/threshold overlay. */
+  /* Pass-rate trend: checkbox toggle + the line/dots/threshold overlay. */
   .trend-toggle { display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
     font-weight: 500; white-space: nowrap; color: var(--muted); }
   #chart { position: relative; }
@@ -193,16 +192,14 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     stroke-linejoin: round; stroke-linecap: round; }
   .trend-dot { fill: var(--trend); stroke: var(--surface); stroke-width: 1.5;
     pointer-events: auto; cursor: pointer; }
-  /* Stretches of the pass-rate line below the success threshold turn red (signal). */
+  /* The pass-rate line/dots turn red where they fall below the success threshold. */
   .trend-line.trend-danger { stroke: var(--fail); }
   .trend-dot.trend-dot-bad { fill: var(--fail); }
-  /* A quiet reference line: thin, muted amber so it sits behind the bars + trend line
-     (the data), not over them. The small % chip stays readable in full amber. */
+  /* Threshold reference line: thin muted amber so it sits behind the data, not over it. */
   .trend-thresh { position: absolute; left: 0; right: 0; pointer-events: none;
     border-top: 1px dashed var(--thresh-soft); }
-  /* Glass chip: translucent + blurred so it never fully hides a trend dot behind it,
-     yet the % text stays crisp (only the backdrop is blurred). pointer-events:none on
-     the parent already lets dot clicks pass through. */
+  /* Glass chip: translucent + backdrop-blurred so it never fully hides a dot behind it,
+     yet the % text stays crisp. Parent's pointer-events:none lets dot clicks through. */
   .trend-thresh span { position: absolute; right: 2px; top: -9px; font-size: 10px;
     font-weight: 600; color: var(--thresh); background: var(--surface-glass);
     -webkit-backdrop-filter: blur(2px); backdrop-filter: blur(2px); padding: 0 5px;
@@ -217,12 +214,10 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .legend button.off { opacity: .4; text-decoration: line-through; }
   .legend .leg-reset { color: var(--primary); font-size: 12px; }
   .legend i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
-  /* Bars are absolutely placed at integer x/width (one gradient element each), so
-     edges land on whole pixels -> crisp, no anti-aliased colour halo.
-     The bars live in a fixed-width strip inside a horizontal scroll viewport:
-     drag (mouse) or swipe/trackpad (native) or the arrows pan it smoothly. The
-     scrollbar is hidden -- the arrows + grab cursor are the affordance. */
-  /* 6px of headroom up top so a 100%-pass trend dot is never clipped. */
+  /* Bars sit in a fixed-width strip inside a horizontal scroll viewport; drag (mouse),
+     swipe/trackpad (native) or the arrows pan it. The scrollbar is hidden -- the arrows
+     + grab cursor are the affordance. Height leaves 6px headroom so a 100%-pass trend
+     dot is never clipped. (Bars themselves use integer x/width; see .bar.) */
   .chart-bars { position: relative; height: 128px; overflow-x: auto; overflow-y: hidden;
     cursor: grab; touch-action: pan-x; overscroll-behavior-x: contain; scrollbar-width: none;
     user-select: none; -webkit-user-select: none; }
@@ -232,12 +227,11 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .bars-strip { position: relative; height: 100%; }
   .bar { position: absolute; bottom: 22px; height: 100px; border-radius: 2px;
     background: var(--surface-2); transition: opacity .12s; cursor: pointer; }
-  /* Hover = an even outline ring, NOT a brightness/colour change: sweeping across many narrow
-     bars must not make their fill colours flicker/"jump". An INTEGER 2px spread keeps the ring
-     the same crisp thickness on every edge (a fractional px anti-aliases unevenly). */
+  /* Hover = an outline ring, NOT a brightness/colour change: sweeping across many narrow
+     bars must not flicker their fills. Integer 2px spread keeps the ring crisp on every
+     edge (a fractional px anti-aliases unevenly). */
   .bar:hover { box-shadow: 0 0 0 2px var(--fg); }
-  /* With the trend on, bars recede so the line/threshold read clearly; hovering one
-     brings it back to full strength. */
+  /* Trend on: bars recede so the line/threshold read clearly; hover restores one. */
   .bars-strip.trend-on .bar { opacity: .26; }
   .bars-strip.trend-on .bar:hover { opacity: 1; }
   .bnum { position: absolute; bottom: 0; width: 36px; text-align: center; font-size: 10px;
@@ -250,12 +244,12 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     padding: 10px 12px; font-size: 12.5px; line-height: 1.55;
     box-shadow: 0 10px 30px #00000038; max-width: 320px;
   }
-  /* Tooltip text stays single-line (ellipsised) so the tooltip is a FIXED height as the
-     cursor sweeps bars -- wrapping made the status dots jump up/down between bars. */
+  /* Single-line (ellipsised) so the tooltip is a FIXED height as the cursor sweeps bars;
+     wrapping made the status dots jump between bars. */
   #tip .tt, #tip .tm { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   #tip .tt { font-weight: 650; font-size: 13px; }
   #tip .tm { opacity: .72; }
-  /* The heatmap tooltip alone wraps its long node_id line (full id is the point there). */
+  /* Heatmap tooltip alone wraps its node_id line (the full id is the point there). */
   #tip .tm.wrap { white-space: normal; overflow: visible; overflow-wrap: anywhere; text-overflow: clip; }
   #tip .tr { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 5px; }
   #tip .tr span { white-space: nowrap; font-variant-numeric: tabular-nums; }
@@ -271,7 +265,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .pager { display: flex; align-items: center; justify-content: flex-end; gap: 10px;
     padding: 10px 12px; border-top: 1px solid var(--border); font-size: 13px; color: var(--muted); }
 
-  /* Main board: the recent-runs chart and the flaky panel share the row 50/50. */
+  /* Main board rows: two cards share the row 50/50. */
   .board { display: flex; gap: 16px; align-items: stretch; margin-bottom: 18px; }
   .board > .card { flex: 1 1 0; min-width: 0; margin-bottom: 0; }
   .flaky-card { padding: 14px 16px; display: flex; flex-direction: column; }
@@ -280,8 +274,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .flk-board-ctrls .case-q { flex: 1 1 auto; max-width: none; height: 30px; }
   .flk-board-only { display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto;
     white-space: nowrap; color: var(--muted); font-size: 12.5px; cursor: pointer; }
-  /* Fill the card (which stretches to the radar's height next to it) and scroll INSIDE it, so
-     the flaky list runs to the very bottom of the panel instead of stopping at a fixed cap.
+  /* Scroll INSIDE the card so the list runs to the panel's bottom, not a fixed cap.
      min-height:0 lets the flex child shrink so overflow scrolls; capped only when stacked. */
   .flaky-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto;
     overscroll-behavior-y: contain; scrollbar-width: thin; }
@@ -291,22 +284,19 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .fb-row:hover { background: var(--surface-2); }
   .fb-main { flex: 1 1 auto; min-width: 0; }
   .fb-node { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  /* dag·task line carries the quarantine badge: the text truncates, the badge stays. */
+  /* dag·task line carries the quarantine badge: text truncates, badge stays. */
   .fb-sub { display: flex; align-items: center; color: var(--muted); font-size: 11px; }
   .fb-dagtask { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
   .fb-meta { color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; flex: 0 0 auto; }
   .fb-empty { color: var(--muted); font-size: 12.5px; padding: 16px 2px; }
-  /* Reliability radar (pentagon): the 3rd main-board dashboard. Its own row UNDER the
-     full-width chart, sharing that row 50/50 with the flaky panel (both are .board > .card).
-     The SVG has a wide viewBox and scales to the card, so labels never spill on small screens. */
+  /* Reliability radar row (under the full-width chart), sharing 50/50 with the flaky
+     panel. Wide viewBox scales to the card, so labels never spill on small screens. */
   .pentagon-card { padding: 14px 16px; display: flex; flex-direction: column; }
-  /* Both cards on this row share a fixed height (driven by the radar's size) so the flaky
-     list scrolls INSIDE its card down to the bottom of the panel -- and can't stretch the
-     row to fit all rows. Height is released on mobile (cards stack + size to content). */
+  /* Both cards share a fixed height (driven by the radar) so the flaky list scrolls INSIDE
+     its card and can't stretch the row. Released on mobile (cards stack, size to content). */
   #board2 > .card { height: 384px; }
-  /* The radar FILLS its card (no max-width cap): the SVG stretches to the card and the wide
-     viewBox scales the pentagon to fit by height, so it's as large as the card allows and
-     shrinks proportionally with the screen. */
+  /* Radar fills its card (no max-width cap): the wide viewBox scales it to fit by height,
+     so it grows/shrinks with the card. */
   #pentagon { flex: 1 1 auto; min-height: 0; }
   .rel-svg { display: block; width: 100%; height: 100%; }
   .rel-grid { fill: none; stroke: var(--border); stroke-width: 1; }
@@ -319,8 +309,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     font-variant-numeric: tabular-nums; }
   .rel-score-cap { fill: var(--muted); font-size: 8.5px; text-transform: uppercase;
     letter-spacing: .05em; }
-  /* Run-health trend: a compact sparkline of per-run health over time, under the radar.
-     A short footer so it never crowds the radar (the card grows to fit both). */
+  /* Run-health trend: a compact sparkline under the radar. Short footer so it never
+     crowds the radar (the card grows to fit both). */
   .rel-trend { display: flex; align-items: center; gap: 12px; flex: 0 0 auto;
     padding-top: 9px; margin-top: 7px; border-top: 1px solid var(--border); }
   .rt-meta { display: flex; align-items: baseline; gap: 7px; flex: 0 0 auto; }
@@ -332,10 +322,10 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .rt-delta.rt-down { color: var(--fail); }
   .rt-delta.rt-flat { color: var(--muted); }
   /* Non-uniform scale (preserveAspectRatio=none) makes the line fill the width; the
-     non-scaling stroke keeps it an even 2px everywhere (no thickness "walk"). */
+     non-scaling stroke keeps it an even 2px everywhere. */
   .rt-graph { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
   .rt-spark { width: 100%; height: 30px; display: block; }
-  /* The line's time axis: dates of the first and last run in view. */
+  /* Time axis: dates of the first and last run in view. */
   .rt-axis { display: flex; justify-content: space-between; color: var(--muted);
     font-size: 10px; margin-top: 2px; font-variant-numeric: tabular-nums; }
   .rt-line { fill: none; stroke: var(--primary); stroke-width: 2; stroke-linejoin: round;
@@ -356,8 +346,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .ri-name { font-weight: 650; }
   .ri-val { color: var(--primary); font-weight: 700; font-variant-numeric: tabular-nums; }
   .ri-desc { display: block; color: var(--muted); font-size: 12.5px; margin-top: 2px; }
-  /* Stacked board: cards size to their content (the row layout's flex:1 1 0 would
-     collapse them to a sliver in a column, hiding the chart/flaky behind overflow). */
+  /* Stacked board: cards size to their content (the row's flex:1 1 0 would collapse
+     them to a sliver in a column, hiding the chart/flaky behind overflow). */
   @media (max-width: 860px) {
     .board { flex-direction: column; }
     .board > .card { flex: 0 0 auto; }
@@ -366,7 +356,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     .flaky-scroll { max-height: 300px; }
   }
   /* Unique-tests list: one wrapping column, so a long node id never forces a
-     horizontal scrollbar (the dialog body scrolls vertically). */
+     horizontal scrollbar. */
   .uq-row { padding: 9px 4px; border-bottom: 1px solid var(--border); cursor: pointer;
     font-size: 12.5px; overflow-wrap: anywhere; }
   .uq-row:last-child { border-bottom: 0; }
@@ -402,7 +392,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .donut { width: 124px; height: 124px; flex: 0 0 auto; overflow: visible; }
   .donut-pct { font-size: 27px; font-weight: 700; fill: var(--fg); }
   .donut-lbl { font-size: 11px; fill: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
-  /* Rounded arc ends; hovering a slice lifts it (scaling a centred circle pushes its arc out). */
+  /* Hovering a slice lifts it (scaling a centred circle pushes its arc out). */
   .dseg { cursor: pointer; stroke-linecap: round;
     transition: opacity .12s, transform .12s ease-out;
     transform-box: view-box; transform-origin: 60px 60px; }
@@ -416,8 +406,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .af-link:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
   .af-link svg { width: 13px; height: 13px; color: var(--muted); flex: 0 0 auto; }
   .af-link { max-width: 100%; }
-  /* Narrow screens: the toolbar wraps (flex-wrap) AND its chips compact, so however many
-     actions a run accumulates they never collide or overflow the dialog. */
+  /* Narrow screens: the toolbar wraps AND its chips compact, so however many actions a
+     run accumulates they never overflow the dialog. */
   @media (max-width: 640px) {
     .af-links { gap: 6px; }
     .af-link { padding: 4px 7px; font-size: 12px; gap: 4px; }
@@ -440,7 +430,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   /* Email-this-run dialog: a labelled recipients field + a status line. */
   #email-dlg .cbody { display: flex; flex-direction: column; gap: 6px; }
   .em-label { font-weight: 650; font-size: 13px; }
-  /* .case-q is flex:1 1 220px; in this flex COLUMN that basis becomes height -> pin it. */
+  /* .case-q's flex:1 1 220px basis becomes height in this flex COLUMN -> pin it. */
   #email-dlg .case-q { width: 100%; box-sizing: border-box; flex: 0 0 auto; height: 34px; max-width: none; }
   .em-hint { color: var(--muted); font-size: 12px; }
   .em-status { font-size: 13px; margin-top: 4px; }
@@ -465,7 +455,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     padding: 7px; border-radius: 8px; display: inline-flex; transition: background .12s, color .12s; }
   .bulk-close:hover { background: var(--surface-2); color: var(--fg); }
   .bulk-del:focus-visible, .bulk-close:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
-  /* Checkboxes styled like Airflow's (Chakra): rounded square, brand-blue + white tick when on. */
+  /* Checkboxes styled like Airflow's Chakra: rounded, brand-blue + white tick when on. */
   .sel-cell { width: 1%; white-space: nowrap; padding-right: 0; }
   .sel-cell input[type="checkbox"], #case-grp, #flk-qonly, #flk-board-qonly, #trend-toggle, #list-grp {
     appearance: none; -webkit-appearance: none; margin: 0; width: 16px; height: 16px;
@@ -497,11 +487,11 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   }
   th.sortable, th.gsort, th.rsort { cursor: pointer; }
   th.sortable:hover, th.gsort:hover, th.rsort:hover { color: var(--fg); }
-  /* Run-list headers: ONLY the label text (.th-lab) sorts -- the empty cell space around it
-     is not clickable. The <th> shows a default cursor; the label carries the pointer/hover. */
+  /* Run-list headers: ONLY the label text (.th-lab) sorts, not the empty cell space.
+     The <th> shows a default cursor; the label carries the pointer/hover. */
   #list th.sortable, #list th.gsort, #list th.rsort { cursor: default; }
-  /* Hovering the empty cell space must NOT highlight the label: keep the th muted (inherit
-     would resolve to --fg and darken the word). Only .th-lab:hover below highlights it. */
+  /* Keep the th muted on hover of the empty space; inheriting would darken the label.
+     Only .th-lab:hover below highlights it. */
   #list th.sortable:hover, #list th.gsort:hover, #list th.rsort:hover { color: var(--muted); }
   .th-lab { display: inline-flex; align-items: center; gap: 4px; vertical-align: middle;
     cursor: pointer; }
@@ -533,17 +523,16 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   dialog {
     border: 1px solid var(--border); border-radius: 14px; background: var(--surface);
     color: var(--fg); max-width: min(980px, 92vw); width: 100%; padding: 0;
-    /* Never touch the window edges: cap height and keep a margin all around. */
+    /* Cap height + margin so it never touches the window edges. */
     max-height: 90vh; margin: auto; box-shadow: 0 20px 60px #0007;
   }
   dialog[open] { display: flex; flex-direction: column; }
-  /* Popups opened from inside a run sit inset within it -- narrower/shorter than the
-     detail dialog so they never touch its borders. */
+  /* Popups opened from inside a run sit inset -- narrower/shorter than the detail
+     dialog so they never touch its borders. */
   #flaky, #history, #compare, #failures, #rel-info, #panel-info {
     max-width: min(680px, 84vw); max-height: 82vh; }
-  /* The email form is small; keep it clearly inset from the run dialog's frame. */
+  /* Email form (small) + send log (narrow list): also inset from the run dialog. */
   #email-dlg { max-width: min(460px, 84vw); max-height: 82vh; }
-  /* The email-send log is a narrow list, also inset from the run dialog. */
   #alerts-dlg { max-width: min(560px, 84vw); max-height: 82vh; }
   .al-row { display: flex; align-items: flex-start; gap: 10px; padding: 10px 4px;
     border-bottom: 1px solid var(--border); font-size: 13px; }
@@ -558,14 +547,13 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     border-radius: 999px; padding: 0 7px; font-size: 11px; font-weight: 700;
     font-variant-numeric: tabular-nums; }
   #panel-info-body p { margin: 0; color: var(--fg); font-size: 13.5px; line-height: 1.6; }
-  /* The heatmap wants width (more run columns visible). Wide when opened on its own;
-     inset (narrower than the run dialog) when opened from inside a run, so it doesn't
-     touch the run dialog's frame. */
+  /* Heatmap wants width (more run columns). Wide on its own; inset when opened from
+     inside a run so it doesn't touch the run dialog's frame. */
   #heatmap { max-width: min(1040px, 92vw); max-height: 88vh; }
   #heatmap.hm-inset { max-width: min(880px, 86vw); max-height: 82vh; }
-  /* The dim comes from ONE shared full-screen overlay (updateParentDim), not per-dialog, so
-     stacking a popup on top of the run detail doesn't double-darken. The ::backdrop stays
-     (transparent) only to keep click-outside-to-close working. */
+  /* One shared full-screen overlay dims (updateParentDim), not per-dialog, so stacking a
+     popup on the run detail doesn't double-darken. ::backdrop stays transparent only to
+     keep click-outside-to-close working. */
   dialog::backdrop { background: transparent; }
   .dlg-head { display: flex; align-items: center; gap: 10px; padding: 16px 20px;
     border-bottom: 1px solid var(--border); flex: 0 0 auto; background: var(--surface);
@@ -584,16 +572,15 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .pill:hover { border-color: var(--primary); }
   .pill[aria-pressed="true"] { background: var(--primary); border-color: var(--primary); color: var(--on-primary); }
   .pill:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
-  /* A long test id WRAPS so the whole row (incl. the Time column) stays visible without
-     horizontal scrolling -- the node column takes the slack and grows taller, not wider.
-     (Overrides the global `td { white-space: nowrap }`, which would block wrapping.) */
+  /* A long test id WRAPS so the whole row (incl. Time) stays visible without horizontal
+     scroll -- the node column grows taller, not wider. Overrides the global
+     `td { white-space: nowrap }`, which would block wrapping. */
   .case-node { display: inline-block; white-space: normal; overflow-wrap: anywhere; }
   .case-table { overflow-x: auto; }
-  /* border-collapse:separate so the frozen (sticky) outcome column keeps its OWN
-     borders -- with collapse, a sticky cell's borders belong to the table and get
-     painted over, so the column's row lines vanished and the header doubled up.
-     Each cell carries only border-bottom (+ the divider on the first cell), so the
-     lines are single and aligned across all columns. */
+  /* border-collapse:separate so the sticky outcome column keeps its OWN borders -- with
+     collapse they belong to the table and get painted over, dropping the column's row
+     lines and doubling the header. Each cell carries only border-bottom (+ the first
+     cell's divider) so lines stay single and aligned across columns. */
   .case-table table { width: 100%;
     border-collapse: separate; border-spacing: 0; }
   .case.clickable[aria-expanded="true"] { background: var(--surface-2); }
@@ -629,8 +616,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .fk-row, .hist-row { display: flex; align-items: center; gap: 10px; padding: 9px 0;
     border-bottom: 1px solid var(--border); font-size: 12.5px; }
   .fk-row:last-child, .hist-row:last-child { border-bottom: 0; }
-  /* Flaky row mirrors the main-page board: the name takes a full-width line (wraps if long),
-     the quarantine badge sits on its OWN line UNDER it -- never colliding with the name. */
+  /* Like the main-page board: name on a full-width line (wraps if long), quarantine
+     badge on its OWN line under it -- never colliding with the name. */
   .fk-row { align-items: flex-start; }
   .fk-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
   .fk-main .node { overflow-wrap: anywhere; }
@@ -650,8 +637,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .flk-trend.up { color: var(--fail); }
   .flk-trend.down { color: var(--pass); }
   .flk-trend.flat { color: var(--muted); }
-  /* Quarantine badge: em-sized so it scales to whatever line it sits on, and
-     flex:0 0 auto so it's never clipped by a neighbour's ellipsis. */
+  /* Quarantine badge: em-sized so it scales to its line; flex:0 0 auto so a neighbour's
+     ellipsis can't clip it. */
   .flk-q { flex: 0 0 auto; font-size: 0.82em; font-weight: 700; text-transform: uppercase;
     letter-spacing: .03em; color: #fff; background: var(--fail); border-radius: 4px;
     padding: 0 5px; line-height: 1.6; margin-left: 6px; vertical-align: middle; }
@@ -683,16 +670,15 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     font-variant-numeric: tabular-nums; }
   .cl-sig { flex: 1 1 auto; overflow-wrap: anywhere; }
   .cl-dots { flex: 0 0 auto; display: inline-flex; gap: 3px; }
-  /* flex:0 0 auto so the status square keeps its 9x9 even when a long test name wraps to
-     several lines (otherwise the flex row squeezes it). align-self:start keeps it on line 1. */
+  /* flex:0 0 auto keeps the status square 9x9 when a long name wraps (the flex row would
+     otherwise squeeze it); align-self:start pins it to line 1. */
   .cl-dots .od, .cl-item .od { flex: 0 0 auto; align-self: flex-start; width: 9px; height: 9px;
     border-radius: 2px; }
   .cl-row .chev { flex: 0 0 auto; transition: transform .15s; }
   .cl-row[aria-expanded="true"] .chev { transform: rotate(90deg); }
-  /* Tests inside an expanded cluster: clearly separated rows that highlight on hover
-     and read as links (mono in primary) so it's obvious they open the test. */
-  /* Nested under a cluster: a left accent (like the run list's expanded groups), not a
-     big indent gap. */
+  /* Tests inside an expanded cluster: rows that highlight on hover and read as links
+     (mono in primary) so it's obvious they open the test. A left accent marks the
+     nesting (like the run list's expanded groups), not a big indent gap. */
   .cl-items { border-left: 2px solid var(--primary); margin: 0 0 6px; }
   .cl-item { display: flex; align-items: center; gap: 8px; padding: 7px 8px 7px 12px;
     cursor: pointer; font-size: 12px; overflow-wrap: anywhere;
@@ -702,33 +688,29 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .cl-item:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
   .cl-item .mono { color: var(--primary); }
   .cl-item .muted { margin-left: auto; white-space: nowrap; }
-  /* Test×run heatmap: a FIXED test-name column + a horizontally-scrolling cell pane (a
-     carousel like the runs chart). The two are separate columns, so the cells slide
-     within their pane and can never ride over the names. The name column is fit-content
-     (capped) -- it shrinks to the names (no wasted indent) and only grows, shifting the
-     map right, when a name is long. Both grids share row heights + gap, so rows stay
-     aligned as the dialog body scrolls vertically. */
-  /* Name column is capped (adaptive to the dialog width) so one very long test id can't
-     stretch it and open a big empty gap on the left -- long names ellipsis-truncate instead. */
+  /* Test×run heatmap: a FIXED test-name column + a scrolling cell pane (carousel, like
+     the runs chart). Separate columns, so cells slide under the names, never over them.
+     Both grids share row height + gap so rows stay aligned as the body scrolls.
+     The name column is capped (fit-content, adaptive to the dialog width) so one very
+     long id can't stretch it into a big left gap -- long names ellipsis-truncate. */
   .hm-wrap { display: grid; grid-template-columns: fit-content(clamp(100px, 22vw, 160px)) 1fr;
     align-items: start; --hm-cell: 22px; --hm-head: 16px; --hm-gap: 3px;
-    /* grid-line colour == the regular UI border/divider colour (adaptive per theme); the 3px
-       rounded gaps keep the cells clearly separated without the line itself standing out. */
+    /* grid-line == the UI border colour (per theme); the 3px rounded gaps separate cells
+       without the line standing out. */
     --hm-grid: var(--border); }
   .hm-names { display: grid; gap: var(--hm-gap); min-width: 0; }
   .hm-scroll { overflow-x: auto; overflow-y: hidden; padding: 0 6px 6px; cursor: grab; }
   .hm-scroll.dragging { cursor: grabbing; }
-  /* The run-number row floats ABOVE the map (own transparent grid, same columns + gaps so it
-     lines up), with no boxes/lines around the numbers. Its height + the names' corner both
-     equal --hm-head, and the map's own top frame follows, so name rows still align with cells. */
+  /* Run-number row floats ABOVE the map (own transparent grid, same columns + gaps to
+     line up), no boxes around the numbers. Its height + the names' corner both equal
+     --hm-head, and the map's top frame follows, so name rows stay aligned with cells. */
   .hm-headrow { display: grid; gap: var(--hm-gap); padding: 0 var(--hm-gap); width: max-content; }
   .hm-rhead { height: var(--hm-head); display: flex; align-items: flex-end; justify-content: center;
     overflow: hidden; font-size: var(--hm-rhead-fs, 9px); color: var(--muted);
     white-space: nowrap; font-variant-numeric: tabular-nums; }
-  /* A real grid: the container is painted with the grid-line colour and every cell is inset
-     from it by an EQUAL gap on all four sides -- the same value drives both `gap` (interior
-     lines) and `padding` (the outer frame), so spacing is identical everywhere and the top/
-     bottom/side borders are never eaten. Rounded container + rounded cells. */
+  /* Grid painted with the grid-line colour; each cell inset by an EQUAL gap on all four
+     sides. One value drives both `gap` (interior lines) and `padding` (outer frame), so
+     spacing is identical everywhere and the outer borders are never eaten. */
   .hm-cells { display: grid; gap: var(--hm-gap); padding: var(--hm-gap); width: max-content;
     background: var(--hm-grid); border-radius: 8px; }
   .hm-corner { height: var(--hm-head); }
@@ -743,15 +725,14 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .hm-cell { width: var(--hm-cell); height: var(--hm-cell); display: block; border-radius: 5px;
     cursor: pointer; transition: opacity .12s, filter .1s; }
   .hm-miss { background: var(--surface); cursor: default; }  /* empty grid cell = didn't run */
-  /* Hover highlight (map cells only -- NOT the legend swatches) stays ENTIRELY INSIDE the cell:
-     an inset ring + a brightness lift. Because nothing is drawn outside the border-box and the
-     cell isn't lifted over its neighbours, it can't reach into the 3px gaps or squeeze the
-     adjacent squares -- every cell keeps its exact size and the highlight looks identical on
-     all of them. A white inset ring reads clearly on any status colour, in both themes. */
+  /* Hover highlight (map cells only, not legend swatches) stays ENTIRELY INSIDE the cell:
+     inset ring + brightness lift. Nothing drawn outside the border-box, so it never reaches
+     into the gaps or squeezes neighbours -- every cell keeps its size. A white inset ring
+     reads on any status colour in both themes. */
   .hm-cells .hm-cell:not(.hm-miss):hover { filter: brightness(1.22);
     box-shadow: inset 0 0 0 2px rgba(255, 255, 255, .92), inset 0 0 0 3px rgba(0, 0, 0, .35); }
-  /* Legend = a status focus filter, like the runs-chart legend: focusing a status dims
-     the other cells (the .foc-<code> container classes drive it -- no per-cell work). */
+  /* Legend = a status focus filter (like the runs-chart legend): focusing a status dims
+     the rest, driven by the .foc-<code> container classes (no per-cell work). */
   .hm-cells.foc .hm-cell:not(.hm-miss) { opacity: .12; }
   .hm-cells.foc.foc-p .hm-cell[data-o="p"], .hm-cells.foc.foc-f .hm-cell[data-o="f"],
   .hm-cells.foc.foc-e .hm-cell[data-o="e"], .hm-cells.foc.foc-s .hm-cell[data-o="s"] { opacity: 1; }
@@ -795,8 +776,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   #list .table-wrap > table { width: 100%; }
   tr.lgrp > td { background: var(--surface-2); font-weight: 600; cursor: pointer; user-select: none; }
   tr.lgrp .chev { transition: transform .15s; }
-  /* Flaky warning chip -- shown only on groups that actually have flaky tests. Amber/yellow
-     with a warning triangle; clicking it scopes the board (chart + flaky panel) to the group. */
+  /* Flaky warning chip, shown only on groups that have flaky tests. Clicking it scopes
+     the board (chart + flaky panel) to the group. */
   .lgrp-flk { display: inline-flex; align-items: center; gap: 3px; margin-left: 8px;
     padding: 1px 8px 1px 6px; border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent);
     border-radius: 999px; background: var(--warn-bg); color: var(--warn); font-size: 11px;
@@ -805,14 +786,12 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .lgrp-flk svg { width: 12px; height: 12px; }
   .lgrp-flk:hover { background: color-mix(in srgb, var(--warn) 26%, var(--warn-bg)); }
   .lgrp-flk:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
-  /* WHEN is the last column and shrinks to its content (width:1% on the th) so the date and
-     its heatmap button stay snug together at the row's right edge -- the leftover width goes
-     to the wide DAG/TASK identity columns instead of opening a hole between the date and the
-     button. The date is left-aligned so the "When" header still sits right over it. */
+  /* WHEN shrinks to its content (width:1%) so the date + heatmap button stay snug at the
+     row's right edge, leftover width going to the wide DAG/TASK columns instead of opening
+     a hole. Left-aligned so the "When" header still sits over it. */
   th.gcol-when { width: 1%; }
-  /* Keep the cell a real table-cell so its bottom border (the row separator) stays continuous
-     to the right edge -- `display:flex` on a <td> drops that border. The flex lives on an
-     inner wrapper instead, which lays out the date + heatmap button snugly. */
+  /* Keep the <td> a real table-cell so its bottom border (row separator) runs to the right
+     edge -- `display:flex` on a <td> drops that border. The flex lives on an inner wrapper. */
   td.lgrp-when { white-space: nowrap; }
   .lgrp-when-in { display: flex; align-items: center; }
   .lgrp-hm { margin-left: 8px; flex: 0 0 auto; display: inline-flex; padding: 3px;
@@ -822,8 +801,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .lgrp-hm:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
   /* Align the grouped "DAG" header over the dag name (clears the chevron's footprint). */
   th.gcol-dag { padding-left: 32px; }
-  /* A group's runs sit in their own full sub-table, marked by a left accent rather
-     than an indent gap (which looked off). */
+  /* A group's runs sit in their own sub-table, marked by a left accent, not an indent gap. */
   tr.grp-runs > td { padding: 0; border-left: 2px solid var(--primary); background: var(--surface); }
   tr.grp-more td { color: var(--muted); font-size: 12px; text-align: center; padding: 8px; }
 
@@ -842,7 +820,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
 </style>
 <script>
-/* Pre-paint: set theme + bg from the parent BEFORE body renders, so embedding in Airflow's dark UI never flashes light. */
+/* Pre-paint theme + bg from the parent before body renders, so dark Airflow never flashes light. */
 (function () {
   try {
     var top = window.top;
@@ -1214,7 +1192,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
 
 <script>
 (function () {
-  // API base derived from the current path so it works under any mount prefix / iframe.
+  // API base from the current path so it works under any mount prefix / iframe.
   var API = location.pathname.replace(/\/+$/, "") + "/api/";
 
   var I18N = {
@@ -1571,7 +1549,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     syncParentBg();
   }
 
-  // When embedded, match our page bg to the parent <html> bg, re-read on every theme change.
+  // When embedded, match our page bg to the parent <html> bg; re-read on theme change.
   var _lastBg = null;
   function syncParentBg() {
     if (window.self === window.top) return;
@@ -1593,12 +1571,11 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     if (loc !== LOCALE) { LOCALE = loc; applyI18n(); renderAll(); }
   }
   applyTheme(); applyI18n();
-  // The nav icon Airflow shows for us is a plain <img> with a baked stroke colour,
-  // so (unlike Airflow's own currentColor icons) it can't turn white when the item
-  // is selected -- on the light theme the picked flask blends into the highlight
-  // and vanishes. While THIS page is open, our nav item IS the selected one, so
-  // whiten our icon in the parent for the duration and restore it on the way out.
-  // Targeting our own icon URL avoids guessing Airflow's active-item selector.
+  // Airflow shows our nav icon as a plain <img> with a baked stroke colour, so (unlike
+  // its own currentColor icons) it can't whiten when selected -- on the light theme the
+  // picked flask blends into the highlight and vanishes. While this page is open, our
+  // item IS the selected one, so whiten our icon in the parent and restore it on exit.
+  // Targeting our icon URL avoids guessing Airflow's active-item selector.
   // Same-origin only; best-effort.
   (function activeNavIcon() {
     try {
@@ -1620,7 +1597,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
         if (s && s.parentNode) s.parentNode.removeChild(s);
       };
       add();
-      // Removed when Airflow unmounts our iframe on navigating away.
+      // Restore when Airflow unmounts our iframe on navigating away.
       window.addEventListener("pagehide", remove);
     } catch (e) { /* cross-origin parent: skip */ }
   })();
@@ -1692,8 +1669,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     { key: "created_at", label: "cWhen" },
   ];
 
-  // Distinct test count, fetched from the backend (the list summaries have only totals);
-  // null until the first response. Refreshed (debounced) whenever the filter changes.
+  // Distinct test count from the backend (list summaries have only totals); null until
+  // the first response, refreshed (debounced) on filter change.
   var uniqueTests = null, uniqueTestsList = [], uniqTimer = null, uniqSeq = 0;
   // Slowdowns KPI + modal cache. slowSeq guards the KPI fetch, slowModalSeq the modal's.
   var slowCount = null, slowData = null, slowSeq = 0, slowModalSeq = 0, slowFailed = false, slowTimer = null;
@@ -1711,7 +1688,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   function refreshUniqueTests() {
     clearTimeout(uniqTimer);
     uniqTimer = setTimeout(function () {
-      var my = ++uniqSeq;  // ignore a stale response landing after a newer filter
+      var my = ++uniqSeq;  // drop a stale response landing after a newer filter
       fetch(API + "unique-tests?" + uniqueQuery())
         .then(function (r) { return r.ok ? r.json() : { count: null }; })
         .then(function (d) { if (my === uniqSeq) { uniqueTests = d.count; renderKpis(); } })
@@ -1723,8 +1700,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     if (!reports.length) { kpisEl.hidden = true; kpisEl.innerHTML = ""; return; }
     var runs = reports.length;
     var ok = reports.filter(function (r) { return r.success; }).length;
-    // "Failures" = what's broken NOW: failed+errors in the latest run of each dag·task,
-    // so the count shrinks as tests get fixed (not every failure ever archived).
+    // "Failures" = what's broken NOW: failed+errors in each dag·task's latest run, so the
+    // count shrinks as tests get fixed (not every failure ever archived).
     var latestRun = {};
     reports.forEach(function (r) {
       var k = r.dag_id + "|" + r.task_id;
@@ -1732,9 +1709,9 @@ _INDEX_HTML = r"""<!DOCTYPE html>
         latestRun[k] = r;
       }
     });
-    // Selecting group(s) scopes the Failures + Slowdowns KPIs to those dag·tasks (like
-    // the flaky panel) -- failures are recomputed from the latest run of the picked
-    // dag·tasks; slowdowns are counted from the loaded regressed list, scoped the same.
+    // Selecting group(s) scopes Failures + Slowdowns to those dag·tasks (like the flaky
+    // panel): failures from the picked dag·tasks' latest runs, slowdowns from the loaded
+    // regressed list scoped the same.
     var sk = selKeySet();
     var failures = Object.keys(latestRun).reduce(function (a, k) {
       if (sk && !sk[k]) return a;
@@ -1747,7 +1724,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       }).length;
     }
     var cards = [
-      // These two count EVERY run in view (top filters only) and ignore a group selection,
+      // These two count EVERY run in view (top filters only), ignoring a group selection
       // unlike the scoped Failures/Slowdowns -- the "all" chip makes that explicit.
       { label: t("kRuns"), value: runs, all: true },
       { label: t("kPassingRuns"), value: ok + " / " + runs, cls: ok === runs ? "c-pass" : "", all: true },
@@ -1808,8 +1785,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
         if (b.getAttribute("data-reset")) {
           ORDER.forEach(function (o) { chartSel[o[0]] = true; });  // clear the focus
         } else {
-          // "Focus" model: clicking a status shows ONLY it (others off); click more to
-          // add/remove; emptying the selection falls back to "all shown".
+          // "Focus" model: click a status to show ONLY it; click more to add/remove;
+          // emptying the selection falls back to "all shown".
           var s = b.getAttribute("data-status");
           if (ORDER.every(function (o) { return chartSel[o[0]]; })) {
             ORDER.forEach(function (o) { chartSel[o[0]] = o[0] === s; });
@@ -1822,13 +1799,13 @@ _INDEX_HTML = r"""<!DOCTYPE html>
         }
         renderLegend();   // refresh selection state + the reset button
         renderChart();    // bars show only the selected statuses
-        renderList();     // and the list shows only those runs
+        renderList();     // list shows only those runs
       });
     });
   }
 
-  // Own rAF easing instead of scrollBy({behavior:"smooth"}) -- the latter is
-  // unsupported in older Safari (and headless), so animate it ourselves.
+  // Own rAF easing instead of scrollBy({behavior:"smooth"}), which older Safari
+  // (and headless) don't support.
   function chartScrollBy(el, delta) {
     var max = el.scrollWidth - el.clientWidth;
     var start = el.scrollLeft, target = Math.max(0, Math.min(max, start + delta));
@@ -1845,7 +1822,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     requestAnimationFrame(step);
   }
 
-  // Arrows page the strip by ~one viewport; native scroll/drag handle the rest.
+  // Arrows page the strip by ~one viewport; native scroll/drag do the rest.
   function renderChartNav(barsEl, scrollable) {
     var nav = document.getElementById("chart-nav");
     if (!scrollable) { nav.innerHTML = ""; return; }
@@ -1864,9 +1841,9 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     ol.disabled = barsEl.scrollLeft <= 1;          // older = left; disabled at the oldest end
     ne.disabled = barsEl.scrollLeft >= max - 1;    // newer = right; disabled at the newest end
   }
-  // The visible-window context next to the arrows: which runs are on screen ("#48-#76
-  // of 76") and, when the trend is on, their average pass rate. Recomputed on scroll
-  // from scrollLeft (bars are evenly spaced at `slot`), so it tracks the carousel live.
+  // Window context next to the arrows: which runs are on screen ("#48-#76 of 76") and,
+  // with the trend on, their average pass rate. Recomputed on scroll from scrollLeft
+  // (bars evenly spaced at `slot`), so it tracks the carousel live.
   function updateChartMeta(barsEl, win, slot) {
     var rEl = document.getElementById("chart-range"), aEl = document.getElementById("chart-avg");
     var count = win.length;
@@ -1875,7 +1852,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     var first = Math.ceil(sl / slot - 0.5);            // first bar whose centre is in view
     var last = Math.floor((sl + vw) / slot - 0.5);     // last such bar
     // Clamp BOTH ends into [0, count-1]: before layout settles clientWidth can read 0,
-    // which pushes `first` to `count` and indexes past the array (win[first] undefined).
+    // pushing `first` to `count` and indexing past the array (win[first] undefined).
     first = Math.max(0, Math.min(first, count - 1));
     last = Math.max(0, Math.min(last, count - 1));
     if (last < first) last = first;
@@ -1885,8 +1862,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
         .replace("{b}", win[last].seq).replace("{n}", count);
     }
     if (aEl) {
-      // Average over ALL runs in the chart (not just the visible window) so it's the overall
-      // pass rate -- identical to the radar's Pass rate, and stable as you scroll the carousel.
+      // Average over ALL runs in the chart, not just the visible window: the overall pass
+      // rate, identical to the radar's Pass rate and stable as you scroll.
       var sum = 0, k = 0;
       if (passTrend) {
         for (var i = 0; i < count; i++) {
@@ -1905,10 +1882,9 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     }
   }
 
-  // Mouse drag-to-pan. Touch/trackpad use the element's native horizontal scroll.
-  // No pointer capture -- it retargets the synthetic click off the bar (so the
-  // bar's click handler never fires). The move/up listeners live on document
-  // (wired once) so a drag survives the cursor leaving the strip.
+  // Mouse drag-to-pan (touch/trackpad use native horizontal scroll). No pointer capture:
+  // it retargets the synthetic click off the bar, so the bar's click never fires. The
+  // move/up listeners live on document (wired once) so a drag survives leaving the strip.
   var chartDrag = null;
   function enableChartDrag(el) {
     el.addEventListener("pointerdown", function (e) {
@@ -1927,7 +1903,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   function chartDragEnd() {
     if (!chartDrag) return;
     chartDrag.el.classList.remove("dragging");
-    chartDragged = chartDrag.moved > 5;          // a real drag suppresses the bar click
+    chartDragged = chartDrag.moved > 5;          // a real drag suppresses the bar's click
     setTimeout(function () { chartDragged = false; }, 0);
     chartDrag = null;
   }
@@ -1939,8 +1915,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       tipEl.id = "tip";
       tipEl.setAttribute("role", "tooltip");
     }
-    // A modal <dialog> renders in the top layer, above any z-index -- so a tooltip
-    // for a chart inside it must live in that dialog, or it's painted behind it.
+    // A modal <dialog> renders in the top layer, above any z-index, so a tooltip for a
+    // chart inside it must live in that dialog or it's painted behind.
     var dlgs = document.querySelectorAll("dialog[open]");
     var host = dlgs.length ? dlgs[dlgs.length - 1] : document.body;
     if (tipEl.parentNode !== host) host.appendChild(tipEl);
@@ -1951,7 +1927,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   function tipMove(ev) {
     if (!tipEl) return;
     var pad = 14, w = tipEl.offsetWidth, h = tipEl.offsetHeight;
-    // Sit just below the cursor, offset to its left (flips to the other side near an edge).
+    // Below the cursor, offset left (flips to the other side near an edge).
     var x = ev.clientX - w - pad;
     if (x < 8) x = ev.clientX + pad;
     var y = ev.clientY + pad;
@@ -1995,8 +1971,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   function renderChart() {
     renderLegend();
     var card = document.getElementById("chart-card");
-    // Ticked runs in the list filter the chart to their bars only (empty = all),
-    // so you can pick a few runs and read just their trend.
+    // Ticked runs filter the chart to their bars only (empty = all), so you can pick a
+    // few and read just their trend.
     var selActive = selectedIds.size > 0;
     var data = reports.slice().filter(function (r) {
       return !selActive || selectedIds.has(r.id);
@@ -2004,7 +1980,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       return String(a.created_at || "") < String(b.created_at || "") ? -1 : 1;
     });
     renderChartFilterNote(selActive, data.length);
-    // A real trend needs >=2 bars; but when the user has picked runs, honour even one.
+    // A real trend needs >=2 bars, but honour a single picked run.
     if (data.length < (selActive ? 1 : 2)) {
       card.hidden = true; document.getElementById("chart-nav").innerHTML = "";
       var rEl0 = document.getElementById("chart-range"); if (rEl0) rEl0.innerHTML = "";
@@ -2016,27 +1992,24 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     var win = data;            // every run; the strip scrolls once past CHART_VISIBLE
     var count = win.length;
 
-    // Bars are absolutely positioned at INTEGER left/width inside a fixed-width
-    // strip: a flex-centred bar lands on a fractional pixel, so its bright edge
-    // anti-aliases into the background (a red "halo"). Integer geometry = crisp.
+    // Bars at INTEGER left/width in a fixed-width strip: a flex-centred bar lands on a
+    // fractional pixel, so its bright edge anti-aliases into a "halo". Integers = crisp.
     var chart = document.getElementById("chart");
     chart.innerHTML = '<div class="chart-bars" role="img" aria-label="' + esc(t("history"))
       + '"><div class="bars-strip"></div></div>';
     var barsEl = chart.querySelector(".chart-bars");
     var strip = chart.querySelector(".bars-strip");
-    // Fixed per-run slot: bars fill the width when they fit, else the strip grows
-    // past the viewport and scrolls smoothly (one continuous carousel, no pages).
+    // Fixed per-run slot: up to CHART_VISIBLE bars fill the viewport; beyond that the
+    // strip overflows and scrolls (one continuous carousel, same per-bar sizing).
     var vw = barsEl.clientWidth || 600;
-    // Up to CHART_VISIBLE bars fill the viewport; beyond that the strip overflows
-    // and you scroll/drag through it (a carousel with the same per-bar sizing).
     var slot = vw / Math.min(count, CHART_VISIBLE);
     var stripW = Math.round(slot * count);
     strip.style.width = stripW + "px";
     var bw = Math.max(6, Math.min(22, Math.round(slot * 0.62)));
     var labelEvery = Math.max(1, Math.ceil(34 / slot));  // keep #labels from overlapping
     var html = win.map(function (r, i) {
-      // One hard-stop gradient stacked base-up in ORDER => no seams; a toggled-off
-      // status keeps its band as the track colour (never a rescale).
+      // One hard-stop gradient stacked base-up in ORDER => no seams; a toggled-off status
+      // keeps its band as the track colour (no rescale).
       var rtotal = r.total || 0;
       var bands = [], acc = 0;
       ORDER.forEach(function (o) {
@@ -2055,7 +2028,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       var left = Math.round(center - bw / 2);
       var bar = '<div class="bar" data-id="' + esc(r.id) + '" style="left:' + left
         + "px;width:" + bw + "px;" + bg + '"></div>';
-      // Number every run when there is room; thin them out when dense, newest first.
+      // Number every run when there's room; thin them out when dense, newest first.
       var num = ((count - 1 - i) % labelEvery === 0)
         ? '<div class="bnum" style="left:' + Math.round(center - 18) + 'px">#' + r.seq + "</div>"
         : "";
@@ -2069,8 +2042,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     });
     renderTrend(chart, strip, win, slot, stripW);
 
-    // Start at the newest (right) unless a scroll position is being preserved
-    // (e.g. across a legend toggle). Wire arrows, drag, and scroll memory.
+    // Start at the newest (right) unless a scroll position is preserved (e.g. across a
+    // legend toggle). Wire arrows, drag, and scroll memory.
     barsEl.scrollLeft = (chartScroll == null) ? barsEl.scrollWidth
       : Math.min(chartScroll, barsEl.scrollWidth);
     renderChartNav(barsEl, stripW > vw + 1);
@@ -2081,14 +2054,14 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     enableChartDrag(barsEl);
   }
 
-  // Pass-rate trend overlay: a cyan line through each bar's green-top (passed/total),
-  // dots with an exact-% tooltip, and a dashed threshold gridline. Bars are 100%-
-  // normalised, so the green top IS the pass rate. Only drawn when the checkbox is on.
+  // Pass-rate trend overlay: a line through each bar's green-top (passed/total), dots with
+  // an exact-% tooltip, and a dashed threshold gridline. Bars are 100%-normalised, so the
+  // green top IS the pass rate. Only drawn when the checkbox is on.
   function renderTrend(chart, strip, win, slot, stripW) {
     if (!passTrend) return;
     strip.classList.add("trend-on");  // dim the bars so the line stands out
-    // Map a pass rate to a y inside the bar's pixel box: the bar fills the bottom
-    // 100px (above a 22px label strip), leaving headroom up top for the 100% dot.
+    // Map a pass rate to a y in the bar's box: the bar fills the bottom 100px (above a 22px
+    // label strip), leaving headroom up top for the 100% dot.
     var BAR_BOTTOM = 22, BAR_H = 100;
     var barTop = (strip.clientHeight || 128) - BAR_BOTTOM - BAR_H;  // = top headroom
     var yOf = function (rate) { return barTop + BAR_H * (1 - rate); };
@@ -2106,9 +2079,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
         + p.x.toFixed(1) + '" cy="' + p.y.toFixed(1)
         + '" r="3.2" data-id="' + esc(p.r.id) + '"></circle>';
     }).join("");
-    // Draw the line as segments so the stretch below the success threshold turns red.
-    // A segment straddling the line is split at the crossing point so the colour flips
-    // exactly where it crosses.
+    // Line drawn as segments so the stretch below the threshold turns red; a straddling
+    // segment is split at the crossing so the colour flips exactly there.
     function trendSeg(x1, y1, x2, y2, bad) {
       return '<line class="trend-line' + (bad ? " trend-danger" : "") + '" x1="' + x1.toFixed(1)
         + '" y1="' + y1.toFixed(1) + '" x2="' + x2.toFixed(1) + '" y2="' + y2.toFixed(1) + '"></line>';
@@ -2138,7 +2110,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     });
     // Dashed threshold gridline, pinned (lives in #chart, outside the scrolling strip).
     var th = document.createElement("div");
-    // Near the top (a high threshold) the label flips below the line so it isn't clipped.
+    // Near the top (high threshold) the label flips below the line so it isn't clipped.
     th.className = "trend-thresh" + (thy < 14 ? " label-below" : "");
     th.style.top = thy.toFixed(1) + "px";
     th.innerHTML = "<span>" + Math.round(successThreshold * 100) + "%</span>";
@@ -2160,13 +2132,13 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   function clearSelection() {
     selectedIds.clear();
     listEl.querySelectorAll(".sel").forEach(function (cb) { cb.checked = false; });
-    // Also reset the group-header checkboxes (checked + indeterminate) -- otherwise a
-    // ticked group stays ticked after "show all" even though its runs are deselected.
+    // Also reset the group-header checkboxes (checked + indeterminate), else a ticked
+    // group stays ticked after "show all" though its runs are deselected.
     syncSelAll(); syncGroupChecks(); updateBulkBar(); renderChart(); renderFlakyBoard(); renderKpis(); renderReliability();
   }
 
-  // Comparator for a given run-sort state {key, dir} -- reused by the flat list and
-  // by each group (which may carry its own override).
+  // Comparator for a run-sort state {key, dir}; reused by the flat list and by each group
+  // (which may carry its own override).
   function runComparator(s) {
     var col = COLS.filter(function (c) { return c.key === s.key; })[0] || COLS[0];
     var getv = col.get || function (r) { return r[col.key]; };
@@ -2205,9 +2177,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     return '<span class="arrow">' + (sort.dir === 1 ? "↑" : "↓") + "</span>";
   }
 
-  // Group the run list by dag·task: a checkbox toggles it (like the detail's
-  // group-by-module). Each header collapses/expands and its checkbox selects the whole
-  // group, which focuses the chart on it.
+  // Group the run list by dag·task (checkbox-toggled, like the detail's group-by-module).
+  // Each header collapses/expands; its checkbox selects the whole group, focusing the chart.
   function groupReports(rows) {
     var order = [], byKey = {};
     rows.forEach(function (r) {
@@ -2218,8 +2189,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       }
       byKey[key].runs.push(r);
     });
-    // The newest run drives the group's status / when and the status/recency
-    // ordering -- independent of how runs are sorted within the group.
+    // The newest run drives the group's status/when and the status/recency ordering,
+    // independent of how runs are sorted within the group.
     order.forEach(function (g) {
       g.newest = g.runs.reduce(function (a, b) {
         return String(a.created_at || "") >= String(b.created_at || "") ? a : b;
@@ -2237,8 +2208,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
         + '<span class="th-lab">' + esc(t(c.label)) + arrow(c.key) + "</span></th>";
     }).join("");
   }
-  // A group's full column header -- sorts the runs of THAT group only (class rsort,
-  // tagged with the group key); arrows reflect the group's effective sort `eff`.
+  // A group's full column header -- sorts only THAT group's runs (class rsort, tagged with
+  // the group key); arrows reflect the group's effective sort `eff`.
   function subHead(g, eff) {
     var cells = COLS.map(function (c) {
       var on = eff.key === c.key;
@@ -2270,7 +2241,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     if (groupSort.key === "status") return g.newest.success ? 2 : (g.newest.errors ? 0 : 1);
     return String(g.newest.created_at || "");  // created_at, and the default
   }
-  // Yellow warning chip -- rendered ONLY for groups that have at least one flaky test.
+  // Warning chip, rendered only for groups with at least one flaky test.
   function flkGroupChip(g) {
     var c = flkCountByKey[g.key] || 0;
     if (!c) return "";
@@ -2311,7 +2282,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       return;
     }
     sortReports();
-    // Legend status toggles also filter the list (chart keeps the bars).
+    // Legend status toggles also filter the list (chart keeps its bars).
     var shown = reports.filter(statusShown);
     if (!shown.length) {
       listEl.innerHTML = '<div class="state">' + esc(t("noMatch")) + "</div>";
@@ -2325,9 +2296,9 @@ _INDEX_HTML = r"""<!DOCTYPE html>
 
     var pages = 1, keyMap = {}, theadInner, body, pager = "";
     if (listGroup) {
-      // The top header (gsort) reorders the GROUPS -- and, for run columns, the runs
-      // too (handled in the click). Each opened group's own header (rsort) sorts only
-      // that group's runs (groupRunSort override, else the global run sort).
+      // The top header (gsort) reorders the GROUPS -- and, for run columns, the runs too
+      // (in the click handler). Each opened group's own header (rsort) sorts only that
+      // group's runs (its groupRunSort override, else the global run sort).
       theadInner = selAllTh + gHeadCell("dag_id", "cDag", "gcol-dag")
         + gHeadCell("task_id", "cTask")
         + gHeadCell("runs", "cRuns") + gHeadCell("pass_rate", "cPassRate")
@@ -2372,7 +2343,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
 
     var lg = document.getElementById("list-grp");
     if (lg) lg.addEventListener("change", function () {
-      // Start the (re)entered view clean: folded, no stale per-group sort overrides.
+      // (Re)enter the view clean: folded, no stale per-group sort overrides.
       listGroup = lg.checked; listExpanded = {}; groupRunSort = {}; listPage = 0; renderList();
     });
     listEl.querySelectorAll("th.sortable").forEach(function (th) {
@@ -2389,8 +2360,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
         if (!e.target.closest(".th-lab")) return;  // only the label sorts, not the empty space
         var k = th.getAttribute("data-key");
         if (groupSort.key === k) groupSort.dir *= -1; else { groupSort.key = k; groupSort.dir = 1; }
-        groupRunSort = {};  // drop per-group overrides -- the top header is the global control
-        // If the column maps to a run field, move the runs (in every group) too.
+        groupRunSort = {};  // drop per-group overrides: the top header is the global control
+        // A run-field column moves the runs in every group too.
         if (COLS.some(function (c) { return c.key === k; })) { sort.key = k; sort.dir = groupSort.dir; }
         renderList();
       });
@@ -2408,7 +2379,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     if (pgPrev) pgPrev.addEventListener("click", function () { if (listPage > 0) { listPage--; renderList(); } });
     if (pgNext) pgNext.addEventListener("click", function () { if (listPage < pages - 1) { listPage++; renderList(); } });
     // Group headers: row toggles expand/collapse; its checkbox selects the whole group
-    // (selecting focuses the chart, and ticks the group even while collapsed).
+    // (which focuses the chart, and stays ticked while collapsed).
     listEl.querySelectorAll("tr.lgrp").forEach(function (tr) {
       tr.addEventListener("click", function () {
         var key = tr.getAttribute("data-key");
@@ -2425,7 +2396,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     });
     listEl.querySelectorAll(".lgrp-flk").forEach(function (b) {
       b.addEventListener("click", function (e) {
-        e.stopPropagation();  // scope the board to this group, don't toggle the expand
+        e.stopPropagation();  // scope the board to this group, don't toggle expand
         var cb = b.closest("tr").querySelector(".gsel");
         if (cb && !cb.checked) { cb.checked = true; cb.dispatchEvent(new Event("change")); }
         var card = document.getElementById("flaky-card");
@@ -2468,7 +2439,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     var selAll = document.getElementById("sel-all");
     if (selAll) selAll.addEventListener("change", function () {
       if (listGroup) {
-        // Select every run across all groups (even collapsed) and tick the groups.
+        // Select every run across all groups (even collapsed) and tick each group.
         reports.forEach(function (r) {
           if (selAll.checked) selectedIds.add(r.id); else selectedIds.delete(r.id);
         });
@@ -2487,7 +2458,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     syncSelAll(); updateBulkBar();
   }
 
-  // Reflect the current selection onto the group checkboxes (incl. collapsed groups).
+  // Reflect the selection onto the group checkboxes (incl. collapsed groups).
   function syncGroupChecks() {
     if (!listGroup) return;
     var byKey = {};
@@ -2504,7 +2475,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   function syncSelAll() {
     var selAll = document.getElementById("sel-all");
     if (!selAll) return;
-    if (listGroup) {  // count over all runs, since collapsed groups render no rows
+    if (listGroup) {  // count over all runs; collapsed groups render no rows
       var sn = reports.filter(function (r) { return selectedIds.has(r.id); }).length;
       selAll.checked = reports.length > 0 && sn === reports.length;
       selAll.indeterminate = sn > 0 && sn < reports.length;
@@ -2558,7 +2529,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
         populateSuggestions();
         applyFilter();
         loadFlaky();
-        // Open a deep-linked report; the param rides the Airflow parent URL when embedded.
+        // Open a deep-linked report; the param rides the parent URL when embedded.
         var want = new URLSearchParams(linkLoc().search).get("report");
         if (want && !detail) openDetail(want);
       })
@@ -2571,8 +2542,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   function matchesIn(haystack, needle) {
     return !needle || String(haystack).toLowerCase().indexOf(needle.toLowerCase()) !== -1;
   }
-  // Stable chronological run number (oldest = 1) for the list # column and the
-  // chart bar labels -- so bar #5 and row #5 are the same run.
+  // Stable chronological run number (oldest = 1) for the list # column and the chart bar
+  // labels, so bar #5 and row #5 are the same run.
   function assignSeq() {
     reports.slice().sort(function (a, b) {
       return String(a.created_at || "") < String(b.created_at || "") ? -1 : 1;
@@ -2582,13 +2553,13 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     var dag = document.getElementById("f-dag").value.trim();
     var task = document.getElementById("f-task").value.trim();
     var run = document.getElementById("f-run").value.trim();
-    var fc = document.getElementById("f-clear");  // reset button: only when a filter is set
+    var fc = document.getElementById("f-clear");  // reset button: shown only when a filter is set
     if (fc) fc.hidden = !(dag || task || run);
     reports = allReports.filter(function (r) {
       return matchesIn(r.dag_id, dag) && matchesIn(r.task_id, task) && matchesIn(r.run_id, run);
     });
     assignSeq();
-    // Filter resets to the newest runs / first page; a delete keeps the user's place.
+    // A filter change resets to newest runs / first page; a delete keeps the user's place.
     if (!keepPage) { chartScroll = null; listPage = 0; }
     document.getElementById("board").hidden = allReports.length === 0;
     document.getElementById("board2").hidden = allReports.length === 0;
@@ -2596,9 +2567,9 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     refreshUniqueTests();
     refreshSlow();
   }
-  // The dag·task keys ("dag|task") of the runs the user has ticked, or null if nothing
-  // is selected. Selecting a group (or runs) scopes the chart AND the flaky/failures/slow
-  // boards to those dag·tasks -- one pick narrows the whole dashboard.
+  // The dag·task keys ("dag|task") of the ticked runs, or null if nothing is selected.
+  // One pick scopes the chart AND the flaky/failures/slow boards to those dag·tasks --
+  // narrowing the whole dashboard.
   function selKeySet() {
     if (!selectedIds.size) return null;
     var m = {};
@@ -2607,11 +2578,11 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     });
     return m;
   }
-  // Flaky panel on the main board: global flaky tests, filtered client-side by the
-  // dag/task search; a row opens that test's history.
+  // Main-board flaky panel: global flaky tests, filtered client-side by the dag/task
+  // search; a row opens that test's history.
   var allFlaky = [];
-  // Per-group flaky count, keyed exactly like a group's key (JSON [dag_id, task_id]); drives
-  // the yellow warning chip on the run-list groups. Rebuilt whenever the flaky data changes.
+  // Per-group flaky count, keyed like a group's key (JSON [dag_id, task_id]); drives the
+  // run-list warning chip. Rebuilt whenever the flaky data changes.
   var flkCountByKey = {};
   function rebuildFlkCounts() {
     flkCountByKey = {};
@@ -2623,12 +2594,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   function renderFlakyBoard() {
     var box = document.getElementById("flaky-list");
     if (!box) return;
-    // No flaky anywhere -> drop the whole panel so the runs chart takes the full width.
-    // It reappears (with content) the moment any flaky test shows up. When the panel's
-    // presence flips, the chart is re-rendered so its bars re-fill the new (wider/narrower)
-    // width -- otherwise they'd stay sized to the old half-width layout.
-    // No flaky anywhere -> hide the panel; the radar beside it grows to fill the row. The chart
-    // is on its own full-width row now, so its width doesn't depend on the flaky panel.
+    // No flaky anywhere -> hide the panel; the radar beside it grows to fill the row. The
+    // chart is on its own full-width row, so its width doesn't depend on this panel.
     var flakyCard = document.getElementById("flaky-card");
     if (flakyCard) flakyCard.hidden = !allFlaky.length;
     if (!allFlaky.length) return;
@@ -2656,7 +2623,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     });
     document.getElementById("flaky-count").textContent = rows.length ? String(rows.length) : "";
     if (!rows.length) {
-      // Distinguish "nothing flaky" / "selection has none" / "filtered everything out".
+      // "nothing flaky" vs "selection has none" vs "filtered everything out".
       var msg = !allFlaky.length ? "noFlaky" : selKeys ? "flkNoSel" : "flkNoMatch";
       box.innerHTML = '<div class="fb-empty">' + esc(t(msg)) + "</div>";
       return;
@@ -2682,16 +2649,16 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       .then(function (r) { return r.ok ? r.json() : { flaky: [] }; })
       .then(function (d) {
         allFlaky = d.flaky || []; rebuildFlkCounts();
-        renderFlakyBoard(); renderList(); renderReliability();  // stability axis uses flaky
+        renderFlakyBoard(); renderList(); renderReliability();  // stability axis needs flaky
       })
       .catch(function () {
         allFlaky = []; rebuildFlkCounts(); renderFlakyBoard(); renderList(); renderReliability();
       });
   }
 
-  // -- Reliability radar (pentagon): the 3rd main-board dashboard ---------------------
-  // Five 0-100 axes (higher = better) over the runs in view -- scoped by the top filters and
-  // any group selection, exactly like the chart/flaky panel. Pure read of already-loaded data
+  // -- Reliability radar (pentagon) -----------------------------------------------------
+  // Five 0-100 axes (higher = better) over the runs in view, scoped by the top filters and
+  // any group selection like the chart/flaky panel. Pure read of already-loaded data
   // (report summaries + flaky list), so it never fires its own request.
   function reliabilityAxes() {
     var selKeys = selKeySet();
@@ -2712,8 +2679,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     var clamp = function (v) { return Math.max(0, Math.min(100, Math.round(v))); };
     return [
       // Pass rate = mean of each run's pass ratio -- the SAME formula as the chart's "avg
-      // pass rate", so one group reads identically on both (chart is the visible window, the
-      // radar is every run in view, so they can differ once the window no longer covers all).
+      // pass rate". (Chart is the visible window, radar is every run in view, so they can
+      // differ once the window no longer covers all runs.)
       { key: "pass", label: t("relPass"), value: passK ? clamp(passSum / passK * 100) : 100 },
       { key: "robust", label: t("relRobust"), value: T ? clamp(100 - E / T * 100) : 100 },
       { key: "fresh", label: t("relFresh"), value: keys.length ? clamp(green / keys.length * 100) : 100 },
@@ -2722,8 +2689,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     ];
   }
   function pentagonSvg(axes) {
-    // Wide viewBox: labels live INSIDE it, so the whole radar scales as one unit and a long
-    // label never spills over the card edge on a small screen (it just shrinks with the rest).
+    // Wide viewBox with labels INSIDE it, so the whole radar scales as one unit and a long
+    // label shrinks with the rest instead of spilling over the card edge.
     var W = 460, H = 232, cx = W / 2, cy = H / 2 + 2, R = 90, n = axes.length;
     var ang = function (i) { return (-90 + i * (360 / n)) * Math.PI / 180; };
     var at = function (i, rr) { var a = ang(i); return [cx + rr * Math.cos(a), cy + rr * Math.sin(a)]; };
@@ -2758,11 +2725,11 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     return '<svg viewBox="0 0 ' + W + " " + H + '" class="rel-svg" role="img" aria-label="' + esc(t("reliabilityTitle")) + '">'
       + rings + spokes + '<polygon class="rel-area" points="' + dataPts + '"/>' + dots + center + labels + "</svg>";
   }
-  // -- Run-health trend: a per-run health series over time, drawn as a sparkline under the
-  // radar. "Health" is the mean of the three CONTINUOUS per-run axes (pass rate, no-errors,
-  // completeness). Green-now (a binary 0/100 per run) and Flaky/Stability (a window metric) are
-  // radar snapshots, not per-run signals, so they're left off the line. Pure read of the loaded
-  // summaries, scoped like the radar.
+  // -- Run-health trend: a per-run health series drawn as a sparkline under the radar.
+  // Health = mean of the three CONTINUOUS per-run axes (pass rate, no-errors, completeness).
+  // Green-now (binary 0/100) and Flaky/Stability (a window metric) are radar snapshots, not
+  // per-run signals, so they're left off the line. Pure read of the loaded summaries, scoped
+  // like the radar.
   function reliabilityTrend() {
     var selKeys = selKeySet();
     var inScope = function (o) { return !selKeys || selKeys[o.dag_id + "|" + o.task_id]; };
@@ -2777,15 +2744,15 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       var complete = tt ? 100 - (r.skipped || 0) / tt * 100 : 100;
       return clamp(Math.round((pass + robust + complete) / 3));
     });
-    // The time range the line spans (first/last run in view) -- shown as the X-axis labels,
-    // so the "over time" reading is explicit instead of implied.
+    // The span the line covers (first/last run in view) -- the X-axis labels, so "over
+    // time" is explicit rather than implied.
     return {
       values: values,
       from: rows.length ? rows[0].created_at : null,
       to: rows.length ? rows[rows.length - 1].created_at : null,
     };
   }
-  // Short, locale-aware day-month label for the trend's time axis ("31 May" / "31 мая").
+  // Short locale-aware day-month label for the trend axis ("31 May" / "31 мая").
   function fmtTrendDate(iso) {
     if (!iso) return "";
     var d = new Date(iso);
@@ -2797,7 +2764,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     } catch (e) { return iso.slice(0, 10); }
   }
   // Trailing moving average so the line reads as a trend, not per-run jitter. Window scales
-  // with the run count (none for short histories, up to 9 for long ones).
+  // with the run count (none for short histories, up to 9).
   function smoothSeries(series) {
     var n = series.length, k = Math.min(9, Math.max(1, Math.floor(n / 12)));
     if (k < 2) return series.slice();
@@ -2809,7 +2776,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     }
     return out;
   }
-  // "now" = the recent half's mean health; "delta" = recent half minus older half -- the same
+  // "now" = recent half's mean health; "delta" = recent minus older half -- the same
   // recent-vs-older split the flaky trend uses, so improving/declining reads consistently.
   function trendDelta(series) {
     var n = series.length;
@@ -2838,14 +2805,14 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     if (!box) return;
     var tr = reliabilityTrend(), series = tr.values, d = trendDelta(series);
     if (!d) { box.innerHTML = '<span class="rt-hint">' + esc(t("relTrendCollecting")) + "</span>"; return; }
-    // The headline number is the CURRENT health -- the last point of the smoothed line --
-    // so it always matches what the right edge of the graph shows.
+    // Headline number = CURRENT health, the last point of the smoothed line, so it always
+    // matches the graph's right edge.
     var smoothed = smoothSeries(series);
     var now = Math.round(smoothed[smoothed.length - 1]);
     var cls = d.delta > 0 ? "rt-up" : (d.delta < 0 ? "rt-down" : "rt-flat");
     var arrow = d.delta > 0 ? "▲" : (d.delta < 0 ? "▼" : "→");
     var sign = d.delta > 0 ? "+" : "";
-    // X-axis: the dates of the first and last run in view, so the time span is explicit.
+    // X-axis: first and last run dates, so the span is explicit.
     var axis = '<div class="rt-axis"><span>' + esc(fmtTrendDate(tr.from)) + "</span><span>"
       + esc(fmtTrendDate(tr.to)) + "</span></div>";
     box.innerHTML = '<div class="rt-meta"><span class="rt-label">' + esc(t("relTrend")) + "</span>"
@@ -2862,8 +2829,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     el.innerHTML = pentagonSvg(reliabilityAxes());
     renderRelTrend();
   }
-  // "How the score is computed" popup: each axis with its live value + a plain-language
-  // definition (matches reliabilityAxes exactly), so the radar is self-explaining.
+  // "How the score is computed" popup: each axis with its live value + a definition
+  // (in step with reliabilityAxes), so the radar is self-explaining.
   var relInfoDlg = document.getElementById("rel-info");
   var REL_DESC = { pass: "relPassDesc", robust: "relRobustDesc", fresh: "relFreshDesc",
     stable: "relStableDesc", complete: "relCompleteDesc" };
@@ -2881,7 +2848,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     updateParentDim();
   }
   function closeRelInfo() { if (relInfoDlg.open) relInfoDlg.close(); else relInfoDlg.removeAttribute("open"); }
-  // Generic "about this panel" popup (a title + one paragraph from i18n) for the runs chart
+  // Generic "about this panel" popup (title + one i18n paragraph) for the runs chart
   // and the flaky panel.
   var panelInfoDlg = document.getElementById("panel-info");
   function openPanelInfo(titleKey, bodyKey) {
@@ -2906,8 +2873,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     if (pc) pc.addEventListener("click", closePanelInfo);
     if (panelInfoDlg) { panelInfoDlg.addEventListener("close", updateParentDim); closeOnBackdrop(panelInfoDlg, closePanelInfo); }
   })();
-  // Duration-regression scan honouring the top dag/task/run filters (like the other
-  // KPIs): feeds the "Slowdowns" count and primes the modal so its first open is instant.
+  // Duration-regression scan honouring the top dag/task/run filters (like the other KPIs):
+  // feeds the "Slowdowns" count and primes the modal so its first open is instant.
   function slowQuery(win) {
     var q = uniqueQuery();  // dag_id / task_id / run_id from the top filter bar
     return win ? (q ? q + "&" : "") + "window=" + encodeURIComponent(win) : q;
@@ -2922,8 +2889,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       })
       .catch(function () { if (my === slowSeq) { slowData = null; slowFailed = true; renderKpis(); } });
   }
-  // Debounced refresh on filter changes, mirroring refreshUniqueTests; also keeps an
-  // open modal in sync with the filter.
+  // Debounced refresh on filter change (mirrors refreshUniqueTests); keeps an open modal
+  // in sync too.
   function refreshSlow() {
     clearTimeout(slowTimer);
     slowTimer = setTimeout(function () {
@@ -2939,8 +2906,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       dag_id: Object.keys(d).sort(), task_id: Object.keys(ta).sort(), run_id: Object.keys(r).sort(),
     };
   }
-  // Tidy autocomplete that drops neatly under the input. The native <datalist>
-  // popup renders outside the sandboxed iframe with a detached system shadow.
+  // Autocomplete dropdown under the input; the native <datalist> popup renders outside
+  // the sandboxed iframe with a detached system shadow.
   function bindSuggest(inputId, boxId, field) {
     var input = document.getElementById(inputId), box = document.getElementById(boxId);
     var active = -1;
@@ -2990,9 +2957,9 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   var dBody = document.getElementById("d-body");
   var dTitle = document.getElementById("d-title");
   var detail = null, filter = "all", lastFocus = null, currentId = null;
-  // The run's case table sorts by execution time, slowest first by default; the
-  // TEST / TIME headers toggle. (Top-slowest & regressions across runs live on the
-  // main page only -- a single run has no "slower than usual" context.)
+  // The run's case table sorts by execution time, slowest first; TEST/TIME headers toggle.
+  // (Cross-run slowest & regressions live on the main page only -- one run has no "slower
+  // than usual" context.)
   var caseSort = { key: "time", dir: "desc" };
 
   function outcomeLabel(o) { return t(o) || o; }
@@ -3000,17 +2967,18 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   // Success donut: clickable slices filter the case table by status.
   function donut(m) {
     var total = m.total || 0;
-    var SW = 12, R = 50;       // thinner ring than before; r = 50
+    var SW = 12, R = 50;
     var C = 2 * Math.PI * R;
     var ring = '<circle cx="60" cy="60" r="50" fill="none" stroke="var(--surface-2)" stroke-width="' + SW + '"/>';
     var segs = [["passed", "var(--pass)", m.passed], ["skipped", "var(--skip)", m.skipped],
                 ["failed", "var(--fail)", m.failed], ["error", "var(--error)", m.errors]];
-    // Gap between slices, > the round cap diameter so the caps never touch (single slice = no gap).
+    // Gap between slices, wider than the round-cap diameter so caps never touch (single
+    // slice = no gap).
     var nSeg = segs.filter(function (s) { return (s[2] || 0) > 0; }).length;
     var GAP = nSeg > 1 ? SW + 5 : 0;
-    // Lay slices out by their actual footprint (drawn + GAP) within the gapped arc, not by
-    // their raw proportion: this keeps a full GAP between every drawn segment, so when a
-    // share is ~0% its rounded cap stays a clear dot and two tiny slices can't overlap.
+    // Lay slices out by footprint (drawn + GAP) within the gapped arc, not raw proportion:
+    // a full GAP between every segment keeps a ~0% share's cap a clear dot and stops two
+    // tiny slices overlapping.
     var avail = total > 0 ? C - nSeg * GAP : C;
     var cursor = 0, parts = "";
     segs.forEach(function (s) {
@@ -3018,7 +2986,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       if (total <= 0 || v <= 0) return;
       var pct = Math.round((v / total) * 100);
       var lit = filter === "all" || filter === s[0];
-      var drawn = Math.max((v / total) * avail, 0.1);  // a tiny share -> a rounded dot
+      var drawn = Math.max((v / total) * avail, 0.1);  // tiny share -> a rounded dot
       parts += '<circle class="dseg" data-status="' + s[0] + '" data-count="' + v
         + '" data-pct="' + pct + '" cx="60" cy="60" r="50" '
         + 'fill="none" stroke="' + s[1] + '" stroke-width="' + SW + '" stroke-dasharray="'
@@ -3056,8 +3024,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       out += '<button type="button" class="af-link" id="cmp-prev" data-i18n-al="comparePrevAl">'
         + cmp + esc(t("comparePrev")) + "</button>";
     }
-    // Only offer "Flaky tests" when this dag·task actually has flaky ones (same 30-run window
-    // the modal uses), so the button never opens an empty list.
+    // Offer "Flaky tests" only when this dag·task has flaky ones (same 30-run window the
+    // modal uses), so the button never opens an empty list.
     if (flkCountByKey[JSON.stringify([m.dag_id, m.task_id])] > 0) {
       var zap = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"'
         + ' stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
@@ -3078,7 +3046,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       out += '<button type="button" class="af-link" id="cl-btn" data-i18n-al="clBtnAl">'
         + lst + esc(t("clBtn")) + "</button>";
     }
-    // Email-notification bench: how many times this run was mailed; opens the send log.
+    // How many times this run was mailed; opens the send log.
     if ((m.alerts || []).length > 0) {
       var mail = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"'
         + ' stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
@@ -3102,7 +3070,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       + '">' + (sym[tr] || "→") + "</span>";
   }
   function flakyMeta(f) {
-    // flakiness score (flip rate, explained on hover) + trend + fail ratio
+    // flakiness score (flip rate) + trend + fail ratio
     return '<span class="flk-score" title="' + esc(t("flkScoreTip")) + '">'
       + Math.round((f.score || 0) * 100) + "%</span> " + trendArrow(f.trend)
       + " · " + f.fails + "/" + f.runs + " " + esc(t("flkFailed"));
@@ -3125,7 +3093,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
 
   function openInAirflow(href) {
     closeDetail();        // dismiss the modal...
-    setParentDim(false);  // ...and drop its full-screen dim now (don't wait for the close event)
+    setParentDim(false);  // ...and drop its full-screen dim now, not on the close event
     try {
       var top = window.top;
       if (top && top !== window.self && top.location
@@ -3141,9 +3109,9 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     window.location.href = href;
   }
 
-  // Download the report's Allure results zip. Airflow's iframe sandbox blocks
-  // downloads (no allow-downloads), so trigger the click from the parent doc
-  // (same-origin, not sandboxed); standalone uses our own document.
+  // Download the report's Allure zip. Airflow's iframe sandbox blocks downloads (no
+  // allow-downloads), so trigger the click from the parent doc (same-origin, not
+  // sandboxed); standalone uses our own document.
   function downloadAllure(id) {
     var url = API + "reports/" + encodeURIComponent(id) + "/allure.zip";
     try {
@@ -3184,8 +3152,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     dBody.querySelectorAll(".pill").forEach(function (p) {
       p.setAttribute("aria-pressed", String(p.getAttribute("data-f") === k));
     });
-    // Re-light the donut to match (the table re-fills, but the donut isn't redrawn);
-    // use the `opacity` attribute, not inline style, so the :hover rule still wins.
+    // Re-light the donut to match (it isn't redrawn when the table re-fills); set the
+    // `opacity` attribute, not inline style, so the :hover rule still wins.
     dBody.querySelectorAll(".dseg").forEach(function (seg) {
       var s = seg.getAttribute("data-status");
       seg.setAttribute("opacity", k === "all" || k === s ? "1" : "0.3");
@@ -3201,14 +3169,14 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       if ((filter === "all" || c.outcome === filter)
           && (!q || c.node_id.toLowerCase().indexOf(q) !== -1)) sel.push({ c: c, i: idx });
     });
-    sel.sort(caseCmp);  // slowest-first by default; groups inherit this order
+    sel.sort(caseCmp);  // slowest-first by default; groups inherit the order
     if (!sel.length) {
       tb.innerHTML = '<tr><td colspan="4"><div class="state">' + esc(t("noCases")) + "</div></td></tr>";
       return;
     }
     if (caseGroup) {
       var groups = {};
-      var order = [];  // module order follows the active sort (first appearance in sel)
+      var order = [];  // module order = first appearance in sel (follows the active sort)
       sel.forEach(function (o) {
         var mod = caseModule(o.c.node_id);
         if (groups[mod]) groups[mod].push(o);
@@ -3277,13 +3245,13 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       var range = i * BIN + "–" + (i * BIN + BIN) + "s";
       var h = cnt ? Math.max(6, Math.round((cnt / maxCount) * BAR)) : 3;
       var col = cnt ? "var(--primary)" : "var(--surface-2)";
-      // The whole column height is the hover target so every bucket (even empty) reacts.
+      // The whole column height is the hover target so even empty buckets react.
       return '<div class="bench-col"><div class="bench-barwrap" data-range="' + esc(range)
         + '" data-cnt="' + cnt + '"><div class="bench-bar" style="height:' + h
         + "px;background:" + col + '"></div></div>'
         + '<div class="bench-x">' + esc(range) + "</div></div>";
     }).join("") + "</div>";
-    // Same tooltip style as the runs chart (#tip + a coloured stat dot) -- Airflow canon.
+    // Same tooltip style as the runs chart (#tip + a coloured stat dot).
     box.querySelectorAll(".bench-barwrap").forEach(function (w) {
       bindTip(w, function () {
         return '<div class="tt">' + esc(w.getAttribute("data-range")) + "</div>"
@@ -3335,9 +3303,9 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     dBody.querySelectorAll(".pill").forEach(function (p) {
       p.addEventListener("click", function () { setOutcomeFilter(p.getAttribute("data-f")); });
     });
-    // Airflow's iframe sandbox drops target="_top"/window.open (no top-navigation), but not
-    // the History API on the same-origin parent -- so drive React Router. The real <a href>
-    // stays so cmd/right-click still offers "open in new tab".
+    // Airflow's iframe sandbox drops target="_top"/window.open (no top-navigation) but not
+    // the parent's History API, so drive React Router. The real <a href> stays so
+    // cmd/right-click still offers "open in new tab".
     dBody.querySelectorAll(".af-link[href]").forEach(function (a) {
       a.addEventListener("click", function (ev) { ev.preventDefault(); openInAirflow(a.getAttribute("href")); });
     });
@@ -3347,12 +3315,12 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     if (flkBtn) flkBtn.addEventListener("click", function () { openFlaky(m.dag_id, m.task_id); });
     var hmBtn = document.getElementById("hm-btn");
     if (hmBtn) hmBtn.addEventListener("click", function () { openHeatmap(m.dag_id, m.task_id); });
-    // Per-run error clusters: a clear toolbar button opens the clusters modal scoped to
-    // this run; a cluster's test jumps to its history.
+    // Per-run error clusters: opens the clusters modal scoped to this run; a cluster's
+    // test jumps to its history.
     var clBtn = document.getElementById("cl-btn");
     if (clBtn) clBtn.addEventListener("click", function () {
-      // latest=0: cluster THIS run's failures (run_id-scoped), not "the dag·task's
-      // latest run" — the opened run may be an older one (deep-link / history).
+      // latest=0: cluster THIS run's failures (run_id-scoped), not the dag·task's latest
+      // run — the opened run may be an older one (deep-link / history).
       var qs = "?" + new URLSearchParams(
         { dag_id: m.dag_id, task_id: m.task_id, run_id: m.run_id, latest: "0" }
       ).toString();
@@ -3384,9 +3352,9 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     fillBench();
     fillCases();
   }
-  // Sortable case-table header: OUTCOME (plain) + TEST + TIME. TIME starts descending
-  // so the slowest cases in the run surface first; clicking a header toggles direction.
-  // Same ↑/↓ arrow + th.sortable styling as the run-list header on the main page.
+  // Sortable case-table header: OUTCOME + TEST + TIME. TIME starts descending so the
+  // slowest cases surface first; clicking toggles direction. Same ↑/↓ arrow + th.sortable
+  // styling as the run-list header.
   function caseHeadCell(key, label, cls) {
     var on = caseSort.key === key;
     var aria = on ? (caseSort.dir === "asc" ? "ascending" : "descending") : "none";
@@ -3413,10 +3381,10 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       });
     });
   }
-  // Outcome severity for sorting: ascending puts the broken tests first.
+  // Outcome severity for sorting: ascending puts broken tests first.
   var OUTCOME_RANK = { failed: 0, error: 1, skipped: 2, passed: 3 };
-  // Compares two {c, i} case entries by the active sort (time numeric / outcome rank /
-  // node string), with a stable tiebreak so equal rows keep a deterministic order.
+  // Compare two {c, i} entries by the active sort (time / outcome rank / node string),
+  // with a stable tiebreak so equal rows keep a deterministic order.
   function caseCmp(a, b) {
     var dir = caseSort.dir === "asc" ? 1 : -1;
     if (caseSort.key === "time") {
@@ -3450,20 +3418,20 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
       .then(function (d) {
         detail = d; detail.cases = d.cases || []; renderDetail();
-        if (focusNode) focusCaseRow(focusNode);  // jump to + expand a specific test
+        if (focusNode) focusCaseRow(focusNode);  // jump to + expand one test
       })
       .catch(function (e) {
         dBody.innerHTML = '<div class="state c-fail">' + esc(t("reportFail") + e.message) + "</div>";
       });
   }
-  // Scroll the case table to a node, expand its output, and flash it (used when a heatmap
-  // cell opens the run). The detail opened with filter=all + no grouping, so the row exists.
+  // Scroll to a node, expand its output, and flash it (when a heatmap cell opens the run).
+  // The detail opened with filter=all + no grouping, so the row exists.
   function focusCaseRow(node) {
     var labels = dBody.querySelectorAll(".case-table tr.case .case-node");
     for (var i = 0; i < labels.length; i++) {
       if (labels[i].textContent === node) {
         var tr = labels[i].closest("tr.case");
-        if (tr.getAttribute("aria-expanded") !== "true") tr.click();  // expand via its toggle
+        if (tr.getAttribute("aria-expanded") !== "true") tr.click();  // expand via its own toggle
         tr.scrollIntoView({ block: "center" });
         tr.classList.add("case-focus");
         setTimeout(function () { tr.classList.remove("case-focus"); }, 1600);
@@ -3472,8 +3440,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     }
   }
 
-  // Deep-link rides the Airflow parent URL when embedded (the iframe's bare path
-  // isn't shareable), falling back to our own location standalone.
+  // Deep-links ride the parent URL when embedded (the iframe's bare path isn't
+  // shareable), falling back to our own location standalone.
   function sameOriginTop() {
     try {
       if (window.top !== window.self && window.top.location
@@ -3503,9 +3471,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     if (lastFocus && lastFocus.focus) lastFocus.focus();
   }
 
-  // Close on a backdrop click (like Airflow's modals); ESC closes natively via the
-  // "cancel" event. Guarded on mousedown so a text drag that ends outside the box
-  // doesn't dismiss it.
+  // Close on a backdrop click (ESC closes natively via "cancel"). Guarded on mousedown so
+  // a text drag ending outside the box doesn't dismiss it.
   function closeOnBackdrop(d, closeFn) {
     var startedOutside = false;
     var outside = function (e) {
@@ -3514,20 +3481,19 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     };
     d.addEventListener("mousedown", function (e) { startedOutside = e.target === d && outside(e); });
     d.addEventListener("click", function (e) {
-      // Only a genuine backdrop click closes: the target must BE the dialog element (the
-      // backdrop), not a bubbled click from inner content. Without `e.target === d`, a
-      // synthetic inner click (e.g. focusCaseRow's tr.click(), coords 0,0 -> reads as
-      // "outside") would dismiss a just-opened dialog. Reset the flag so it never goes stale.
+      // Only a genuine backdrop click closes: the target must BE the dialog (the backdrop),
+      // not a bubbled inner click. Without `e.target === d`, a synthetic inner click (e.g.
+      // focusCaseRow's tr.click() at 0,0 -> reads as "outside") would dismiss a just-opened
+      // dialog. Reset the flag so it never goes stale.
       if (startedOutside && e.target === d && outside(e)) closeFn();
       startedOutside = false;
     });
   }
 
-  // Dim the WHOLE Airflow window (nav included) behind a modal, like Airflow's
-  // own dialogs. Our <dialog> ::backdrop only covers the iframe, so when embedded
-  // we drop a full-screen overlay into the parent and lift our iframe above it --
-  // the iframe's own ::backdrop still dims the page around the dialog, so the dim
-  // is seamless across both. Standalone needs nothing (::backdrop is the window).
+  // Dim the WHOLE Airflow window (nav included) behind a modal, like Airflow's dialogs.
+  // Our ::backdrop only covers the iframe, so when embedded we drop a full-screen overlay
+  // into the parent and lift the iframe above it -- our ::backdrop still dims around the
+  // dialog, so it's seamless. Standalone needs nothing (::backdrop is the window).
   function setParentDim(on) {
     var fe = window.frameElement;        // our iframe in the parent (same-origin only)
     if (!fe) return;
@@ -3551,8 +3517,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     } catch (e) { /* cross-origin parent: skip */ }
   }
   // A single full-screen dim inside OUR document (standalone page, or the iframe when
-  // embedded). One overlay no matter how many dialogs stack -- popups opened from inside the
-  // run detail never add a second layer of darkening. Dialogs (top layer) render above it.
+  // embedded). One overlay no matter how many dialogs stack, so popups over the run detail
+  // never double-darken. Dialogs (top layer) render above it.
   function setLocalDim(on) {
     var ID = "apx-local-dim";
     var ov = document.getElementById(ID);
@@ -3577,7 +3543,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       || (panelInfoDlg && panelInfoDlg.open) || (emailDlg && emailDlg.open)
       || (alertsDlg && alertsDlg.open);
     setLocalDim(anyOpen);   // dim our own page/iframe once
-    setParentDim(anyOpen);  // and (embedded) the Airflow chrome around the iframe
+    setParentDim(anyOpen);  // and, embedded, the Airflow chrome around the iframe
   }
 
   // Copy a deep-link to this report.
@@ -3643,7 +3609,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     ok.disabled = true; ok.textContent = t("deleting");
     var failed = [];
     Promise.all(ids.map(function (id) {
-      // Each DELETE is RBAC-checked server-side, so a forbidden one just fails.
+      // Each DELETE is RBAC-checked server-side; a forbidden one just fails.
       return fetch(API + "reports/" + encodeURIComponent(id), { method: "DELETE" })
         .then(function (r) {
           if (r.status === 404 || r.ok) {
@@ -3670,9 +3636,9 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   confirmDlg.addEventListener("close", updateParentDim);
   closeOnBackdrop(confirmDlg, closeConfirm);
 
-  // Email-this-run dialog: POST the current run's token to /email. Recipients are validated
-  // + capped server-side; the field is optional (empty -> the configured recipients). The
-  // whole flow is RBAC-gated on the server, so a forbidden user just gets a 403 here.
+  // Email-this-run dialog: POST the run to /email. Recipients are validated + capped
+  // server-side; the field is optional (empty -> the configured recipients). RBAC-gated
+  // on the server, so a forbidden user just gets a 403 here.
   var emailDlg = document.getElementById("email-dlg");
   var emStatus = document.getElementById("em-status");
   var emSend = document.getElementById("em-send");
@@ -3691,7 +3657,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     emTo.focus();
   }
   function closeEmail() { if (emailDlg.open) emailDlg.close(); else emailDlg.removeAttribute("open"); }
-  // Mirrors the backend validator (the server re-checks anyway); instant, readable feedback.
+  // Mirrors the backend validator (the server re-checks anyway) for instant feedback.
   var EMAIL_JS_RE = /^[A-Za-z0-9!#$%&'*+\/=?^_`{|}~-]+(?:\.[A-Za-z0-9!#$%&'*+\/=?^_`{|}~-]+)*@(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$/;
   function validEmail(s) {
     return s.length <= 254 && s.indexOf("@") > 0
@@ -3703,7 +3669,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     var body = {};
     if (raw) {
       var list = raw.split(/[,;]/).map(function (s) { return s.trim(); }).filter(Boolean);
-      // Validate BEFORE any request: name the bad address in the user's language.
+      // Validate BEFORE any request; name the bad address in the user's language.
       for (var i = 0; i < list.length; i++) {
         if (!validEmail(list[i])) {
           setEmStatus(t("emailInvalid").replace("{a}", list[i]), "err");
@@ -3730,7 +3696,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
         setEmStatus(t("emailSent"), "ok");
         setTimeout(function () { if (emailDlg.open) closeEmail(); }, 900);
       } else {
-        // Show the server's reason (RBAC 403, 400 bad recipient, 503 no transport, 502 send fail).
+        // Show the server's reason (403 RBAC, 400 bad recipient, 503 no transport, 502 send fail).
         setEmStatus(t("emailFail") + (res.d && res.d.detail ? " " + res.d.detail : ""), "err");
         emSend.disabled = false;
       }
@@ -3769,14 +3735,14 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   alertsDlg.addEventListener("close", updateParentDim);
   closeOnBackdrop(alertsDlg, closeAlertsLog);
 
-  // Failures modal: clicking the FAILURES KPI groups every failed/errored case across
-  // the visible runs into clusters by normalized error (see /api/failure-clusters), so
-  // common root causes surface instead of per-failure spam.
+  // Failures modal: the FAILURES KPI groups every failed/errored case across the visible
+  // runs into clusters by normalized error (see /api/failure-clusters), so common root
+  // causes surface instead of per-failure spam.
   var failuresDlg = document.getElementById("failures");
   var flBody = document.getElementById("fl-body");
 
-  // Renders error clusters into `box`; each cluster expands to its failing tests, and a
-  // test click calls onItem(test). Shared by the global modal and the per-run panel.
+  // Render error clusters into `box`; each expands to its failing tests, and a test click
+  // calls onItem(test). Shared by the global modal and the per-run panel.
   function renderClusters(box, clusters, onItem) {
     if (!clusters || !clusters.length) {
       box.innerHTML = '<div class="state">' + esc(t("noFailures")) + "</div>";
@@ -3836,10 +3802,9 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     var s = q.toString();
     return s ? "?" + s : "";
   }
-  // Opens the failures dialog and loads clusters for the given query scope. ``onItem``
-  // handles a click on a test inside a cluster. Used globally (KPI) and per-run (detail).
-  // Narrow server-built clusters to the picked dag·task group(s): keep only the matching
-  // tests, recompute the per-cluster count, drop emptied clusters, re-sort biggest-first.
+  // Narrow server-built clusters to the picked dag·task group(s): keep the matching tests,
+  // recompute each count, drop emptied clusters, re-sort biggest-first. (openClusters below
+  // opens the dialog; onItem handles a click on a test inside a cluster.)
   function scopeClusters(clusters, keys) {
     var out = [];
     (clusters || []).forEach(function (c) {
@@ -3877,7 +3842,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     var sk = selKeySet();
     openClusters(filterQuery(), sk ? t("flkSelScope") : "", function (it) {
       openDetail(it.id);      // resets filter to "all"...
-      filter = it.outcome;    // ...then land on the failing cases
+      filter = it.outcome;    // ...then land on the failing outcome
       closeFailures();
     }, sk);
   }
@@ -3888,8 +3853,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   failuresDlg.addEventListener("close", updateParentDim);
   closeOnBackdrop(failuresDlg, closeFailures);
 
-  // Unique-tests list (opened from the KPI): client-side search + pagination. The
-  // search input lives in a fixed shell so a re-render never steals its focus.
+  // Unique-tests list (from the KPI): client-side search + pagination. The search input
+  // lives in a fixed shell so a re-render never steals its focus.
   var uniqueDlg = document.getElementById("unique");
   var uqBody = document.getElementById("uq-body");
   var UQ_PAGE = 100, uqPage = 0, uqQuery = "", uqCapped = false;
@@ -3926,9 +3891,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   function closeUnique() {
     if (uniqueDlg.open) uniqueDlg.close(); else uniqueDlg.removeAttribute("open");
   }
-  // Per-test stats line in the catalogue: total runs, average time, and per-outcome
-  // counts (only the non-zero ones, each a coloured dot + count) -- all from /api/slow's
-  // sibling scan in /api/unique-tests, so no extra request.
+  // Per-test stats line: total runs, average time, and non-zero per-outcome counts (each
+  // a coloured dot + count) -- from /api/unique-tests' sibling scan, so no extra request.
   function uqStats(x) {
     if (x.runs == null) return "";  // tolerate an older API without stats
     var parts = [
@@ -3963,8 +3927,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       : '<div class="state">' + esc(t("noCases")) + "</div>";
     listEl.querySelectorAll(".uq-row").forEach(function (row) {
       var open = function () {
-        // Merge across every dag·task this node id ran in -- matches the aggregated count
-        // shown on the row (the same test triggered from two places is one timeline).
+        // Merge across every dag·task this node id ran in, matching the row's aggregated
+        // count (the same test triggered from two places is one timeline).
         openHistory(null, null, row.getAttribute("data-node"));
       };
       row.addEventListener("click", open);
@@ -4035,12 +3999,12 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   closeOnBackdrop(compareDlg, closeCompare);
 
   // Flaky tests for one dag·task: score/trend/quarantine, a window selector, and a
-  // quarantined-only filter. The controls live in a fixed shell; only the list re-renders.
+  // quarantined-only filter. Controls live in a fixed shell; only the list re-renders.
   var flakyDlg = document.getElementById("flaky");
   var fkBody = document.getElementById("fk-body");
   var FLK_WINDOWS = [10, 30, 50, 100, 200];
   var fkState = { dag: null, task: null, window: 30, qOnly: false, rows: [] };
-  var flkSeq = 0;  // guards against a stale window's response overwriting a newer one
+  var flkSeq = 0;  // drop a stale window's response that lands after a newer one
   function openFlaky(dag, task) {
     fkState.dag = dag; fkState.task = task; fkState.window = 30; fkState.qOnly = false;
     if (typeof flakyDlg.showModal === "function") { if (!flakyDlg.open) flakyDlg.showModal(); }
@@ -4070,7 +4034,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     var q = new URLSearchParams({
       dag_id: fkState.dag, task_id: fkState.task, window: String(fkState.window),
     });
-    var my = ++flkSeq;  // ignore a stale window's response landing after a newer one
+    var my = ++flkSeq;  // drop a stale window's response landing after a newer one
     fetch(API + "flaky?" + q.toString())
       .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
       .then(function (d) { if (my !== flkSeq) return; fkState.rows = d.flaky || []; fillFlakyRows(); })
@@ -4106,7 +4070,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
 
   // Slow tests & duration regressions across all dag·tasks: a "got slower" section
   // (recent-half avg vs older half) plus a slowest-by-average leaderboard. One window
-  // selector; the global scan primes the first open so it's instant.
+  // selector; the global scan primes the first open.
   var slowDlg = document.getElementById("slow");
   var slBody = document.getElementById("sl-body");
   var slowState = { window: 0, data: null };
@@ -4151,7 +4115,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     if (listEl) {
       listEl.innerHTML = '<div class="state"><div class="skeleton" style="width:40%;margin:0 auto"></div></div>';
     }
-    var my = ++slowModalSeq;  // ignore a stale window/filter response after a newer one
+    var my = ++slowModalSeq;  // drop a stale window/filter response after a newer one
     fetch(API + "slow?" + slowQuery(slowState.window))
       .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
       .then(function (d) { if (my !== slowModalSeq) return; slowState.data = d; fillSlow(); })
@@ -4165,7 +4129,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     var listEl = document.getElementById("sl-list");
     if (!listEl || !slowState.data) return;
     var d = slowState.data, reg = d.regressed || [], slowest = d.slowest || [];
-    // Scope to the picked dag·task group(s), like the flaky panel + the KPI count.
+    // Scope to the picked dag·task group(s), like the flaky panel + KPI count.
     var sk = selKeySet();
     if (sk) {
       var inSel = function (x) { return sk[x.dag_id + "|" + x.task_id]; };
@@ -4197,8 +4161,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     else historyDlg.setAttribute("open", "");
     updateParentDim();
     histBody.innerHTML = '<div class="state"><div class="skeleton" style="width:40%;margin:0 auto"></div></div>';
-    // dag/task omitted (Unique tests) -> the server merges this node id across every place
-    // it ran; given -> just that dag·task's runs.
+    // dag/task omitted (Unique tests) -> server merges this node id across every place it
+    // ran; given -> just that dag·task's runs.
     var params = { node_id: node };
     if (dag) params.dag_id = dag;
     if (task) params.task_id = task;
@@ -4215,13 +4179,13 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     var rows = d.history || [];
     var head = '<div class="hist-node mono">' + esc(d.node_id) + "</div>";
     if (!rows.length) { histBody.innerHTML = head + '<div class="state">' + esc(t("noHistory")) + "</div>"; return; }
-    // Make the (capped) window explicit: the timeline shows only the newest N runs.
+    // Make the (capped) window explicit: only the newest N runs are shown.
     head += '<div class="hist-count">' + esc(t("histCount").replace("{n}", rows.length)) + "</div>";
     histBody.innerHTML = head + rows.map(function (h) {
       var label = h.outcome ? outcomeLabel(h.outcome) : t("histDidntRun");
       var dur = h.duration != null ? fmtDur(h.duration) : "";
-      // Merged history (opened from Unique tests) tags each run with its dag·task so it's
-      // clear the same test ran from more than one place.
+      // Merged history (Unique tests) tags each run with its dag·task, showing the same
+      // test ran from more than one place.
       var loc = h.dag_id ? ' · <span class="hist-loc">' + esc(h.dag_id + "·" + h.task_id)
         + "</span>" : "";
       return '<div class="hist-row">' + outcomeDot(h.outcome)
@@ -4233,18 +4197,17 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   historyDlg.addEventListener("close", updateParentDim);
   closeOnBackdrop(historyDlg, closeHistory);
 
-  // Test×run heatmap: a per-dag·task matrix (rows = tests sorted most-broken first,
-  // columns = recent runs old→new, cell = outcome) so flaky rows, regression blocks and
-  // a build-breaking run read at a glance. A FIXED test-name column + a drag/scroll cell
-  // carousel (like the runs chart) -- cells slide under the names, never over. Same window
-  // selector as flaky/slow; hover shows the plugin's tooltip; click a cell to open that
-  // run, a test name to open its history. Delegated handlers + closure data (no per-cell
-  // listeners) keep it light at the row/column caps.
+  // Test×run heatmap: a per-dag·task matrix (rows = tests, most-broken first; columns =
+  // recent runs old→new; cell = outcome) so flaky rows, regression blocks and a
+  // build-breaking run read at a glance. A FIXED name column + a drag/scroll cell carousel
+  // (like the runs chart), cells sliding under the names. Same window selector as
+  // flaky/slow; click a cell to open that run, a name to open its history. Delegated
+  // handlers + closure data (no per-cell listeners) keep it light at the caps.
   var heatmapDlg = document.getElementById("heatmap");
   var hmBody = document.getElementById("hm-body");
   var hmState = { dag: null, task: null, window: 30 };
   var hmData = null;  // last rendered {runs, tests}; read by the delegated tooltip + clicks
-  var hmSeq = 0;      // guards against a stale window's response overwriting a newer one
+  var hmSeq = 0;      // drop a stale window's response that lands after a newer one
   var hmSel = { p: true, f: true, e: true, s: true };  // legend focus (mirrors chartSel)
   var HM_COLOR = { p: "--pass", f: "--fail", e: "--error", s: "--skip" };
   function hmOutcome(code) {
@@ -4252,7 +4215,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   }
   function hmAllOn() { return hmSel.p && hmSel.f && hmSel.e && hmSel.s; }
   function applyHmFocus() {
-    // Drive the dimming from container classes (no per-cell work, fine at the caps).
+    // Dim from container classes (no per-cell work, fine at the caps).
     var cellsEl = document.querySelector("#hm-grid .hm-cells");
     if (!cellsEl) return;
     var on = !hmAllOn();
@@ -4294,17 +4257,17 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     return i >= 0 ? node.slice(i + 2) : node;
   }
   function findRun(dag, task, run) {
-    var best = null;  // newest try of this dag·task·run, to open its detail on click
+    var best = null;  // newest try of this dag·task·run; opens its detail on click
     allReports.forEach(function (x) {
       if (x.dag_id === dag && x.task_id === task && x.run_id === run
           && (!best || (x.try_number || 0) > (best.try_number || 0))) best = x;
     });
     return best;
   }
-  // The heatmap's own drag-to-pan -- deliberately NOT the chart's, whose `chartDragged`
-  // resets on a setTimeout that fires after `click`, so a slightly-draggy cell click would
-  // be swallowed. `hmDragMoved` is read synchronously by the click handler and reset on the
-  // next pointerdown, so a real pan is suppressed but an ordinary click always lands.
+  // The heatmap's own drag-to-pan, NOT the chart's: the chart's `chartDragged` resets on a
+  // setTimeout after `click`, so a slightly-draggy cell click would be swallowed here.
+  // `hmDragMoved` is read synchronously by the click handler and reset on the next
+  // pointerdown, so a real pan is suppressed but an ordinary click always lands.
   var hmDrag = null, hmDragMoved = 0;
   function enableHmDrag(el) {
     el.addEventListener("pointerdown", function (e) {
@@ -4322,7 +4285,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   function hmDragEnd() {
     if (!hmDrag) return;
     hmDrag.el.classList.remove("dragging");
-    hmDrag = null;  // hmDragMoved persists until the next pointerdown so click() can read it
+    hmDrag = null;  // hmDragMoved persists until the next pointerdown so click() reads it
   }
   function hmCellTip(cell, ev) {
     if (!hmData) return;
@@ -4344,7 +4307,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   function openHeatmap(dag, task) {
     hmState.dag = dag; hmState.task = task; hmState.window = 30;
     hmSel.p = hmSel.f = hmSel.e = hmSel.s = true;  // reset the legend focus per open
-    // Inset (narrower than the run dialog) when opened from inside a run; wide otherwise.
+    // Inset when opened from inside a run; wide otherwise.
     var det = document.getElementById("detail");
     heatmapDlg.classList.toggle("hm-inset", !!(det && det.open));
     if (typeof heatmapDlg.showModal === "function") { if (!heatmapDlg.open) heatmapDlg.showModal(); }
@@ -4359,15 +4322,15 @@ _INDEX_HTML = r"""<!DOCTYPE html>
             + esc(t("flkWinOpt").replace("{n}", w)) + "</option>";
         }).join("")
       + "</select></label></div>"
-      + '<div class="hm-legend" id="hm-legend"></div>'  // legend on top: visible without scrolling
+      + '<div class="hm-legend" id="hm-legend"></div>'  // legend on top, visible without scrolling
       + '<div id="hm-grid"></div>';
     document.getElementById("hm-win").addEventListener("change", function () {
       hmState.window = +this.value; loadHeatmap();
     });
     var grid = document.getElementById("hm-grid");
-    grid.addEventListener("pointerdown", function () { hmDragMoved = 0; });  // fresh per gesture
+    grid.addEventListener("pointerdown", function () { hmDragMoved = 0; });  // reset per gesture
     grid.addEventListener("click", function (e) {
-      if (hmDragMoved > 6) return;  // a real pan shouldn't open anything; a click always does
+      if (hmDragMoved > 6) return;  // a real pan opens nothing; a click always does
       var name = e.target.closest(".hm-name");
       if (name) { closeHeatmap(); openHistory(hmState.dag, hmState.task, name.getAttribute("data-node")); return; }
       var cell = e.target.closest(".hm-cell");
@@ -4375,12 +4338,12 @@ _INDEX_HTML = r"""<!DOCTYPE html>
         var run = hmData.runs[+cell.getAttribute("data-c")];
         var tt = hmData.tests[+cell.getAttribute("data-r")];
         var rec = run && findRun(hmState.dag, hmState.task, run.run_id);
-        if (rec) { closeHeatmap(); openDetail(rec.id, tt && tt.node_id); }  // jump to that test
+        if (rec) { closeHeatmap(); openDetail(rec.id, tt && tt.node_id); }  // land on that test
       }
     });
     grid.addEventListener("mouseover", function (e) {
       var cell = e.target.closest(".hm-cell");
-      if (cell && cell.hasAttribute("data-r")) hmCellTip(cell, e);  // instant, no hover delay
+      if (cell && cell.hasAttribute("data-r")) hmCellTip(cell, e);  // instant; no hover delay
     });
     grid.addEventListener("mousemove", function (e) {
       if (tipEl && tipEl.style.display === "block") tipMove(e);
@@ -4412,20 +4375,19 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     hmData = d;
     var runs = d.runs || [], tests = d.tests || [], n = runs.length;
     if (!tests.length) { gridEl.innerHTML = '<div class="state">' + esc(t("heatmapEmpty")) + "</div>"; return; }
-    // Fixed column of test names (short, readable; full id on hover) -- the corner spacer
-    // matches the run-header row height so rows line up with the scrolling pane.
+    // Fixed column of test names (short; full id on hover). The corner spacer matches the
+    // run-header row height so rows line up with the scrolling pane.
     var names = '<div class="hm-corner"></div>' + tests.map(function (tt) {
       return '<button type="button" class="hm-name" data-node="' + esc(tt.node_id)
         + '" title="' + esc(tt.node_id) + '"><span>' + esc(hmShort(tt.node_id)) + "</span></button>";
     }).join("");
-    // Scrolling pane: a run-number header row, then one row of cells per test.
-    // Shrink the header font when the largest label has more digits, so e.g. "#100" or
-    // "#1000" stays inside its cell instead of spilling over its neighbour.
+    // Scrolling pane: a run-number header row, then one row of cells per test. Shrink the
+    // header font as the largest number gains digits, so "#100"/"#1000" stays in its cell.
     var digits = String(n).length;
     var rheadFs = digits <= 2 ? 9 : digits === 3 ? 8 : 6;
     var head = "";
     for (var c = 0; c < n; c++) {
-      var show = (c % 5 === 0) || (c === n - 1);  // label every 5th run + the last
+      var show = (c % 5 === 0) || (c === n - 1);  // label every 5th run, plus the last
       head += '<div class="hm-rhead">' + (show ? "#" + (c + 1) : "") + "</div>";
     }
     var cells = tests.map(function (tt, r) {
@@ -4446,7 +4408,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       + '<div class="hm-cells" style="' + cols + '">' + cells + "</div>"
       + "</div></div>" + note;
     enableHmDrag(gridEl.querySelector(".hm-scroll"));  // heatmap-local drag-to-pan
-    renderHmLegend(); applyHmFocus();  // clickable status focus, like the chart legend
+    renderHmLegend(); applyHmFocus();  // clickable status focus, like the chart's
   }
   function closeHeatmap() { if (heatmapDlg.open) heatmapDlg.close(); else heatmapDlg.removeAttribute("open"); }
   document.getElementById("hm-close").addEventListener("click", closeHeatmap);
@@ -4454,8 +4416,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   closeOnBackdrop(heatmapDlg, closeHeatmap);
 
   document.getElementById("refresh").addEventListener("click", load);
-  // Links menu: GitHub + the FastAPI docs. Airflow's iframe sandbox blocks _blank
-  // from inside, so open the tab from the same-origin parent; standalone uses ours.
+  // Links menu: GitHub + the FastAPI docs. Airflow's iframe sandbox blocks _blank from
+  // inside, so open the tab from the same-origin parent; standalone uses ours.
   var linksBtn = document.getElementById("links-btn");
   var linksMenu = document.getElementById("links-menu");
   function closeLinksMenu() {
@@ -4490,14 +4452,14 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   document.addEventListener("pointerup", hmDragEnd);
   document.addEventListener("pointercancel", hmDragEnd);
   // Debounce the top filters: each keystroke otherwise re-renders the whole page
-  // (chart + list + KPIs + flaky) -- costly on large datasets. Call with no arg so it
-  // resets to page 1 / newest (binding the listener directly passes the Event as the
-  // keepPage flag, which wrongly preserved the page).
+  // (chart + list + KPIs + flaky), costly on large datasets. Call with no arg so it resets
+  // to page 1 / newest -- binding the listener directly would pass the Event as keepPage
+  // and wrongly preserve the page.
   var debouncedFilter = debounce(function () { applyFilter(); }, 150);
   ["f-dag", "f-task", "f-run"].forEach(function (id) {
     document.getElementById(id).addEventListener("input", debouncedFilter);
   });
-  // Flaky-panel search + quarantined-only filter: client-side, re-render in place.
+  // Flaky-panel search + quarantined-only filter: client-side, re-rendered in place.
   var flkBoardQ = document.getElementById("flk-board-q");
   if (flkBoardQ) flkBoardQ.addEventListener("input", renderFlakyBoard);
   var flkBoardQOnly = document.getElementById("flk-board-qonly");

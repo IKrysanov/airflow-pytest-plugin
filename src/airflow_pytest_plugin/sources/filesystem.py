@@ -24,6 +24,7 @@ import os
 import shutil
 import threading
 import time
+import uuid
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -41,7 +42,7 @@ from ..models import (
 )
 from .base import ReportSource
 
-try:  # prefer the hardened parser when present (matches the operator)
+try:  # prefer the hardened parser (matches the operator)
     from defusedxml.ElementTree import parse as _xml_parse
 
     _SECURE_XML = True
@@ -73,8 +74,8 @@ class FileSystemReportSource(ReportSource):
         self._scan_ttl = (
             get_scan_cache_ttl() if scan_cache_ttl is None else scan_cache_ttl
         )
-        # (monotonic_timestamp, summaries); guarded so concurrent requests on a cold
-        # cache do a single tree walk rather than one each (single-flight).
+        # (monotonic_timestamp, summaries); locked so a cold cache does a single
+        # tree walk instead of one per concurrent request (single-flight).
         self._scan_cache: tuple[float, list[ReportSummary]] | None = None
         self._scan_lock = threading.Lock()
 
@@ -93,7 +94,7 @@ class FileSystemReportSource(ReportSource):
         if not root.is_dir():
             return []
         out: list[ReportSummary] = []
-        threshold = get_success_threshold()  # resolve once per scan
+        threshold = get_success_threshold()  # once per scan
         for meta_file in root.rglob(META_FILENAME):
             meta = self._load_meta(meta_file)
             if meta is None:
@@ -102,8 +103,8 @@ class FileSystemReportSource(ReportSource):
             if summary is not None:
                 out.append(summary)
         # Newest first: ISO-8601 created_at sorts chronologically; missing sorts last.
-        # Tiebreak deterministically (try_number, run_id, map_index) so that on equal or
-        # missing created_at a stable "latest" run is chosen (e.g. a retry wins its try).
+        # Deterministic tiebreak (try_number, run_id, map_index) picks a stable "latest"
+        # on equal/missing created_at -- e.g. a retry wins over its earlier try.
         out.sort(
             key=lambda s: (
                 s.created_at or "",
@@ -116,8 +117,8 @@ class FileSystemReportSource(ReportSource):
         return out
 
     def _all_summaries(self) -> list[ReportSummary]:
-        """The full scan, reused within the TTL so a page's several summary-driven
-        endpoints share one tree walk. ``ttl <= 0`` disables caching."""
+        """Full scan, reused within the TTL so a page's several summary endpoints
+        share one tree walk. ``ttl <= 0`` disables caching."""
         if self._scan_ttl <= 0:
             return self._scan_disk()
         cached = self._scan_cache
@@ -144,7 +145,7 @@ class FileSystemReportSource(ReportSource):
         d = dag_id.lower() if dag_id else None
         r = run_id.lower() if run_id else None
         summaries = self._all_summaries()
-        # Filter into a fresh list -- never hand back (or sort) the cached one.
+        # Filter into a fresh list -- never hand back the cached one.
         return [
             s
             for s in summaries
@@ -161,7 +162,7 @@ class FileSystemReportSource(ReportSource):
         if not os.path.exists(report_path):
             return None
 
-        # Prefer the stored counts; success is (re)derived from the pass-rate threshold.
+        # Prefer stored counts; success is re-derived from the pass-rate threshold.
         threshold = get_success_threshold()
         meta = self._load_meta(Path(os.path.join(report_dir, META_FILENAME)))
         summary = self._summary_from_meta(meta, threshold) if meta is not None else None
@@ -187,7 +188,7 @@ class FileSystemReportSource(ReportSource):
                 created_at=None,
             )
 
-        # The parser keeps only the short message; read the XML for each case's full output.
+        # The parser keeps only the short message; read the XML for full per-case output.
         outputs = self._case_outputs(report_path)
         cases = tuple(
             CaseView(
@@ -219,13 +220,13 @@ class FileSystemReportSource(ReportSource):
                         if len(row) > 2 and isinstance(row[2], int | float)
                         else 0.0
                     )
-                    # Guard NaN/Infinity from a corrupt meta so they can't reach a
-                    # JSON response (json.dumps would emit non-spec NaN/Infinity).
+                    # Guard NaN/Infinity from corrupt meta: json.dumps emits them
+                    # non-spec, so they must not reach a JSON response.
                     if not math.isfinite(dur):
                         dur = 0.0
                     out[str(row[0])] = {"outcome": str(row[1]), "duration": dur}
             return out
-        # Older archive without the per-test map: parse junit.xml on demand.
+        # Older archive lacking the per-test map: parse junit.xml on demand.
         report_path = os.path.join(report_dir, REPORT_FILENAME)
         if not os.path.isfile(report_path):
             return None
@@ -248,21 +249,21 @@ class FileSystemReportSource(ReportSource):
         if target is None or not os.path.isdir(target):
             return False
         shutil.rmtree(target, ignore_errors=True)
-        # Remove now-empty ancestors so the tree doesn't accumulate orphan directories.
+        # Remove now-empty ancestors so the tree doesn't accumulate orphan dirs.
         self._prune_empty_parents(
             os.path.dirname(target), os.path.realpath(self._report_root)
         )
-        self._invalidate_scan()  # the deleted run must drop out of the list at once
+        self._invalidate_scan()  # deleted run must drop out of the list at once
         _log.info("Deleted report %s", target)
         return True
 
     def record_alert(self, ref: ReportRef, entry: dict[str, Any]) -> bool:
         """Append one sanitized email-notification record to the run's ``meta.json``.
 
-        Best-effort and bounded: the entry is reduced to the known fields, the history is
-        capped at the newest ``_ALERTS_CAP`` records (so repeated sends can't grow the
-        sidecar without limit), and the write is atomic (tmp + ``os.replace``) so a
-        concurrent scan never sees a half-written file. Never raises for storage problems.
+        Best-effort and bounded: the entry is reduced to known fields, history is capped
+        at the newest ``_ALERTS_CAP`` (so repeated sends can't grow the sidecar without
+        limit), and the write is atomic (tmp + ``os.replace``) so a concurrent scan never
+        sees a half-written file. Never raises on storage problems.
         """
         report_dir = self._safe_dir(ref)
         if report_dir is None:
@@ -275,7 +276,9 @@ class FileSystemReportSource(ReportSource):
             history = [a for a in meta.get("alerts", []) if isinstance(a, dict)]
             history.append(_sanitize_alert_entry(entry))
             meta["alerts"] = history[-_ALERTS_CAP:]
-            tmp = f"{meta_file}.{os.getpid()}.tmp"
+            # Unique tmp name (uuid, not pid): two threads writing the same run's history
+            # must not share a tmp file and clobber each other.
+            tmp = f"{meta_file}.{uuid.uuid4().hex}.tmp"
             with open(tmp, "w", encoding="utf-8") as fh:
                 json.dump(meta, fh, ensure_ascii=False)
             os.replace(tmp, meta_file)
@@ -301,8 +304,8 @@ class FileSystemReportSource(ReportSource):
     def _safe_dir(self, ref: ReportRef) -> str | None:
         """The report dir for ``ref`` if it resolves under the root, else ``None``.
 
-        Token is attacker-controlled: resolve real paths (``..``, symlinks) and refuse
-        any escape -- the boundary both reads and deletes rely on.
+        Token is attacker-controlled: resolve real paths (``..``, symlinks) and refuse any
+        escape -- the boundary both reads and deletes rely on.
         """
         root = os.path.realpath(self._report_root)
         target = os.path.realpath(self._layout.dir_for(self._report_root, ref))
@@ -311,7 +314,9 @@ class FileSystemReportSource(ReportSource):
         _log.warning("Refusing report path outside the report root: %r", target)
         return None
 
-    def allure_archive(self, ref: ReportRef) -> bytes | None:
+    def allure_archive(
+        self, ref: ReportRef, *, max_bytes: int | None = None
+    ) -> bytes | None:
         report_dir = self._safe_dir(ref)
         if report_dir is None:
             return None
@@ -323,6 +328,17 @@ class FileSystemReportSource(ReportSource):
         ]
         if not files:
             return None
+        # ``max_bytes`` (the email path) bounds peak memory: if raw results exceed the
+        # budget, skip building the zip in RAM -- the caller sends without it.
+        if max_bytes is not None:
+            raw = 0
+            for full in files:
+                try:
+                    raw += os.path.getsize(full)
+                except OSError:  # a file vanished mid-walk; ignore it
+                    continue
+                if raw > max_bytes:
+                    return None
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
             for full in files:
@@ -354,7 +370,7 @@ class FileSystemReportSource(ReportSource):
         for suite in suites:
             for tc in suite.findall("testcase"):
                 sections: list[str] = []
-                # Element truthiness is child-based, so test ``is not None``.
+                # Element truthiness is child-based, so test ``is not None`` explicitly.
                 for tag in ("failure", "error", "skipped"):
                     node = tc.find(tag)
                     if node is None:
@@ -366,7 +382,7 @@ class FileSystemReportSource(ReportSource):
                     if body:
                         sections.append(body)
                     break
-                # Captured logs -- present for passed tests too under junit_logging=all.
+                # Captured logs -- present even for passed tests under junit_logging=all.
                 for tag, label in (
                     ("system-out", "Captured stdout / log"),
                     ("system-err", "Captured stderr"),
@@ -412,10 +428,10 @@ class FileSystemReportSource(ReportSource):
             _log.warning("Skipping meta with missing/invalid identity: %r", meta)
             return None
 
-        # The counts/duration come from a semi-trusted sidecar (written by the test code
-        # the operator ran). A single corrupt value (non-numeric count, inf/NaN duration)
-        # must NOT crash the whole scan or leak non-spec JSON -- coerce defensively and
-        # keep the run, mirroring the identity skip above and test_outcomes' finite guard.
+        # Counts/duration come from a semi-trusted sidecar (written by the operator's test
+        # code). One corrupt value (non-numeric count, inf/NaN duration) must NOT crash the
+        # scan or leak non-spec JSON -- coerce defensively and keep the run, mirroring the
+        # identity skip above and test_outcomes' finite guard.
         summary = meta.get("summary")
         if not isinstance(summary, dict):
             summary = {}
@@ -443,7 +459,7 @@ _ALERTS_CAP = 50
 
 
 def _sanitize_alert_entry(entry: dict[str, Any]) -> dict[str, Any]:
-    """Reduce an alert record to its known, bounded fields (never trust the caller blindly)."""
+    """Reduce an alert record to its known, bounded fields -- never trust the caller."""
     recipients = entry.get("recipients") or []
     if not isinstance(recipients, (list, tuple)):
         recipients = []
@@ -481,7 +497,7 @@ def _safe_int(value: Any) -> int:
 
 def _safe_finite_float(value: Any) -> float:
     """A summary duration coerced to a finite float; ``0.0`` for bad/inf/NaN values
-    (non-finite floats are not JSON-spec and would 500 the serializer)."""
+    (non-finite floats aren't JSON-spec and would 500 the serializer)."""
     try:
         f = float(value)
     except (TypeError, ValueError):

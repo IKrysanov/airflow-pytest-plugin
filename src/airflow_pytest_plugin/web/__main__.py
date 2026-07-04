@@ -16,8 +16,7 @@
 
     python -m airflow_pytest_plugin.web --root ./pytest-reports --port 8000
 
-Then open http://127.0.0.1:8000/. Requires the ``[web]`` extra
-(``pip install 'airflow-pytest-plugin[web]'``).
+Requires the ``[web]`` extra (``pip install 'airflow-pytest-plugin[web]'``).
 """
 
 from __future__ import annotations

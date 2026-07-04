@@ -37,7 +37,7 @@ TAG = "compare"
 def diff_outcomes(
     base: dict[str, dict[str, Any]], head: dict[str, dict[str, Any]]
 ) -> dict[str, Any]:
-    """Categorise a base→head per-test diff into the five change buckets + counts."""
+    """Bucket a base→head per-test diff into the five change categories, plus counts."""
     cats: dict[str, Any] = {
         "newly_failed": [],
         "fixed": [],
@@ -47,14 +47,18 @@ def diff_outcomes(
     }
     for node in set(base) | set(head):
         b, h = base.get(node), head.get(node)
+        # ``.get`` mirrors the other test_outcomes consumers: a row without an
+        # outcome (a lax custom source) must degrade, not 500 the endpoint.
+        bo = b.get("outcome", "") if b is not None else None
+        ho = h.get("outcome", "") if h is not None else None
         if h is None and b is not None:
-            cats["removed"].append({"node_id": node, "outcome": b["outcome"]})
+            cats["removed"].append({"node_id": node, "outcome": bo})
         elif b is None and h is not None:
-            cats["added"].append({"node_id": node, "outcome": h["outcome"]})
+            cats["added"].append({"node_id": node, "outcome": ho})
         elif b is not None and h is not None:
-            bf, hf = b["outcome"] in FAIL_OUTCOMES, h["outcome"] in FAIL_OUTCOMES
+            bf, hf = bo in FAIL_OUTCOMES, ho in FAIL_OUTCOMES
             if bf or hf:
-                item = {"node_id": node, "base": b["outcome"], "head": h["outcome"]}
+                item = {"node_id": node, "base": bo, "head": ho}
                 if not bf and hf:
                     cats["newly_failed"].append(item)
                 elif bf and not hf:
@@ -112,12 +116,12 @@ def build_router(deps: RouteDeps) -> APIRouter:
         head: str,
         user: Any = Depends(user_dep),  # noqa: B008 - FastAPI dependency idiom
     ) -> JSONResponse:
-        """Per-test diff between two runs given their ``base`` and ``head`` tokens.
+        """Per-test diff between the runs named by the ``base`` and ``head`` tokens.
 
-        Buckets every test into ``newly_failed`` / ``fixed`` / ``still_failing`` /
-        ``added`` / ``removed`` (with a ``counts`` summary). Both runs must be
-        readable (``403``); ``400`` on a malformed token, ``404`` if either run has
-        no per-test map.
+        Tests are bucketed into ``newly_failed`` / ``fixed`` / ``still_failing`` /
+        ``added`` / ``removed``, with a ``counts`` summary. Both runs must be
+        readable (else ``403``); ``400`` on a malformed token, ``404`` if either run
+        lacks a per-test map.
         """
         base_ref = ref_from_token(base)
         head_ref = ref_from_token(head)

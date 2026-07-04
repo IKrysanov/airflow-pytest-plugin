@@ -14,23 +14,22 @@
 
 """Alerting: opt-in email notifications about an archived run, with adaptive HTML.
 
-Layered like :mod:`retention` so the decision is pure and testable, separate from the I/O:
+Layered like :mod:`retention` -- the decision is pure and testable, separate from the I/O:
 
 - :class:`AlertPolicy` -- value object (recipients, threshold, flaky window; ``from_config``).
 - :class:`RunFact` / :class:`Alert` -- plain data in, a ready-to-send email out (no I/O).
 - :func:`classify` / :func:`build_run_email` -- pure: a run's status (passed / flaky / failed)
-  and the styled email (subject + plain text + inline-CSS HTML) for it.
+  and the styled email (subject + plain text + inline-CSS HTML).
 - :class:`Mailer` -- transport protocol; :class:`AirflowMailer` (Airflow ``send_email``) and
   :class:`SmtpMailer` (standalone SMTP); :func:`build_mailer` picks one (explicit SMTP wins).
 - :func:`build_run_alert` / :func:`notify_for_run` -- gather failures + flaky from a
   ``ReportSource`` and emit/send the email.
 
-**When automatic emails go out** is decided by the producer's per-task ``email=`` flag, NOT here:
-``ArchivingResultParser(email=True)`` calls this with ``always=True`` -- a "run finished" notice
-for EVERY run (styled by outcome), so a team is notified without watching the run; ``email=False``
-(the default) sends nothing, so noisy ping/smoke suites stay silent. The UI "email this run"
-action also uses ``always=True``. Callers of the public ``notify_*`` functions get the quieter
-default ``always=False`` (email only on a failed / flaky run).
+**When automatic emails go out** is the producer's per-task ``email=`` flag, NOT here:
+``ArchivingResultParser(email=True)`` calls this with ``always=True`` -- a "run finished"
+notice for EVERY run (styled by outcome); ``email=False`` (the default) sends nothing, so noisy
+ping/smoke suites stay silent. The UI "email this run" action also uses ``always=True``. Public
+``notify_*`` functions default to the quieter ``always=False`` (email only on failed / flaky).
 """
 
 from __future__ import annotations
@@ -44,6 +43,7 @@ from html import escape
 from typing import TYPE_CHECKING, Any, Protocol
 from urllib.parse import quote
 
+from .compat.airflow import airflow_email_available, send_airflow_email
 from .config import (
     DEFAULT_FLAKY_MIN_SCORE,
     DEFAULT_FLAKY_WINDOW,
@@ -69,11 +69,10 @@ _MAX_LISTED = 12
 
 
 # -- recipients: validation + dedupe ----------------------------------------------------------
-#: Pragmatic, RFC-5321-bounded address shape: a printable local part (letters, digits and the
-#: common special characters; dots only BETWEEN atoms -- so no leading/trailing/double dots),
-#: then dot-separated LDH domain labels (start/end alphanumeric) and an alphabetic TLD. The
-#: charset excludes whitespace and control characters, which also blocks header injection.
-#: ``\Z`` (not ``$``) so a trailing newline can never sneak past the anchor.
+#: RFC-5321-bounded address shape: printable local part (dots only BETWEEN atoms -- no
+#: leading/trailing/double dots), dot-separated LDH domain labels, alphabetic TLD. The charset
+#: excludes whitespace and control chars, which also blocks header injection. ``\Z`` (not
+#: ``$``) so a trailing newline can't sneak past the anchor.
 _EMAIL_RE = re.compile(
     r"[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+)*"
     r"@"
@@ -85,8 +84,8 @@ _EMAIL_RE = re.compile(
 def is_valid_email(address: str) -> bool:
     """Whether ``address`` is a sane, safely-mailable email address.
 
-    Enforces the RFC 5321 length limits (local part <= 64, total <= 254) on top of the
-    shape check, so an address that passes here can be put in a header verbatim.
+    Adds RFC 5321 length limits (local <= 64, total <= 254) to the shape check, so a passing
+    address can go into a header verbatim.
     """
     if not address or len(address) > 254:
         return False
@@ -97,7 +96,7 @@ def is_valid_email(address: str) -> bool:
 
 
 def dedupe_emails(addresses: Sequence[str]) -> tuple[str, ...]:
-    """Case-insensitively deduped (one mailbox = one send), first spelling kept, order kept."""
+    """Dedupe case-insensitively (one mailbox = one send); keep first spelling and order."""
     seen: set[str] = set()
     out: list[str] = []
     for a in addresses:
@@ -120,16 +119,15 @@ class AlertPolicy:
 
     @property
     def is_active(self) -> bool:
-        """Whether there is anyone to email (no recipients -> nothing is sent)."""
+        """No recipients -> nothing is sent."""
         return bool(self.recipients)
 
     @classmethod
     def from_config(cls) -> AlertPolicy:
         """Build from env vars / Airflow cfg.
 
-        Configured recipients are normalized: invalid addresses are dropped (with a
-        warning -- one typo must not poison every send) and duplicates collapse
-        case-insensitively so one mailbox is mailed once.
+        Recipients are normalized: invalid addresses dropped with a warning (one typo mustn't
+        poison every send) and duplicates collapsed case-insensitively.
         """
         valid = []
         for address in get_alerts_recipients():
@@ -150,7 +148,7 @@ class AlertPolicy:
 # -- facts + result ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class RunFact:
-    """The facts the pure logic needs about one run -- no I/O."""
+    """What the pure logic needs to know about one run -- no I/O."""
 
     ref: ReportRef
     total: int
@@ -195,26 +193,26 @@ class Alert:
 
 # -- pure classification + rendering ----------------------------------------------------------
 def pass_rate_pct(run: RunFact) -> int:
-    """The run's pass-rate over *executed* tests, as a 0–100 int (100 if nothing ran)."""
+    """Pass-rate over *executed* tests, as a 0–100 int (100 if nothing ran)."""
     executed = run.passed + run.failed + run.errors
     return round(run.passed / executed * 100) if executed else 100
 
 
 def run_is_failing(run: RunFact, policy: AlertPolicy) -> bool:
-    """Whether ``run`` fell below the policy's success threshold."""
+    """Whether the run fell below the policy's success threshold."""
     return not run_succeeds(
         run.passed, run.failed, run.errors, policy.success_threshold
     )
 
 
 def classify(run: RunFact, policy: AlertPolicy, *, has_flaky: bool) -> str:
-    """A run's status for alerting: ``failed`` (below the bar) / ``flaky`` / ``passed``."""
+    """Alerting status: ``failed`` (below the bar) / ``flaky`` / ``passed``."""
     if run_is_failing(run, policy):
         return "failed"
     return "flaky" if has_flaky else "passed"
 
 
-#: Per-status label + colours for the email (fixed hex -- email clients have no CSS variables).
+#: Per-status label + colours (fixed hex -- email clients have no CSS variables).
 _STATUS = {
     "passed": {"label": "Passed", "icon": "✓", "color": "#16a34a", "bg": "#f0fdf4"},
     "flaky": {"label": "Flaky", "icon": "⚠", "color": "#b45309", "bg": "#fffbeb"},
@@ -240,8 +238,8 @@ def evaluate_alerts(
 ) -> list[Alert]:
     """Pure decision: the email(s) a run warrants.
 
-    Without ``always`` an email is produced only for a FAILED or FLAKY run (a clean pass yields
-    nothing). With ``always`` (the manual UI send) a passing run yields the green summary too.
+    Without ``always``, only a FAILED or FLAKY run produces an email. With ``always`` (the
+    manual UI send) a passing run yields the green summary too.
     """
     status = classify(run, policy, has_flaky=bool(flaky))
     if not always and status == "passed":
@@ -261,7 +259,7 @@ def build_run_email(
 ) -> Alert:
     """Build the styled email (subject + plain text + inline-CSS HTML) for one run.
 
-    Pure: every dynamic string (dag/task/run ids, test node ids) is HTML-escaped, so a hostile
+    Every dynamic string (dag/task/run ids, test node ids) is HTML-escaped, so a hostile
     ``meta.json`` value renders as inert text and can't inject markup.
     """
     meta = _STATUS.get(status, _STATUS["failed"])
@@ -386,9 +384,12 @@ def _render_html(
 #: One email attachment: (filename, payload bytes).
 Attachment = tuple[str, bytes]
 
-#: Attachments above this size are skipped (mail servers commonly reject ~25 MB messages,
-#: and a huge Allure archive must not stall the producer or the API worker).
+#: Attachments above this are skipped (mail servers commonly reject ~25 MB messages, and a huge
+#: Allure archive must not stall the producer or API worker).
 _MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
+#: Raw Allure results above this aren't even zipped (bounds peak memory before the
+#: compressed-size check above); generous vs the attachment cap since results compress well.
+_MAX_RAW_ALLURE_BYTES = 50 * 1024 * 1024
 
 
 class Mailer(Protocol):
@@ -408,15 +409,15 @@ class Mailer(Protocol):
 def _header_safe(value: str) -> str:
     """Collapse CR/LF (and stray control chars) so a value can't inject email headers.
 
-    Subjects interpolate ``dag_id``/``task_id``/``run_id`` from a semi-trusted ``meta.json``; the
-    stdlib already *rejects* newlines in a header, so this is defence in depth that also keeps a
-    legit alert deliverable instead of raising on an odd character.
+    Subjects interpolate ``dag_id``/``task_id``/``run_id`` from a semi-trusted ``meta.json``.
+    The stdlib already rejects newlines in a header, so this is defence in depth that also
+    keeps a legit alert deliverable instead of raising on an odd character.
     """
     return "".join(" " if c in "\r\n\t" or ord(c) < 32 else c for c in value).strip()
 
 
 class AirflowMailer:
-    """Sends via Airflow's configured SMTP (``airflow.utils.email.send_email``)."""
+    """Sends via Airflow's configured SMTP (see ``compat.airflow.send_airflow_email``)."""
 
     def send(
         self,
@@ -427,24 +428,12 @@ class AirflowMailer:
         html: str | None = None,
         attachments: Sequence[Attachment] = (),
     ) -> None:
-        import tempfile
-
-        from airflow.utils.email import send_email
-
-        # ``send_email`` takes file PATHS; stage byte attachments in a throwaway dir.
-        with tempfile.TemporaryDirectory(prefix="apx-mail-") as tmp:
-            files = []
-            for name, payload in attachments:
-                path = os.path.join(tmp, os.path.basename(name) or "attachment.bin")
-                with open(path, "wb") as fh:
-                    fh.write(payload)
-                files.append(path)
-            send_email(
-                to=list(recipients),
-                subject=_header_safe(subject),
-                html_content=html or _as_html(body),
-                files=files or None,
-            )
+        send_airflow_email(
+            to=list(recipients),
+            subject=_header_safe(subject),
+            html_content=html or _as_html(body),
+            attachments=attachments,
+        )
 
 
 @dataclass(frozen=True)
@@ -491,8 +480,8 @@ class SmtpConfig:
 
 
 class SmtpMailer:
-    """Sends via a standalone SMTP server (when ``AIRFLOW_PYTEST_SMTP_*`` is configured, or when
-    Airflow is not available). A plain-text + HTML ``multipart/alternative`` message."""
+    """Sends via a standalone SMTP server (when ``AIRFLOW_PYTEST_SMTP_*`` is set, or Airflow is
+    unavailable). A plain-text + HTML ``multipart/alternative`` message."""
 
     def __init__(self, cfg: SmtpConfig) -> None:
         self._cfg = cfg
@@ -533,32 +522,29 @@ class SmtpMailer:
 
 
 def _as_html(body: str) -> str:
-    """Wrap a plain-text body as minimal, escaped HTML (fallback when no styled HTML is given)."""
+    """Wrap a plain-text body as minimal escaped HTML (fallback when no styled HTML given)."""
     return '<pre style="font: 13px/1.5 monospace">' + escape(body) + "</pre>"
 
 
 def build_mailer() -> Mailer | None:
     """Pick a transport, preferring an explicitly-configured standalone SMTP.
 
-    If ``AIRFLOW_PYTEST_SMTP_HOST`` is set the operator clearly wants that server, so use it even
-    inside Airflow (whose own ``[smtp]`` may be unset) -- honouring explicit config avoids the
-    trap of silently routing through Airflow's ``send_email`` instead. Otherwise fall back to
-    Airflow's ``send_email`` when importable, else there is no transport (``None``).
+    If ``AIRFLOW_PYTEST_SMTP_HOST`` is set the operator wants that server, so use it even in
+    Airflow (whose own ``[smtp]`` may be unset) -- honouring explicit config avoids silently
+    routing through Airflow's ``send_email``. Otherwise fall back to Airflow's ``send_email``
+    when importable, else no transport (``None``).
     """
     cfg = SmtpConfig.from_config()
     if cfg is not None:
         return SmtpMailer(cfg)
-    try:
-        import airflow.utils.email  # noqa: F401
-
+    if airflow_email_available():
         return AirflowMailer()
-    except Exception:
-        return None
+    return None
 
 
 # -- I/O: gather the facts an email needs -----------------------------------------------------
 def _summary_for(source: ReportSource, ref: ReportRef) -> ReportSummary | None:
-    """Find the archived summary for exactly ``ref`` (or ``None`` if it isn't listed)."""
+    """The archived summary for exactly ``ref`` (``None`` if not listed)."""
     for s in source.list_summaries(dag_id=ref.dag_id):
         if s.ref == ref:
             return s
@@ -566,7 +552,7 @@ def _summary_for(source: ReportSource, ref: ReportRef) -> ReportSummary | None:
 
 
 def failed_nodes_for(source: ReportSource, ref: ReportRef) -> tuple[str, ...]:
-    """The failed/errored test node ids of one run (empty if per-test data is unavailable)."""
+    """Failed/errored test node ids of one run (empty if per-test data is unavailable)."""
     outcomes = source.test_outcomes(ref) or {}
     return tuple(
         sorted(
@@ -583,7 +569,7 @@ def flaky_nodes_for(
     window: int,
     min_score: float,
 ) -> tuple[str, ...]:
-    """Node ids that are flaky across the dag·task's most recent ``window`` runs (empty if <2)."""
+    """Node ids flaky across the dag·task's most recent ``window`` runs (empty if <2 runs)."""
     rows = [
         s
         for s in source.list_summaries(dag_id=dag_id)
@@ -621,9 +607,8 @@ def build_run_alert(
 ) -> Alert | None:
     """Gather a run's facts (failures + flaky) and build its styled email, or ``None``.
 
-    Returns ``None`` when the run is gone, or when it passed cleanly and ``always`` is off (so an
-    automatic pass sends nothing). Only reads what it needs: no flaky scan for a failing run, no
-    failure list for a passing one.
+    ``None`` when the run is gone, or when it passed cleanly and ``always`` is off (so an
+    automatic pass sends nothing).
     """
     summ = _summary_for(source, ref)
     if summ is None:
@@ -631,8 +616,8 @@ def build_run_alert(
     run = RunFact.from_summary(summ)
     failing = run_is_failing(run, policy)
     # Only read what the decision needs: no flaky scan for a failing run, no failure list for a
-    # passing one. The pure ``evaluate_alerts`` then classifies + applies the ``always`` gate --
-    # one decision point, so the logic isn't duplicated here.
+    # passing one. ``evaluate_alerts`` then classifies + applies the ``always`` gate -- one
+    # decision point, so the logic isn't duplicated here.
     flaky = (
         ()
         if failing
@@ -661,11 +646,13 @@ def allure_attachment(source: ReportSource, ref: ReportRef) -> tuple[Attachment,
     """The run's raw Allure results as a zip attachment, when present and small enough.
 
     Empty when the run has no Allure results, the source can't produce them, or the archive
-    exceeds ``_MAX_ATTACHMENT_BYTES`` (mail servers reject huge messages; skipping keeps the
-    notification deliverable instead of failing it).
+    exceeds ``_MAX_ATTACHMENT_BYTES`` -- skipping keeps the notification deliverable rather
+    than failing it.
     """
     try:
-        payload = source.allure_archive(ref)
+        # Bound peak memory: raw results beyond the raw cap aren't zipped in RAM (returns
+        # None). The compressed result is still checked below.
+        payload = source.allure_archive(ref, max_bytes=_MAX_RAW_ALLURE_BYTES)
     except Exception:  # a corrupt archive must not break the notification itself
         _log.exception("failed to build the Allure attachment for %s", ref.token)
         return ()
@@ -691,7 +678,7 @@ def record_sent_alert(
     ok: bool,
     manual: bool,
 ) -> None:
-    """Best-effort: append this send to the run's stored notification history."""
+    """Best-effort: append this send to the run's notification history."""
     try:
         source.record_alert(
             ref,
@@ -713,7 +700,7 @@ def _deliver(
     mailer: Mailer | None,
     attachments: Sequence[Attachment] = (),
 ) -> bool:
-    """Send one alert; ``True`` on success, ``False`` when skipped or failed (logged)."""
+    """Send one alert; ``True`` on success, ``False`` when skipped or failed (both logged)."""
     transport = mailer if mailer is not None else build_mailer()
     if transport is None:
         _log.warning("alert raised but no mail transport is configured; not sending")
@@ -743,10 +730,10 @@ def notify_for_run(
 ) -> list[Alert]:
     """Build and (unless ``dry_run``) send the alert for the run at ``ref``.
 
-    The email carries the run's Allure results as a zip attachment when available (size-capped),
-    and every real send attempt is appended to the run's stored notification history. Returns the
-    alert(s) raised (whether or not sent). A send failure is logged and skipped -- it never
-    propagates, so a broken mailer can't fail the surrounding task.
+    The email carries the run's Allure results as a size-capped zip when available, and every
+    real send attempt is recorded in the run's notification history. Returns the alert(s)
+    raised (sent or not). A send failure is logged and swallowed, so a broken mailer can't fail
+    the surrounding task.
     """
     resolved = policy if policy is not None else AlertPolicy.from_config()
     if not resolved.is_active:  # no recipients -> nothing to do
@@ -778,11 +765,22 @@ def notify_after_archive(
 ) -> list[Alert]:
     """Producer entry point: call right after archiving ``ref`` to email an alert.
 
-    Automatic (``always=False``) sends only on a failed / flaky run. Returns immediately without
-    touching the filesystem when no recipients are configured.
+    Automatic (``always=False``) sends only on a failed / flaky run. When no recipients are
+    configured it logs a warning (email was requested but nothing can be delivered) and
+    returns without touching the filesystem.
     """
     resolved = policy if policy is not None else AlertPolicy.from_config()
-    if not resolved.is_active:  # no recipients -> nothing to do (no filesystem touch)
+    if not resolved.is_active:
+        # Reached only when a per-task email flag asked us to notify, yet no recipients
+        # are configured -> the send would silently do nothing. Warn (once per run) so the
+        # misconfiguration is visible instead of leaving the operator guessing, then skip
+        # without touching the filesystem.
+        _log.warning(
+            "email notification requested for %s·%s but no recipients are configured "
+            "(set AIRFLOW_PYTEST_ALERTS_EMAIL_TO); nothing sent",
+            ref.dag_id,
+            ref.task_id,
+        )
         return []
     if source is None:
         from .sources import FileSystemReportSource

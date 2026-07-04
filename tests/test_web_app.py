@@ -671,6 +671,35 @@ def test_email_run_records_history_visible_in_detail(client, monkeypatch):
     assert alerts[0]["recipients"] == ["a@x.io"] and alerts[0]["kind"] == "failed"
 
 
+def test_email_run_accepts_string_recipients_and_rejects_non_list(client, monkeypatch):
+    import airflow_pytest_plugin.web.routes.reports as reports_mod
+
+    spy = _SpyMailer()
+    monkeypatch.setattr(reports_mod, "build_mailer", lambda: spy)
+    token = _first_token(client)
+    # A comma/semicolon string is parsed + deduped like a list.
+    r = client.post(
+        f"/api/reports/{token}/email",
+        json={"recipients": "a@x.io; b@x.io , A@X.IO"},
+    )
+    assert r.status_code == 200 and r.json()["recipients"] == ["a@x.io", "b@x.io"]
+    # A non-list, non-string recipients value is a clear 400.
+    r = client.post(
+        f"/api/reports/{token}/email", json={"recipients": {"not": "a list"}}
+    )
+    assert r.status_code == 400 and "list of email" in r.json()["detail"]
+
+
+def test_safe_reason_is_single_line_and_bounded():
+    from airflow_pytest_plugin.web.routes.reports import _safe_reason
+
+    out = _safe_reason(RuntimeError("line one\nline two\twith\rgaps"))
+    assert "\n" not in out and "\r" not in out and "\t" not in out
+    assert out.startswith("RuntimeError:")
+    assert len(_safe_reason(ValueError("x" * 500))) <= 200
+    assert _safe_reason(RuntimeError()) == "RuntimeError"  # empty message
+
+
 def test_email_run_requires_read_permission(reports_root, monkeypatch):
     import airflow_pytest_plugin.web.routes.reports as reports_mod
 
@@ -1542,3 +1571,42 @@ def test_unique_tests_respects_filter_and_rbac(reports_root):
     assert (
         c.get("/api/unique-tests?task_id=zzz").json()["count"] == 0
     )  # task filter excludes all
+
+
+# --- hardening: a lax custom source must degrade, never 500 --------------------------
+
+
+def test_endpoints_tolerate_source_rows_without_outcome(reports_root):
+    """Every ``test_outcomes`` consumer must survive a row lacking "outcome".
+
+    The filesystem source always writes the key, but the ``ReportSource`` contract is
+    open to custom implementations — a missing key must degrade to unknown/None, not
+    take the endpoint down with a KeyError 500.
+    """
+
+    class LaxSource(FileSystemReportSource):
+        def test_outcomes(self, ref):  # noqa: ARG002 - same shape for every run
+            return {"t.py::a": {"duration": 0.1}}
+
+    base = ReportRef("dag", "r1", "t", 1)
+    head = ReportRef("dag", "r2", "t", 1)
+    write_report(reports_root, base, created_at="2026-06-21T10:00:00+00:00")
+    write_report(reports_root, head, created_at="2026-06-21T11:00:00+00:00")
+    c = TestClient(
+        create_app(
+            LaxSource(report_root=reports_root),
+            authorizer=lambda dag_id, user: True,
+            read_authorizer=lambda dag_id, user: True,
+            user_dependency=lambda: _TEST_USER,
+        )
+    )
+
+    assert c.get("/api/flaky").status_code == 200
+    heat = c.get("/api/heatmap?dag_id=dag&task_id=t")
+    assert heat.status_code == 200
+    assert [t["node_id"] for t in heat.json()["tests"]] == ["t.py::a"]
+    assert c.get(f"/api/compare?base={base.token}&head={head.token}").status_code == 200
+    hist = c.get("/api/test-history?dag_id=dag&task_id=t&node_id=t.py::a")
+    assert hist.status_code == 200
+    entry = hist.json()["history"][0]
+    assert entry["outcome"] is None and entry["duration"] == 0.1

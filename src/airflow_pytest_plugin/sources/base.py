@@ -45,26 +45,29 @@ class ReportSource(ABC):
         """Permanently remove the report for ``ref``; ``True`` if one was removed."""
         raise NotImplementedError
 
-    def allure_archive(self, ref: ReportRef) -> bytes | None:
+    def allure_archive(
+        self, ref: ReportRef, *, max_bytes: int | None = None
+    ) -> bytes | None:
         """A zip of the report's raw Allure results, or ``None`` if it has none.
 
-        Optional capability (default: unsupported) for exporting to Allure TestOps.
+        ``max_bytes`` bounds peak memory: when set, a raw-results tree larger than the
+        budget yields ``None`` instead of building a huge zip in RAM (the email path uses
+        this). Optional; default unsupported. Feeds export to Allure TestOps.
         """
         return None
 
     def test_outcomes(self, ref: ReportRef) -> dict[str, dict[str, Any]] | None:
         """Map ``node_id -> {"outcome", "duration"}`` for one run, or ``None``.
 
-        Powers cross-run views (compare/flaky/history). Optional capability
-        (default: unsupported).
+        Powers cross-run views (compare/flaky/history). Optional; default unsupported.
         """
         return None
 
     def report_size(self, ref: ReportRef) -> int:
         """Bytes one report occupies on the backing store (``0`` if unknown).
 
-        Used by size-based retention. Optional capability (default: ``0``, which
-        leaves the size policy inert for sources that can't measure themselves).
+        Drives size-based retention. Optional; default ``0`` leaves that policy
+        inert for sources that can't measure themselves.
         """
         return 0
 
@@ -72,8 +75,7 @@ class ReportSource(ABC):
         """Append one email-notification record to the run's stored history.
 
         ``entry`` carries ``at``/``kind``/``recipients``/``ok``/``manual``; the history
-        surfaces in :class:`~..models.ReportDetail.alerts`. Optional capability
-        (default: unsupported -> ``False``); implementations must be best-effort and
-        never raise for ordinary storage problems.
+        surfaces in :class:`~..models.ReportDetail.alerts`. Optional; default returns
+        ``False``. Must be best-effort: never raise on ordinary storage problems.
         """
         return False

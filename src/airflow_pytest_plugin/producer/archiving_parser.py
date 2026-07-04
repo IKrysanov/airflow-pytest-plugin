@@ -39,12 +39,12 @@ _log = logging.getLogger(__name__)
 META_SCHEMA_VERSION = 1
 
 
-# The operator base is typed as Any when the operator package ships without type info (some
-# environments) and concretely typed in others -- so the misc subclass error only fires
-# sometimes. Listing `unused-ignore` keeps this quiet whether or not misc fires.
+# The operator base is Any when its package ships without type info, concretely typed
+# otherwise, so the misc subclass error fires only sometimes. `unused-ignore` keeps this
+# quiet either way.
 class ArchivingResultParser(JUnitResultParser):  # type: ignore[misc, unused-ignore]
-    """Archives each run under the reports layout: the operator's JUnit result
-    plus (with ``allure=True``) the raw Allure results for TestOps export."""
+    """Archive each run under the reports layout: the operator's JUnit result,
+    plus (with ``allure=True``) raw Allure results for TestOps export."""
 
     def __init__(
         self,
@@ -58,22 +58,20 @@ class ArchivingResultParser(JUnitResultParser):  # type: ignore[misc, unused-ign
         super().__init__()  # base report_dir stays None; we compute per-run
         self._report_root = os.path.abspath(report_root or get_reports_root())
         self._layout = layout or ReportLayout()
-        # When True, also point pytest at ``--alluredir`` (needs allure-pytest in
-        # the worker, else pytest errors on the unknown arg) so raw Allure results
-        # are archived alongside junit.xml for Allure TestOps export.
+        # When True, also pass pytest ``--alluredir`` (requires allure-pytest in the
+        # worker, else pytest errors on the unknown arg) so raw Allure results land
+        # beside junit.xml for TestOps export.
         self._allure = allure
-        # Per-task switches for AUTOMATIC email notifications (both need
-        # ``AIRFLOW_PYTEST_ALERTS_EMAIL_TO`` recipients + a mail transport configured):
-        #   email=True           -> a "run finished" mail after EVERY run (styled by outcome),
-        #                           for teams that want completion notices without watching.
-        #   email_only_fail=True -> mail ONLY when the run failed or is flaky -- no success
-        #                           mail (takes precedence when both flags are set).
-        # Both False (the default) -> nothing is emailed, so a noisy ping/smoke suite can't
-        # spam the mailbox.
+        # Per-task switches for automatic email (both need
+        # ``AIRFLOW_PYTEST_ALERTS_EMAIL_TO`` recipients + a mail transport):
+        #   email=True           -> mail after EVERY run (styled by outcome).
+        #   email_only_fail=True -> mail ONLY on fail/flaky, no success mail
+        #                           (wins when both flags are set).
+        # Both False (default) -> no mail, so a noisy ping/smoke suite can't spam the box.
         self._email = email
         self._email_only_fail = email_only_fail
-        # Ref resolved in report_request, reused by parse() to name the sidecar.
-        # One parser instance serves one task, so a single slot suffices.
+        # Ref resolved in report_request, reused by parse() to name the sidecar. One
+        # parser instance serves one task, so a single slot suffices.
         self._pending_ref: ReportRef | None = None
         self._pending_context: dict[str, Any] | None = None
 
@@ -82,9 +80,8 @@ class ArchivingResultParser(JUnitResultParser):  # type: ignore[misc, unused-ign
         return self._report_root
 
     def report_request(self, report_dir: str) -> ReportRequest:
-        # Resolve coordinates now (inside execute()) and point the base parser's
-        # report_dir at our archive location; reusing super() keeps the JUnit flags
-        # defined in one place.
+        # Resolve coordinates now (inside execute()) and aim the base parser's
+        # report_dir at our archive location; super() keeps the JUnit flags in one place.
         context = get_current_context()
         ref = self._resolve_ref(context)
         self._pending_ref = ref
@@ -115,8 +112,8 @@ class ArchivingResultParser(JUnitResultParser):  # type: ignore[misc, unused-ign
             _log.exception(
                 "Failed to write %s sidecar next to %s", META_FILENAME, report_path
             )
-        # Best-effort alerting: opt-in and fully isolated -- a mail/config failure must never
-        # mask the test outcome either. Returns immediately when alerting is disabled (default).
+        # Best-effort alerting: opt-in and isolated -- a mail/config failure must never
+        # mask the outcome either. No-ops immediately when disabled (default).
         try:
             self._maybe_notify()
         except Exception:
@@ -126,13 +123,12 @@ class ArchivingResultParser(JUnitResultParser):  # type: ignore[misc, unused-ign
     # -- internals -------------------------------------------------------
 
     def _maybe_notify(self) -> None:
-        """Email a notification for the run just archived, per the parser's opt-in flags.
+        """Email a notification for the run just archived, per the opt-in flags.
 
-        ``email=True`` -> a "run finished" mail for EVERY run (styled by outcome).
-        ``email_only_fail=True`` -> mail only when the run FAILED or is FLAKY (wins over
-        ``email=True``, so success mail can be switched off). Both off (the default) ->
-        nothing, so a noisy ping/smoke suite can't spam the mailbox. Imported lazily;
-        the default path does no work at all.
+        ``email=True`` -> mail for EVERY run (styled by outcome). ``email_only_fail=True``
+        -> mail only on fail/flaky (wins over ``email=True``, so success mail can be
+        silenced). Both off (default) -> nothing. Imported lazily; the default path does
+        no work.
         """
         if not self._email and not self._email_only_fail:
             return
@@ -204,8 +200,8 @@ class ArchivingResultParser(JUnitResultParser):  # type: ignore[misc, unused-ign
             "report_file": REPORT_FILENAME,
             "allure": self._archive_allure(out_dir, ref),
             "summary": result.to_xcom(),
-            # Compact per-test outcomes [node_id, outcome, duration] so cross-run
-            # views (compare/flaky/history) need not re-parse junit.xml.
+            # Compact [node_id, outcome, duration] rows so cross-run views
+            # (compare/flaky/history) need not re-parse junit.xml.
             "tests": _test_rows(result),
         }
         # Atomic write: a reader scanning concurrently never sees a half file.
@@ -215,7 +211,7 @@ class ArchivingResultParser(JUnitResultParser):  # type: ignore[misc, unused-ign
         os.replace(tmp, os.path.join(out_dir, META_FILENAME))
 
     def _archive_allure(self, out_dir: str, ref: ReportRef) -> bool:
-        """True if Allure results were produced here; drop an executor.json so the
+        """True if Allure results exist here; also drop an executor.json so the
         TestOps launch links back to this Airflow run. Best-effort."""
         allure_dir = os.path.join(out_dir, ALLURE_DIRNAME)
         try:
@@ -234,8 +230,8 @@ class ArchivingResultParser(JUnitResultParser):  # type: ignore[misc, unused-ign
 
 
 def _executor_json(ref: ReportRef) -> dict[str, Any]:
-    """Allure executor.json: shows the Airflow run as the build, linking the
-    TestOps launch back to the task instance when the base URL is configured."""
+    """Allure executor.json: presents the Airflow run as the build, linking the
+    TestOps launch back to the task instance when a base URL is configured."""
     data: dict[str, Any] = {
         "name": "Airflow",
         "type": "airflow",

@@ -28,7 +28,7 @@ from .sources import FileSystemReportSource, ReportSource
 from .version import __version__ as __version__
 
 if TYPE_CHECKING:
-    # Exposed lazily via __getattr__ so importing the package never imports FastAPI.
+    # Lazy via __getattr__ so importing the package never pulls in FastAPI.
     from .web import create_app as create_app
 
 __all__ = [

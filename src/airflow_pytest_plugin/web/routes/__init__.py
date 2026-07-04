@@ -14,7 +14,7 @@
 
 """HTTP routes, one module per OpenAPI tag.
 
-The submodules import FastAPI, so they are imported lazily from ``create_app``
-(never at package import) to keep the reader optional. Only ``common`` -- which
-has no FastAPI dependency -- is safe to import eagerly.
+Submodules import FastAPI, so ``create_app`` imports them lazily (never at
+package import) to keep the reader optional. Only ``common`` -- no FastAPI
+dependency -- is safe to import eagerly.
 """

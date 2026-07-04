@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Report routes — browse runs, per-test detail, history, the test catalogue, and
+"""Report routes: browse runs, per-test detail, history, the test catalogue, and
 emailing a run's summary."""
 
 from __future__ import annotations
@@ -47,7 +47,7 @@ _log = logging.getLogger(__name__)
 
 TAG = "reports"
 
-#: Cap recipients per email so the endpoint can't be turned into a mass-mailer.
+#: Recipient cap per email, so the endpoint can't be used as a mass-mailer.
 _MAX_EMAIL_RECIPIENTS = 10
 
 
@@ -70,15 +70,15 @@ def _user_label(user: Any) -> str:
 
 
 def _safe_reason(exc: Exception) -> str:
-    """A short, single-line summary of a send failure (type + message), safe to return to the
-    RBAC-gated caller: no traceback, no password (the mailer never puts it in the exception)."""
+    """One-line send-failure summary (type + message), safe for the RBAC-gated caller:
+    no traceback, no password (the mailer never puts it in the exception)."""
     msg = " ".join(str(exc).split())  # collapse whitespace/newlines
     text = f"{type(exc).__name__}: {msg}" if msg else type(exc).__name__
     return text[:200]
 
 
 async def _json_body(request: Request) -> dict[str, Any]:
-    """Parse the request's JSON object body, tolerating an empty/absent/invalid body."""
+    """Parse the JSON object body; tolerate an empty/absent/invalid body."""
     try:
         body = await request.json()
     except Exception:
@@ -89,14 +89,13 @@ async def _json_body(request: Request) -> dict[str, Any]:
 def _resolve_recipients(body: dict[str, Any]) -> tuple[str, ...]:
     """Validated recipients from the body, or the configured default when omitted.
 
-    Accepts a list or a comma/semicolon string. Every address is checked with the same
-    strict validator the alerting layer uses (``is_valid_email``) and rejected with a
-    plain-language HTTP ``400`` naming the bad address; the list is capped so the endpoint
-    can't be abused as a mass-mailer. Duplicates (case-insensitive) collapse to one send.
+    Accepts a list or a comma/semicolon string. Each address goes through the alerting
+    layer's strict ``is_valid_email``; a bad one raises HTTP ``400`` naming it. The list
+    is capped (no mass-mailing) and case-insensitive duplicates collapse to one send.
     """
     raw = body.get("recipients")
     if raw is None or raw == "":
-        # The configured default, normalized the same way (invalid dropped, deduped).
+        # Configured default, normalized the same way (invalid dropped, deduped).
         return dedupe_emails([a for a in get_alerts_recipients() if is_valid_email(a)])
     if isinstance(raw, str):
         raw = re.split(r"[,;]", raw)
@@ -120,19 +119,19 @@ def _resolve_recipients(body: dict[str, Any]) -> tuple[str, ...]:
     return deduped
 
 
-#: Cap on how many (newest) runs /api/unique-tests reads per-test maps from, so the
-#: KPI can't trigger an unbounded scan of every archived run on each filter change.
+#: Newest runs /api/unique-tests reads per-test maps from, so a filter change can't
+#: trigger an unbounded scan of every archived run.
 _UNIQUE_SCAN_CAP = 1000
 
 #: Caps on /api/slow output: regressions list and the slowest leaderboard.
 _SLOW_CAP = 1000
 _SLOW_TOP = 50
-#: Safety cap on how many run-meta files /api/slow reads per request (whole groups are
-#: skipped once exceeded; ``capped`` flags it), so a broad scan can't read every archive.
+#: Read budget: run-meta files /api/slow reads per request. Whole groups are skipped
+#: once exceeded (``capped`` flags it), so a broad scan can't read every archive.
 _SLOW_SCAN_CAP = 2000
 
-#: /api/heatmap bounds: at most this many recent runs (columns) and tests (rows) per
-#: request, so one dag·task's matrix can't blow up the payload or the read.
+#: /api/heatmap bounds — recent runs (columns) and tests (rows) per request, so one
+#: dag·task's matrix can't blow up the payload or the read.
 _HEATMAP_MAX_WINDOW = 100
 _HEATMAP_MAX_ROWS = 300
 
@@ -194,11 +193,10 @@ _EX_SLOW = {
 def summarize_groups(summaries: list[Any]) -> list[dict[str, Any]]:
     """Aggregate run summaries by dag·task (pure).
 
-    One entry per dag·task with the run count, how many passed (per the configured
-    success threshold), the pass rate, the average run duration, and the newest run's
-    status/time. Sorted by most-recent activity. Lets a grouped view or dashboard read
-    group stats without shipping every run -- the basis for scaling past in-browser
-    grouping.
+    One entry per dag·task: run count, passed count (per the configured success
+    threshold), pass rate, average run duration, and the newest run's status/time.
+    Sorted by most-recent activity. Lets a grouped view read group stats without
+    shipping every run -- how grouping scales past the in-browser approach.
     """
     order: list[tuple[str, str]] = []
     groups: dict[tuple[str, str], list[Any]] = {}
@@ -237,13 +235,12 @@ def slow_stats(
     """Duration stats for one test's run history (oldest→newest), pure.
 
     Always reports ``avg`` and ``last`` so the caller can rank the slowest tests. A
-    test counts as a regression (``regressed``) only with at least four runs, when the
-    recent half's average duration is both ``factor``× the older half's AND at least
-    ``min_delta`` seconds slower — the absolute floor keeps fast tests with jittery
-    ratios off the list. ``ratio`` is recent÷older (``None`` until enough runs, or when
-    the older half averaged 0 — an "appeared from nothing" jump). ``durations`` holds
-    only the runs where the test actually appeared, so the split-half compares the test
-    to itself; an intermittently-run test is split over appearances, not calendar slots.
+    regression (``regressed``) needs at least four runs and the recent half's average
+    both ``factor``× the older half AND ≥ ``min_delta`` s slower — the absolute floor
+    keeps fast tests with jittery ratios off the list. ``ratio`` is recent÷older
+    (``None`` until enough runs, or when the older half averaged 0 — an "appeared from
+    nothing" jump). ``durations`` holds only runs where the test actually appeared, so
+    the split-half compares the test to itself, split over appearances not calendar slots.
     """
     n = len(durations)
     avg = sum(durations) / n if n else 0.0
@@ -276,11 +273,11 @@ def build_heatmap(
 ) -> dict[str, Any]:
     """Build a test×run outcome matrix (pure) from a dag·task's runs (oldest→newest).
 
-    ``runs`` items are ``{"run_id", "created_at", "outcomes": {node_id: outcome}}``. Returns
-    one row per distinct test — a ``cells`` list of single-char codes aligned to ``runs``
+    ``runs`` items are ``{"run_id", "created_at", "outcomes": {node_id: outcome}}``. One
+    row per distinct test — a ``cells`` list of single-char codes aligned to ``runs``
     (``-`` where the test didn't run) — sorted most-broken first (fail+error count, then
-    flakiness/flips), capped at ``max_rows`` (``truncated`` flags it). The most-failing and
-    flakiest tests bubble to the top so a regression block or a flaky row is seen at a glance.
+    flip count), capped at ``max_rows`` (``truncated`` flags it). Failing and flaky tests
+    bubble up so a regression block or flaky row is seen at a glance.
     """
     n = len(runs)
     rows: dict[str, list[str]] = {}
@@ -341,11 +338,10 @@ def build_router(deps: RouteDeps) -> APIRouter:
     ) -> JSONResponse:
         """Run summaries, newest first.
 
-        Each entry carries the pass/fail/skip/error counts, duration, identity
-        (dag·run·task·try) and its opaque token. Optional ``dag_id`` / ``run_id``
-        narrow by case-insensitive substring. Only runs the caller may read are
-        returned (RBAC). ``success_threshold`` echoes the configured pass-rate bar
-        (0–1) so the UI can draw it on the chart.
+        Each entry carries pass/fail/skip/error counts, duration, identity
+        (dag·run·task·try) and its opaque token. Optional ``dag_id`` / ``run_id`` narrow
+        by case-insensitive substring. RBAC-filtered to readable runs.
+        ``success_threshold`` echoes the configured pass-rate bar (0–1) for the chart.
         """
         summaries = src.list_summaries(dag_id=dag_id, run_id=run_id)
         visible = [s for s in summaries if read_auth(s.ref.dag_id, user)]
@@ -369,8 +365,8 @@ def build_router(deps: RouteDeps) -> APIRouter:
     ) -> JSONResponse:
         """Runs aggregated by dag·task: count, pass-rate, and the newest run's
         status/time. Optional ``dag_id`` / ``task_id`` narrow by case-insensitive
-        substring; RBAC-filtered. Built for grouped views and dashboards so they can
-        show group stats without fetching every run (scales past in-browser grouping).
+        substring; RBAC-filtered. Lets grouped views show group stats without fetching
+        every run (scales past in-browser grouping).
         """
         task_q = (task_id or "").lower()
         visible = [
@@ -409,13 +405,11 @@ def build_router(deps: RouteDeps) -> APIRouter:
         Groups readable runs by dag·task, takes each group's most recent ``window``
         (default = the flaky window; clamped 2–200), and per test builds a duration
         sequence. ``regressed`` lists tests that got slower (recent-half avg ≥
-        ``factor``× the older half AND ≥ ``min_delta`` s), sorted worst-ratio first;
-        ``slowest`` is the top ``50`` by average duration (single-run / zero-time tests
-        are skipped so it means *reliably* slow). A test that speeds back up drops off
-        ``regressed`` (its recent half is no longer slower). Optional ``dag_id`` /
-        ``task_id`` / ``run_id`` narrow by substring (mirroring the run list);
-        RBAC-filtered. At most ``2000`` run-meta files are read per request; ``capped``
-        flags that some groups were skipped.
+        ``factor``× the older half AND ≥ ``min_delta`` s), worst-ratio first — one that
+        speeds back up drops off. ``slowest`` is the top ``50`` by average duration,
+        skipping single-run / zero-time tests so it means *reliably* slow. Optional
+        ``dag_id`` / ``task_id`` / ``run_id`` narrow by substring; RBAC-filtered. At most
+        ``2000`` run-meta files are read per request; ``capped`` flags skipped groups.
         """
         chosen = window if window is not None else get_flaky_window()
         win = max(2, min(chosen, 200))
@@ -436,7 +430,7 @@ def build_router(deps: RouteDeps) -> APIRouter:
         scanned = 0
         capped = False
         for (dag, task), summaries in groups.items():
-            if scanned >= _SLOW_SCAN_CAP:  # skip whole groups past the read budget
+            if scanned >= _SLOW_SCAN_CAP:  # past read budget: skip remaining groups
                 capped = True
                 break
             summaries.sort(key=lambda s: s.created_at or "", reverse=True)
@@ -451,12 +445,12 @@ def build_router(deps: RouteDeps) -> APIRouter:
                 item = {"dag_id": dag, "task_id": task, "node_id": node, **stats}
                 if stats["regressed"]:
                     regressed.append(item)
-                # Leaderboard wants reliably-slow tests: skip single-run / zero-time noise.
+                # Reliably-slow only: skip single-run / zero-time noise.
                 if stats["runs"] >= 2 and stats["avg"] > 0:
                     slowest.append(item)
 
         def _ratio_key(x: dict[str, Any]) -> float:
-            r = x["ratio"]  # None = was ~0s, now slow -> infinite increase, rank first
+            r = x["ratio"]  # None = was ~0s, now slow: treat as infinite, rank first
             return float("inf") if r is None else r
 
         regressed.sort(key=lambda x: (-_ratio_key(x), -(x["new_avg"] or 0)))
@@ -508,11 +502,11 @@ def build_router(deps: RouteDeps) -> APIRouter:
         user: Any = Depends(user_dep),  # noqa: B008 - FastAPI dependency idiom
     ) -> JSONResponse:
         """A test×run outcome matrix for one dag·task: rows = tests, columns = its recent
-        runs (oldest→newest), each cell the test's outcome (``p``/``f``/``e``/``s``; ``-`` =
-        didn't run that time). Rows are sorted most-broken first (fail+error count, then
-        flakiness) so regression blocks and flaky tests surface at the top. ``window``
-        defaults to the flaky window (clamped 2–``100``); rows are capped at ``300``
-        (``truncated`` flags it). ``403`` if the dag isn't readable.
+        runs (oldest→newest), each cell an outcome (``p``/``f``/``e``/``s``; ``-`` = didn't
+        run that time). Rows sorted most-broken first (fail+error count, then flakiness) so
+        regression blocks and flaky tests surface at the top. ``window`` defaults to the
+        flaky window (clamped 2–``100``); rows capped at ``300`` (``truncated`` flags it).
+        ``403`` if the dag isn't readable.
         """
         if not read_auth(dag_id, user):
             raise HTTPException(
@@ -533,7 +527,7 @@ def build_router(deps: RouteDeps) -> APIRouter:
                 "run_id": s.ref.run_id,
                 "created_at": s.created_at,
                 "outcomes": {
-                    node: info["outcome"]
+                    node: info.get("outcome", "")
                     for node, info in (src.test_outcomes(s.ref) or {}).items()
                 },
             }
@@ -560,8 +554,8 @@ def build_router(deps: RouteDeps) -> APIRouter:
     ) -> JSONResponse:
         """Full detail for one run, addressed by its opaque ``report_id`` token.
 
-        Includes every case's outcome, duration and captured output. ``400`` if the
-        token is malformed, ``403`` if the dag isn't readable, ``404`` if missing.
+        Includes every case's outcome, duration and captured output. ``400`` malformed
+        token, ``403`` dag not readable, ``404`` missing.
         """
         ref = ref_from_token(report_id)
         if not read_auth(ref.dag_id, user):
@@ -584,9 +578,8 @@ def build_router(deps: RouteDeps) -> APIRouter:
     ) -> JSONResponse:
         """Permanently delete one archived run and prune now-empty parent dirs.
 
-        Destructive: requires permission to **trigger** the run's DAG (RBAC),
-        not just read it. ``400`` on a bad token, ``403`` if not permitted, ``404``
-        if the run is already gone.
+        Destructive: requires permission to **trigger** the run's DAG (RBAC), not just
+        read it. ``400`` bad token, ``403`` not permitted, ``404`` already gone.
         """
         ref = ref_from_token(report_id)
         if not delete_auth(ref.dag_id, user):
@@ -623,10 +616,9 @@ def build_router(deps: RouteDeps) -> APIRouter:
     ) -> JSONResponse:
         """Email a summary of one run.
 
-        Requires permission to **read** the run's DAG (RBAC). Recipients may be supplied in
-        the JSON body (``{"recipients": ["a@x.io", ...]}`` or a comma/semicolon string) —
-        each is validated as an email address and the list is capped at
-        ``_MAX_EMAIL_RECIPIENTS``; omit them to use the configured
+        Requires permission to **read** the run's DAG (RBAC). Recipients may come from the
+        JSON body (``{"recipients": ["a@x.io", ...]}`` or a comma/semicolon string) — each
+        validated, list capped at ``_MAX_EMAIL_RECIPIENTS``; omit to use the configured
         ``AIRFLOW_PYTEST_ALERTS_EMAIL_TO``. ``400`` bad token / bad or missing recipients,
         ``403`` not readable, ``404`` run gone, ``503`` no mail transport, ``502`` send failed.
         """
@@ -665,12 +657,12 @@ def build_router(deps: RouteDeps) -> APIRouter:
         except Exception as exc:
             _log.warning("emailing run %s failed: %s", report_id, exc)
             record_sent_alert(src, ref, alert, recipients, ok=False, manual=True)
-            # Surface a short, safe reason (type + message, no traceback/password) so the caller
-            # can act -- e.g. "SMTPAuthenticationError: (535, ...)" or a connection timeout. The
-            # endpoint is RBAC-gated and the mailer never echoes the password, so this is safe.
+            # Surface a short, safe reason (type + message, no traceback/password) so the
+            # caller can act -- e.g. "SMTPAuthenticationError: (535, ...)". Safe because the
+            # endpoint is RBAC-gated and the mailer never echoes the password.
             raise HTTPException(status_code=502, detail=_safe_reason(exc)) from exc
         record_sent_alert(src, ref, alert, recipients, ok=True, manual=True)
-        # Audit: who emailed which run to how many recipients (count only -- no addresses).
+        # Audit: who emailed which run to how many recipients (count only, no addresses).
         _log.info(
             "emailed run %s·%s·%s to %d recipient(s) (user=%s)",
             ref.dag_id,
@@ -702,9 +694,8 @@ def build_router(deps: RouteDeps) -> APIRouter:
     ) -> Response:
         """The run's raw Allure results as a zip attachment.
 
-        Present only when the run was archived with ``ArchivingResultParser(allure=
-        True)``. ``400``/``403`` as for the detail; ``404`` when no Allure results
-        were captured.
+        Present only when archived with ``ArchivingResultParser(allure=True)``.
+        ``400``/``403`` as for the detail; ``404`` when no Allure results were captured.
         """
         ref = ref_from_token(report_id)
         if not read_auth(ref.dag_id, user):
@@ -759,14 +750,14 @@ def build_router(deps: RouteDeps) -> APIRouter:
     ) -> JSONResponse:
         """One test's outcome and duration across runs.
 
-        ``node_id`` is the pytest node id (``file::Class::test``). With both
-        ``dag_id`` and ``task_id`` given, returns the newest ``limit`` runs of that
-        EXACT dag·task (``null`` outcome when the test didn't run that time).
+        ``node_id`` is the pytest node id (``file::Class::test``). With both ``dag_id``
+        and ``task_id`` given, returns the newest ``limit`` runs of that EXACT dag·task
+        (``null`` outcome when the test didn't run that time).
 
-        With dag·task omitted (the *Unique tests* view), the history is MERGED across
-        every readable dag·task where this node id ran — the same test triggered from
-        two places shows a single, unified timeline. Each entry then also carries the
-        ``dag_id``/``task_id`` it came from. Newest ``limit`` runs (clamped 1–500).
+        With dag·task omitted (the *Unique tests* view), history is MERGED across every
+        readable dag·task where this node id ran, so the same test triggered from two
+        places shows one unified timeline; each entry then also carries its
+        ``dag_id``/``task_id``. Newest ``limit`` runs (clamped 1–500).
         """
         lim = max(1, min(limit, 500))
         history: list[dict[str, Any]] = []
@@ -788,8 +779,8 @@ def build_router(deps: RouteDeps) -> APIRouter:
                     {
                         "run_id": s.ref.run_id,
                         "created_at": s.created_at,
-                        "outcome": info["outcome"] if info else None,
-                        "duration": info["duration"] if info else None,
+                        "outcome": info.get("outcome") if info else None,
+                        "duration": info.get("duration") if info else None,
                     }
                 )
             return JSONResponse(
@@ -813,7 +804,7 @@ def build_router(deps: RouteDeps) -> APIRouter:
             scanned += 1
             info = (src.test_outcomes(s.ref) or {}).get(node_id)
             if info is None:
-                continue  # this test didn't run in this run
+                continue  # test didn't run in this run
             history.append(
                 {
                     "run_id": s.ref.run_id,
@@ -869,11 +860,10 @@ def build_router(deps: RouteDeps) -> APIRouter:
         """Distinct test node_ids across the visible (readable) runs, with a count.
 
         Powers the *Unique tests* KPI. Reads at most the ``1000`` newest runs so the
-        count stays cheap (``capped`` flags truncation). The body carries the full,
-        sorted catalogue only when ``full`` is set — i.e. when the user opens the list —
-        with per-test stats aggregated from the SAME scan (no extra I/O): ``runs`` (total
-        appearances), per-outcome counts (``passed`` / ``failed`` / ``errors`` /
-        ``skipped``) and ``avg_duration`` over those runs.
+        count stays cheap (``capped`` flags truncation). The full sorted catalogue is
+        included only when ``full`` is set (user opens the list), with per-test stats from
+        the SAME scan (no extra I/O): ``runs`` (total appearances), per-outcome counts
+        (``passed`` / ``failed`` / ``errors`` / ``skipped``) and ``avg_duration``.
         """
         task_q = (task_id or "").lower()
         seen: dict[str, dict[str, Any]] = {}  # node_id -> first-seen identity + tallies

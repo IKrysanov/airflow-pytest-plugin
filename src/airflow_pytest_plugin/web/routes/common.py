@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Shared dependencies and helpers for the route modules (no FastAPI at import)."""
+"""Shared route dependencies and helpers (no FastAPI import at module load)."""
 
 from __future__ import annotations
 
@@ -32,9 +32,9 @@ __all__ = ["FAIL_OUTCOMES", "Authorizer", "RouteDeps", "ok", "ref_from_token"]
 
 @dataclass(frozen=True)
 class RouteDeps:
-    """The runtime collaborators every route closes over.
+    """Runtime collaborators every route closes over.
 
-    Built once in ``create_app`` and passed to each module's ``build_router``.
+    Built once in ``create_app``, passed to each module's ``build_router``.
     """
 
     src: ReportSource
@@ -53,10 +53,10 @@ def ref_from_token(token: str) -> ReportRef:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-# -- OpenAPI helpers: real example payloads + status codes for Swagger --------
-# Endpoints return a raw JSONResponse, so FastAPI can't infer a schema (Swagger shows
-# an empty "string"). These attach a concrete example to the 200 and document the
-# error codes each route can return.
+# -- OpenAPI helpers: example payloads + status codes for Swagger -------------
+# Routes return a raw JSONResponse, so FastAPI infers no schema (Swagger would
+# show an empty "string"). These attach a concrete 200 example and document each
+# route's error codes.
 
 
 def ok(example: Any, description: str = "Successful response") -> dict[int | str, Any]:

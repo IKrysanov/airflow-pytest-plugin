@@ -12,16 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Retention: choose and delete old archived runs by age / count / size.
+"""Retention: delete old archived runs by age / count / size.
 
-Layered so the decision is pure and testable, separate from the I/O:
+Split so the decision stays pure and testable, apart from the I/O:
 
-- ``RetentionPolicy`` — the value object (limits, ``from_config``).
-- ``select_expired`` — pure: given run facts + a policy, which runs to delete.
+- ``RetentionPolicy`` — value object (limits, ``from_config``).
+- ``select_expired`` — pure: run facts + policy -> which runs to delete.
 - ``prune`` — orchestrator: list + measure via a ``ReportSource``, then delete.
 
-Across every policy the **newest run of each dag·task is always kept**, so a task's
-latest result never disappears.
+Every policy **always keeps the newest run of each dag·task**, so a task's latest
+result never disappears.
 """
 
 from __future__ import annotations
@@ -46,15 +46,15 @@ _log = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class RetentionPolicy:
-    """Limits for retention; ``None`` on a field means that dimension is unbounded."""
+    """Retention limits; ``None`` on a field means that dimension is unbounded."""
 
     max_age_days: int | None = None
     max_runs_per_task: int | None = None
     max_total_bytes: int | None = None
 
     def __post_init__(self) -> None:
-        # A non-positive limit is nonsensical and would break the keep-newest
-        # invariant (e.g. max_runs_per_task=0 would mark a group's newest run).
+        # A non-positive limit would break the keep-newest invariant
+        # (e.g. max_runs_per_task=0 would mark a group's newest run).
         for name in ("max_age_days", "max_runs_per_task", "max_total_bytes"):
             value = getattr(self, name)
             if value is not None and value <= 0:
@@ -64,7 +64,7 @@ class RetentionPolicy:
 
     @property
     def is_active(self) -> bool:
-        """Whether any limit is set (an inactive policy deletes nothing)."""
+        """True if any limit is set; an inactive policy deletes nothing."""
         return any(
             v is not None
             for v in (self.max_age_days, self.max_runs_per_task, self.max_total_bytes)
@@ -72,12 +72,12 @@ class RetentionPolicy:
 
     @property
     def needs_sizes(self) -> bool:
-        """Whether evaluating it requires measuring report sizes (the size policy)."""
+        """True if evaluation needs report sizes measured (the size policy)."""
         return self.max_total_bytes is not None
 
     @classmethod
     def from_config(cls) -> RetentionPolicy:
-        """Build from the env vars / Airflow cfg (all opt-in; default = keep all)."""
+        """Build from env vars / Airflow cfg (all opt-in; default = keep all)."""
         mb = get_retention_max_total_mb()
         return cls(
             max_age_days=get_retention_max_age_days(),
@@ -88,7 +88,7 @@ class RetentionPolicy:
 
 @dataclass(frozen=True)
 class RunEntry:
-    """The facts ``select_expired`` needs about one run -- no I/O."""
+    """What ``select_expired`` needs to know about one run -- no I/O."""
 
     ref: ReportRef
     created_at: str | None  # ISO-8601, as stored in meta.json
@@ -99,7 +99,7 @@ class RunEntry:
 class RetentionResult:
     """What a prune did (or would do, under ``dry_run``)."""
 
-    deleted: tuple[str, ...]  # tokens of the deleted (or would-be-deleted) runs
+    deleted: tuple[str, ...]  # tokens of the (would-be-)deleted runs
     freed_bytes: int
     scanned: int
     dry_run: bool
@@ -119,7 +119,7 @@ class RetentionResult:
 
 
 def _parse_dt(value: str | None) -> datetime | None:
-    """Parse an ISO timestamp to an aware datetime (assume UTC if naive), else None."""
+    """Parse an ISO timestamp to an aware datetime (naive -> UTC), else None."""
     if not value:
         return None
     try:
@@ -134,9 +134,9 @@ def select_expired(
 ) -> list[ReportRef]:
     """Pure decision: which runs to delete under ``policy`` as of ``now``.
 
-    The newest run of each dag·task is never selected. Age and count act per
-    dag·task; size trims oldest-first across all tasks until the tree fits the
-    budget. The dimensions combine as a union.
+    Never selects a dag·task's newest run. Age and count act per dag·task; size
+    trims oldest-first across all tasks until the tree fits the budget. The
+    dimensions combine as a union.
     """
     if not policy.is_active:
         return []
@@ -147,18 +147,18 @@ def select_expired(
     for group in groups.values():
         group.sort(key=lambda e: e.created_at or "", reverse=True)  # newest first
 
-    marked: dict[str, RunEntry] = {}  # token -> entry (dedup, insertion-ordered)
+    marked: dict[str, RunEntry] = {}  # token -> entry; dedups, keeps insertion order
 
     def mark(entry: RunEntry) -> None:
         marked.setdefault(entry.ref.token, entry)
 
-    # Count: keep the newest N of each dag·task.
+    # Count: keep only the newest N per dag·task.
     if policy.max_runs_per_task is not None:
         for group in groups.values():
             for entry in group[policy.max_runs_per_task :]:
                 mark(entry)
 
-    # Age: drop runs older than the cutoff -- but never a group's newest (group[1:]).
+    # Age: drop runs past the cutoff, but never a group's newest (hence group[1:]).
     if policy.max_age_days is not None:
         cutoff = now - timedelta(days=policy.max_age_days)
         for group in groups.values():
@@ -167,7 +167,7 @@ def select_expired(
                 if dt is not None and dt < cutoff:
                     mark(entry)
 
-    # Size: if the tree still exceeds the budget, delete oldest-first (never a
+    # Size: while the tree exceeds the budget, delete oldest-first (never a
     # group's newest) until it fits or only protected runs remain.
     if policy.max_total_bytes is not None:
         remaining = sum(e.size for e in entries) - sum(e.size for e in marked.values())
@@ -194,8 +194,8 @@ def prune(
 ) -> RetentionResult:
     """Apply ``policy`` (default: from config) to ``source``, deleting expired runs.
 
-    With ``dry_run`` nothing is deleted -- the result still lists what would go.
-    Pass ``now`` for deterministic age handling (defaults to the current UTC time).
+    Under ``dry_run`` nothing is deleted, but the result still lists what would go.
+    Pass ``now`` for deterministic age handling; defaults to the current UTC time.
     """
     resolved = policy if policy is not None else RetentionPolicy.from_config()
     if not resolved.is_active:
@@ -243,7 +243,7 @@ def prune_reports(
 ) -> RetentionResult:
     """Entry point for a scheduled maintenance task (e.g. a ``PythonOperator``).
 
-    Defaults to the filesystem source and the policy from config -- so a bare
+    Defaults to the filesystem source and the config policy, so a bare
     ``prune_reports`` callable Just Works once the env/cfg limits are set.
     """
     if source is None:

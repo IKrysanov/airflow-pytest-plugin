@@ -18,6 +18,7 @@ gather/orchestrator against a real temp filesystem source + a spy mailer, config
 from __future__ import annotations
 
 import json
+import logging
 import os
 
 import pytest
@@ -514,6 +515,35 @@ def test_notify_after_archive_inactive_needs_no_source(monkeypatch):
     assert notify_after_archive(ReportRef("dag", "r", "t", 1, -1)) == []
 
 
+def test_notify_after_archive_warns_when_email_requested_but_no_recipients(
+    monkeypatch, caplog
+):
+    # email=True path reaches the orchestrator, but no recipients configured -> warn once
+    # (instead of the old silent no-op) so the misconfiguration is visible.
+    monkeypatch.delenv("AIRFLOW_PYTEST_ALERTS_EMAIL_TO", raising=False)
+    with caplog.at_level(logging.WARNING):
+        out = notify_after_archive(ReportRef("dag", "suite", "t", 1, -1))
+    assert out == []
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("no recipients are configured" in m for m in warnings)
+
+
+def test_notify_after_archive_no_recipient_warning_when_configured(
+    reports_root, caplog
+):
+    # With recipients present the misconfiguration warning must NOT fire.
+    _write_run(reports_root, "dag", "suite", "r0", [("b", "failed")], _WHEN)
+    with caplog.at_level(logging.WARNING):
+        notify_after_archive(
+            ReportRef("dag", "r0", "suite", 1, -1),
+            source=FileSystemReportSource(report_root=reports_root),
+            policy=_ACTIVE,
+        )
+    assert not any(
+        "no recipients are configured" in r.getMessage() for r in caplog.records
+    )
+
+
 def test_notify_after_archive_failure(reports_root):
     _write_run(reports_root, "dag", "suite", "r0", [("b", "failed")], _WHEN)
     out = notify_after_archive(
@@ -772,6 +802,67 @@ def test_detail_tolerates_corrupt_alerts_field(reports_root):
     assert src.record_alert(ReportRef("dag", "r0", "suite", 1, -1), {"ok": True})
 
 
+# --- audit follow-up: helper + edge coverage ---------------------------------------------------
+def test_header_safe_strips_control_chars():
+    from airflow_pytest_plugin.notifications import _header_safe
+
+    out = _header_safe("a\r\nBcc: evil@x.io")
+    assert "\r" not in out and "\n" not in out  # no header injection survives
+    assert _header_safe("  x\x00y  ") == "x y"  # NUL -> space, then trimmed
+    assert _header_safe("plain subject") == "plain subject"
+
+
+def test_smtp_config_port_falls_back_on_garbage(monkeypatch):
+    monkeypatch.setenv("AIRFLOW_PYTEST_SMTP_HOST", "mail")
+    monkeypatch.setenv("AIRFLOW_PYTEST_SMTP_PORT", "not-a-number")
+    cfg = SmtpConfig.from_config()
+    assert cfg is not None and cfg.port == 25  # ValueError -> default
+
+
+def test_flaky_nodes_for_window_edges(reports_root):
+    src = FileSystemReportSource(report_root=reports_root, scan_cache_ttl=0)
+    # < 2 runs -> nothing can flip -> ().
+    _write_run(reports_root, "d1", "s", "r0", [("t", "failed")], _WHEN)
+    assert flaky_nodes_for(src, "d1", "s", window=30, min_score=0.0) == ()
+    # window smaller than history: only the newest `window` runs are considered, so an old
+    # flip outside the window doesn't count.
+    for i, o in enumerate(["failed", "passed"] + ["passed"] * 4):
+        _write_run(
+            reports_root, "d2", "s", f"r{i}", [("t", o)], f"2026-06-01T0{i}:00:00+00:00"
+        )
+    assert (
+        flaky_nodes_for(src, "d2", "s", window=2, min_score=0.0) == ()
+    )  # last 2 both pass
+    assert "t" in flaky_nodes_for(
+        src, "d2", "s", window=30, min_score=0.0
+    )  # full history flips
+
+
+def test_allure_attachment_swallows_source_errors(reports_root):
+    from airflow_pytest_plugin.notifications import allure_attachment
+
+    src = FileSystemReportSource(report_root=reports_root, scan_cache_ttl=0)
+
+    class _Boom(type(src)):
+        def allure_archive(self, ref, *, max_bytes=None):
+            raise RuntimeError("disk error")
+
+    boom = _Boom(report_root=reports_root, scan_cache_ttl=0)
+    assert (
+        allure_attachment(boom, ReportRef("dag", "r0", "suite", 1, -1)) == ()
+    )  # no raise
+
+
+def test_allure_archive_max_bytes_skips_oversized(reports_root):
+    ref = ReportRef("dag", "r0", "suite", 1, -1)
+    _write_run(reports_root, "dag", "suite", "r0", [("a", "passed")], _WHEN)
+    write_allure(reports_root, ref, {"big.json": "x" * 5000})
+    src = FileSystemReportSource(report_root=reports_root, scan_cache_ttl=0)
+    assert src.allure_archive(ref, max_bytes=100) is None  # raw 5000 > 100 -> skipped
+    assert src.allure_archive(ref, max_bytes=10_000) is not None  # fits
+    assert src.allure_archive(ref) is not None  # unbounded (download path)
+
+
 # --- producer hook -----------------------------------------------------------------------------
 def test_parser_email_true_notifies(monkeypatch, reports_root):
     from airflow_pytest_plugin import notifications
@@ -835,3 +926,57 @@ def test_parser_email_only_fail_overrides_email_true(monkeypatch, reports_root):
     parser._pending_ref = ReportRef("dag", "run1", "task", 1, -1)
     parser._maybe_notify()
     assert len(calls) == 1 and calls[0]["always"] is False
+
+
+# --- AirflowMailer: the compat-shim delegation ------------------------------------------
+
+
+def test_airflow_mailer_sanitizes_subject_and_builds_fallback_html(monkeypatch):
+    # Subject goes through _header_safe (no CR/LF may reach a mail header) and a
+    # missing HTML body falls back to the escaped <pre> wrapper of the plain text.
+    from airflow_pytest_plugin.notifications import AirflowMailer
+
+    captured: dict = {}
+
+    def fake_send(*, to, subject, html_content, attachments=()):
+        captured.update(
+            to=to, subject=subject, html=html_content, attachments=attachments
+        )
+
+    monkeypatch.setattr(
+        "airflow_pytest_plugin.notifications.send_airflow_email", fake_send
+    )
+    AirflowMailer().send(
+        subject="Evil\r\nBcc: attacker@x.io",
+        body="<plain & body>",
+        recipients=("a@x.io", "b@x.io"),
+    )
+    assert "\r" not in captured["subject"] and "\n" not in captured["subject"]
+    assert "Bcc: attacker@x.io" in captured["subject"]  # collapsed inline, not a header
+    assert captured["to"] == ["a@x.io", "b@x.io"]
+    assert captured["html"].startswith("<pre")
+    assert "&lt;plain &amp; body&gt;" in captured["html"]  # escaped, inert
+    assert captured["attachments"] == ()
+
+
+def test_airflow_mailer_prefers_supplied_html_and_forwards_attachments(monkeypatch):
+    from airflow_pytest_plugin.notifications import AirflowMailer
+
+    captured: dict = {}
+
+    def fake_send(*, to, subject, html_content, attachments=()):
+        captured.update(html=html_content, attachments=attachments)
+
+    monkeypatch.setattr(
+        "airflow_pytest_plugin.notifications.send_airflow_email", fake_send
+    )
+    payload = (("allure-results.zip", b"PK\x03\x04"),)
+    AirflowMailer().send(
+        subject="S",
+        body="plain",
+        recipients=("a@x.io",),
+        html="<b>rich</b>",
+        attachments=payload,
+    )
+    assert captured["html"] == "<b>rich</b>"  # supplied HTML wins over the fallback
+    assert captured["attachments"] == payload

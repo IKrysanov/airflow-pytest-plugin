@@ -408,14 +408,25 @@ A run is "failing" below `AIRFLOW_PYTEST_SUCCESS_THRESHOLD` (the same 0–1 bar 
 KPI uses; default `0.85`) — which is what colours the email. Recipients + transport are configured
 once, one of two ways:
 
-**Airflow mode** — mail rides Airflow's own SMTP; just set the recipients (configure `[smtp]` in
-`airflow.cfg` / the `smtp_default` connection separately, per the
+**Airflow mode** — mail rides Airflow's own SMTP. Set the recipients here, then configure Airflow's
+SMTP the standard way (per the
 [Airflow email guide](https://airflow.apache.org/docs/apache-airflow/stable/howto/email-config.html)):
 
 ```bash
 export AIRFLOW_PYTEST_ALERTS_EMAIL_TO="team@example.com, oncall@example.com"
 export AIRFLOW_PYTEST_SUCCESS_THRESHOLD=0.85   # optional
 ```
+
+On Airflow 3 the default backend (`airflow.utils.email.send_email`) takes the SMTP **host / port /
+STARTTLS from the `[smtp]` config** but the **login / password from the `smtp_default` connection** —
+so you usually need *both*, present on the service that runs the task (the **worker**), not only the
+scheduler / API server. A minimal Gmail setup:
+
+- `[smtp]` (env on every Airflow service): `AIRFLOW__SMTP__SMTP_HOST=smtp.gmail.com`,
+  `AIRFLOW__SMTP__SMTP_PORT=587`, `AIRFLOW__SMTP__SMTP_STARTTLS=True`, `AIRFLOW__SMTP__SMTP_SSL=False`,
+  `AIRFLOW__SMTP__SMTP_MAIL_FROM=you@gmail.com`.
+- `smtp_default` **connection**: type SMTP, host `smtp.gmail.com`, port `587`, login `you@gmail.com`,
+  password = a Gmail **App Password** (2FA required; strip the spaces).
 
 **Standalone mode** — no Airflow SMTP available (the bundled dev server, or a worker without mail
 configured), so also point the built-in SMTP client at your server:
