@@ -1650,3 +1650,17 @@ def test_email_endpoint_log_lines_are_single_line(reports_root, monkeypatch, cap
     assert r.status_code == 200
     for rec in caplog.records:
         assert "\n" not in rec.getMessage() and "\r" not in rec.getMessage()
+
+
+def test_common_all_declares_its_cross_module_exports():
+    # ERR_400/403/404 are imported by sibling route modules but not referenced inside
+    # common.py, so CodeQL's intra-module unused-global check flags them unless they're
+    # in __all__. Pin __all__ so a refactor can't silently drop them (and re-trigger it).
+    from airflow_pytest_plugin.web.routes import common
+
+    for name in ("ERR_400", "ERR_403", "ERR_404"):
+        assert name in common.__all__
+        assert isinstance(getattr(common, name), dict) and getattr(common, name)
+    # No dangling name in __all__ (every export must resolve).
+    for name in common.__all__:
+        assert hasattr(common, name), f"__all__ lists undefined {name!r}"
