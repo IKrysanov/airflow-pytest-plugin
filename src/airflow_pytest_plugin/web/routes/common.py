@@ -27,7 +27,16 @@ from ...sources import ReportSource
 #: An authorizer: ``(dag_id, user) -> bool``. ``user`` is ``None`` standalone.
 Authorizer = Callable[[str, Any], bool]
 
-__all__ = ["FAIL_OUTCOMES", "Authorizer", "RouteDeps", "ok", "ref_from_token"]
+__all__ = [
+    "ERR_400",
+    "ERR_403",
+    "ERR_404",
+    "FAIL_OUTCOMES",
+    "Authorizer",
+    "RouteDeps",
+    "ok",
+    "ref_from_token",
+]
 
 
 @dataclass(frozen=True)

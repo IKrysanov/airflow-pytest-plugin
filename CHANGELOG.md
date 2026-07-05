@@ -45,7 +45,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   endpoint sanitizes every user-influenced value it logs (the raw token and the token-derived
   `dag_id`/`run_id`, which an unsigned token lets an attacker fill with newlines) to a single
   line. **ReDoS**: the email validator is now regex-free — plain character-set and length
-  checks, provably linear on any input. Plus a removed no-effect statement.
+  checks, provably linear on any input. Plus a removed no-effect statement. Three `unused-global-variable` findings on `common.py`'s shared error-response
+  constants (`ERR_400/403/404`) resolved by declaring them in `__all__` — they are used by
+  sibling route modules, so the finding was a stale intra-module false positive.
 
 ### Internal
 - `flaky_core` extracted (web-free flaky scoring); Airflow's mail API wrapped in `compat.airflow`
