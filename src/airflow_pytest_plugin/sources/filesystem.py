@@ -202,7 +202,10 @@ class FileSystemReportSource(ReportSource):
             for c in result.cases
         )
         return ReportDetail(
-            summary=summary, cases=cases, alerts=_alerts_from_meta(meta)
+            summary=summary,
+            cases=cases,
+            alerts=_alerts_from_meta(meta),
+            coverage=_coverage_from_meta(meta),
         )
 
     def test_outcomes(self, ref: ReportRef) -> dict[str, dict[str, Any]] | None:
@@ -285,6 +288,32 @@ class FileSystemReportSource(ReportSource):
             return True
         except Exception:
             _log.exception("Failed to record an alert in %s", meta_file)
+            return False
+
+    def record_coverage(self, ref: ReportRef, coverage: float) -> bool:
+        """Bake a run's overall coverage fraction into its ``meta.json`` (idempotent).
+
+        Called once by the reader when it first pulls coverage from the operator's XCom,
+        so the value becomes a persistent part of the report (shown immediately on every
+        later view, no XCom round-trip). Atomic write like :meth:`record_alert`; never
+        raises on storage problems.
+        """
+        report_dir = self._safe_dir(ref)
+        if report_dir is None:
+            return False
+        meta_file = Path(os.path.join(report_dir, META_FILENAME))
+        meta = self._load_meta(meta_file)
+        if meta is None:
+            return False
+        try:
+            meta["coverage"] = float(coverage)
+            tmp = f"{meta_file}.{uuid.uuid4().hex}.tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(meta, fh, ensure_ascii=False)
+            os.replace(tmp, meta_file)
+            return True
+        except Exception:
+            _log.exception("Failed to record coverage in %s", meta_file)
             return False
 
     def report_size(self, ref: ReportRef) -> int:
@@ -481,6 +510,16 @@ def _alerts_from_meta(meta: dict[str, Any] | None) -> tuple[dict[str, Any], ...]
         for a in meta["alerts"][-_ALERTS_CAP:]
         if isinstance(a, dict)
     )
+
+
+def _coverage_from_meta(meta: dict[str, Any] | None) -> float | None:
+    """The baked-in coverage fraction (0-1) from a run's meta, or ``None``."""
+    if not isinstance(meta, dict):
+        return None
+    coverage = meta.get("coverage")
+    if isinstance(coverage, (int, float)) and not isinstance(coverage, bool):
+        return float(coverage) if 0.0 <= coverage <= 1.0 else None
+    return None
 
 
 def _opt_str(value: Any) -> str | None:

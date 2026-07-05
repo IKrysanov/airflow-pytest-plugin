@@ -67,9 +67,11 @@ select a whole group to chart its trend:
 ![Pytest Reports — overview](https://raw.githubusercontent.com/IKrysanov/airflow-pytest-plugin/main/docs/screenshots/overview.png)
 
 **A single run** — a clickable success donut (pass-rate over the test count;
-click a slice to filter by status), a **test-duration histogram** (10-second
-buckets, scrollable), case search / group-by-module, and every test's captured
-output on expand:
+click a slice to filter by status), a **coverage** card next to the duration (when the
+run was produced by [`airflow-pytest-operator`](https://github.com/IKrysanov/airflow-pytest-operator)
+`>= 0.6` with `coverage=True`, which pushes the overall line-coverage fraction to XCom —
+otherwise omitted), a **test-duration histogram** (10-second buckets, scrollable), case
+search / group-by-module, and every test's captured output on expand:
 
 ![Pytest Reports — a single run](https://raw.githubusercontent.com/IKrysanov/airflow-pytest-plugin/main/docs/screenshots/detail.png)
 

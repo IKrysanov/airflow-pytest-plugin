@@ -1664,3 +1664,147 @@ def test_common_all_declares_its_cross_module_exports():
     # No dangling name in __all__ (every export must resolve).
     for name in common.__all__:
         assert hasattr(common, name), f"__all__ lists undefined {name!r}"
+
+
+def _fresh_iso() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat()
+
+
+def test_detail_bakes_coverage_from_xcom_then_serves_without_reread(
+    reports_root, monkeypatch
+):
+    # A just-finished run's coverage lands in XCom slightly after the report is archived,
+    # so the detail route probes XCom, bakes the value into the report, and thereafter
+    # serves it from the report (no further XCom round-trip). Fresh run -> keeps probing
+    # until coverage appears.
+    write_report(
+        reports_root, ReportRef("dag", "run", "task", 1), created_at=_fresh_iso()
+    )
+    c = TestClient(make_app(reports_root))
+    tok = ReportRef("dag", "run", "task", 1, -1).token
+
+    # Not committed yet -> null (bench hidden); a fresh run is NOT negative-cached.
+    monkeypatch.setattr(
+        "airflow_pytest_plugin.web.routes.reports.get_run_coverage",
+        lambda *a: None,
+    )
+    assert c.get(f"/api/reports/{tok}").json()["coverage"] is None
+
+    # Operator committed 0.83 -> surfaced verbatim AND baked into the report.
+    xcom_calls = []
+    monkeypatch.setattr(
+        "airflow_pytest_plugin.web.routes.reports.get_run_coverage",
+        lambda dag, run, task, mi: (xcom_calls.append(1), 0.83)[1],
+    )
+    assert c.get(f"/api/reports/{tok}").json()["coverage"] == 0.83
+    assert len(xcom_calls) == 1  # XCom read once
+
+    # Now XCom raises if touched -> coverage still 0.83, served from the report (baked in),
+    # and XCom is NOT queried again (it's part of the report now).
+    monkeypatch.setattr(
+        "airflow_pytest_plugin.web.routes.reports.get_run_coverage",
+        lambda *a: (_ for _ in ()).throw(AssertionError("XCom must not be re-read")),
+    )
+    assert c.get(f"/api/reports/{tok}").json()["coverage"] == 0.83
+
+
+def test_detail_negative_cache_stops_reprobing_settled_run(reports_root, monkeypatch):
+    # A run old enough to have settled (default fixed created_at is well in the past) with
+    # no XCom coverage never will -- the route probes ONCE, then serves null from an
+    # in-process negative cache without hammering the shared metadata DB on every view.
+    write_report(reports_root, ReportRef("dag", "old", "task", 1))
+    c = TestClient(make_app(reports_root))
+    tok = ReportRef("dag", "old", "task", 1, -1).token
+
+    probes = []
+    monkeypatch.setattr(
+        "airflow_pytest_plugin.web.routes.reports.get_run_coverage",
+        lambda *a: (probes.append(1), None)[1],
+    )
+    assert c.get(f"/api/reports/{tok}").json()["coverage"] is None
+    assert c.get(f"/api/reports/{tok}").json()["coverage"] is None
+    assert c.get(f"/api/reports/{tok}").json()["coverage"] is None
+    assert len(probes) == 1  # probed once, then negative-cached
+
+
+def test_detail_fresh_run_keeps_probing_until_coverage_arrives(
+    reports_root, monkeypatch
+):
+    # A fresh run (coverage may still be committing) is NOT negative-cached: each view
+    # re-probes so late-arriving coverage is not permanently missed.
+    write_report(
+        reports_root, ReportRef("dag", "new", "task", 1), created_at=_fresh_iso()
+    )
+    c = TestClient(make_app(reports_root))
+    tok = ReportRef("dag", "new", "task", 1, -1).token
+
+    probes = []
+    monkeypatch.setattr(
+        "airflow_pytest_plugin.web.routes.reports.get_run_coverage",
+        lambda *a: (probes.append(1), None)[1],
+    )
+    assert c.get(f"/api/reports/{tok}").json()["coverage"] is None
+    assert c.get(f"/api/reports/{tok}").json()["coverage"] is None
+    assert len(probes) == 2  # re-probed, not suppressed
+
+
+def test_detail_coverage_not_probed_when_read_denied(reports_root, monkeypatch):
+    # The XCom read AND the write-on-GET (record_coverage) sit AFTER the RBAC read gate.
+    # A caller who may not read the run must never trigger either. Guards against a
+    # regression that reorders the coverage block above the authz check.
+    from airflow_pytest_plugin.sources.filesystem import FileSystemReportSource
+
+    write_report(
+        reports_root, ReportRef("dag", "run", "task", 1), created_at=_fresh_iso()
+    )
+    c = TestClient(make_app(reports_root, read_authorizer=lambda dag_id, user: False))
+    tok = ReportRef("dag", "run", "task", 1, -1).token
+
+    def _boom(*a, **k):
+        raise AssertionError("coverage path must not run when read is denied")
+
+    monkeypatch.setattr(
+        "airflow_pytest_plugin.web.routes.reports.get_run_coverage", _boom
+    )
+    monkeypatch.setattr(FileSystemReportSource, "record_coverage", _boom)
+    assert c.get(f"/api/reports/{tok}").status_code == 403
+
+
+def test_detail_records_coverage_once_with_map_index_and_tolerates_write_failure(
+    reports_root, monkeypatch
+):
+    # The route must (a) pass the run's map_index through to the XCom read, (b) invoke
+    # record_coverage exactly once with the decoded ref + value, and (c) still serve the
+    # coverage even if that best-effort write fails (a write error must not break the GET).
+    from airflow_pytest_plugin.sources.filesystem import FileSystemReportSource
+
+    write_report(
+        reports_root, ReportRef("dag", "run", "task", 1, 2), created_at=_fresh_iso()
+    )
+    tok = ReportRef("dag", "run", "task", 1, 2).token
+
+    seen = {}
+    monkeypatch.setattr(
+        "airflow_pytest_plugin.web.routes.reports.get_run_coverage",
+        lambda dag, run, task, mi: (seen.update(mi=mi), 0.5)[1],
+    )
+    baked = []
+    monkeypatch.setattr(
+        FileSystemReportSource,
+        "record_coverage",
+        lambda self, ref, cov: (baked.append((ref.map_index, cov)), True)[1],
+    )
+    c = TestClient(make_app(reports_root))
+    assert c.get(f"/api/reports/{tok}").json()["coverage"] == 0.5
+    assert seen["mi"] == 2  # decoded map_index reaches the XCom read
+    assert baked == [(2, 0.5)]  # record_coverage called once with the ref + value
+
+    # A write failure (record_coverage returns False) must not drop the value or 500.
+    monkeypatch.setattr(
+        FileSystemReportSource, "record_coverage", lambda self, ref, cov: False
+    )
+    r = c.get(f"/api/reports/{tok}")
+    assert r.status_code == 200
+    assert r.json()["coverage"] == 0.5

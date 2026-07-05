@@ -20,11 +20,13 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 
+from ...compat import get_run_coverage
 from ...config import (
     get_flaky_window,
     get_slow_factor,
@@ -48,6 +50,33 @@ TAG = "reports"
 
 #: Recipient cap per email, so the endpoint can't be used as a mass-mailer.
 _MAX_EMAIL_RECIPIENTS = 10
+
+#: How long after a run is archived its coverage XCom is still worth probing. The operator
+#: commits coverage within seconds of archiving the report, so past this window a run that
+#: still has no coverage never will -- we stop querying the shared metadata DB for it.
+_COVERAGE_SETTLE = timedelta(minutes=15)
+
+#: Bound on the per-app "no coverage" set so it can't grow without limit; cleared wholesale
+#: on overflow (probing simply resumes and re-populates -- a cheap self-healing cap).
+_NO_COVERAGE_CAP = 100_000
+
+
+def _coverage_settled(created_at: str | None) -> bool:
+    """True once a run is old enough that its coverage XCom would already be committed.
+
+    Lets the detail route stop re-probing XCom on every view of a run that measured no
+    coverage. Unknown/unparseable timestamps count as settled (probe once, then cache);
+    genuinely fresh runs are *not* settled, so late-arriving coverage is still picked up.
+    """
+    if not created_at:
+        return True
+    try:
+        ts = datetime.fromisoformat(created_at)
+    except (ValueError, TypeError):
+        return True
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) - ts >= _COVERAGE_SETTLE
 
 
 def _email_available() -> bool:
@@ -329,6 +358,10 @@ def build_router(deps: RouteDeps) -> APIRouter:
     read_auth = deps.read_auth
     delete_auth = deps.delete_auth
     user_dep = deps.user_dep
+    # Tokens of settled runs confirmed to carry no XCom coverage: skip re-probing the
+    # shared Airflow metadata DB on every later view. Per-app (bounded), rebuilt on
+    # restart; found coverage is still baked to disk so it survives regardless.
+    no_coverage: set[str] = set()
 
     @router.get(
         "/api/reports",
@@ -575,7 +608,27 @@ def build_router(deps: RouteDeps) -> APIRouter:
         detail = src.get_detail(ref)
         if detail is None:
             raise HTTPException(status_code=404, detail="report not found")
-        return JSONResponse(detail.to_dict())
+        payload = detail.to_dict()
+        # Coverage is part of the report once baked in. If it isn't yet (older report, or
+        # first view), pull it from the operator's XCom (operator >= 0.6 with coverage=True)
+        # and persist it so it shows immediately on every later view -- no XCom round-trip
+        # and no dependence on when the task committed XCom. None -> the UI hides the bench.
+        coverage = detail.coverage
+        if coverage is None and report_id not in no_coverage:
+            coverage = get_run_coverage(
+                ref.dag_id, ref.run_id, ref.task_id, ref.map_index
+            )
+            if coverage is not None:
+                src.record_coverage(ref, coverage)
+            elif _coverage_settled(detail.summary.created_at):
+                # Settled with no XCom coverage: it never will. Stop probing the shared
+                # metadata DB on every later view of this run. Fresh runs are NOT cached,
+                # so coverage that lands moments after archiving is still picked up.
+                if len(no_coverage) >= _NO_COVERAGE_CAP:
+                    no_coverage.clear()
+                no_coverage.add(report_id)
+        payload["coverage"] = coverage
+        return JSONResponse(payload)
 
     @router.delete(
         "/api/reports/{report_id}",

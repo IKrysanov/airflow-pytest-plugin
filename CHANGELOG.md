@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-07-...
+
+### Added
+- **Coverage bench in a run** — when the run was produced by `airflow-pytest-operator` >= 0.6
+  with `coverage=True`, the operator pushes the overall line-coverage fraction to its
+  `return_value` XCom; the run detail now reads it from there and shows a **Coverage** card next
+  to Duration (tinted green ≥ 80% / red < 50%). The run-detail payload gains a `coverage` field
+  (0–1, or `null`). No coverage in XCom — or off Airflow (the standalone dev server) — and the
+  card is simply omitted. Read via a new `compat.get_run_coverage`, so `compat.airflow` stays the
+  only module importing Airflow; the api-server queries the DB-backed `XComModel` (Airflow 3's
+  `XCom.get_one` is a task-side facade that doesn't work server-side). On first view the value is
+  **baked into the run's `meta.json`** (new optional `ReportSource.record_coverage`), so it becomes
+  a stable part of the report. A run opened right after it finishes — before the task has committed
+  its XCom — picks the value up **live** (the detail refreshes the card in place for a few seconds),
+  then serves it from the report on every later view with no XCom round-trip.
+
+### Fixed
+- **Donut % sits balanced with its caption** — the percentage is lifted a touch above the ring
+  midline so the number and the "of N" caption below it straddle the centre symmetrically.
+
+### Changed
+- **Coverage reads don't hammer the metadata DB** — a run confirmed to carry no coverage (older
+  operator, `coverage=False`, or a report with no readable `meta.json`) is remembered per process
+  once it has settled, so its detail view stops re-querying the shared Airflow metadata DB on every
+  open. Freshly-finished runs keep being probed so late-arriving coverage is never missed.
+
 ## [0.6.0] - 2026-07-05
 
 ### Added
@@ -389,7 +415,8 @@ the Airflow 3 web UI.
 - CI/CD: lint, type-check, unit (py3.10–3.13) + Airflow 3 integration matrices,
   CodeQL, OpenSSF Scorecard, DCO, and Trusted-Publishing release workflows.
 
-[Unreleased]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.3.2...v0.4.0

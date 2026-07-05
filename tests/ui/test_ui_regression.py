@@ -789,9 +789,9 @@ def test_chart_bar_hover_does_not_change_fill(dash):
     assert st["shadow"] not in ("none", ""), "bar hover should show a ring"
 
 
-def test_donut_pct_label_is_dead_centre(dash):
-    # The % number must be centred by its INK (rendered pixels), not its em box —
-    # digits have no descenders, so em-box centring leaves them visually high.
+def test_donut_pct_label_lifted_for_stack_balance(dash):
+    # The % is centred by its INK (rendered pixels, not em box) and lifted a touch above
+    # the ring midline so the % + "of N" caption below straddle the centre symmetrically.
     # Measure: rasterize the svg with the "of N" label hidden, scan the hole area.
     page = dash.page
     page.click("tr.lgrp:has-text('alpha')")
@@ -828,8 +828,10 @@ def test_donut_pct_label_is_dead_centre(dash):
           return { cx: (left + right) / 2 / S, cy: (top + bot) / 2 / S };
         }"""
     )
+    # Horizontally dead-centre; vertically lifted a little above 60 (a subtle raise so
+    # the number + caption look balanced -- not the full em-box high, not dead-centre).
     assert abs(ink["cx"] - 60) < 1.2, f"ink off-centre horizontally: {ink['cx']}"
-    assert abs(ink["cy"] - 60) < 1.2, f"ink off-centre vertically: {ink['cy']}"
+    assert 54.5 <= ink["cy"] <= 59.0, f"% not lifted-but-balanced: cy={ink['cy']}"
 
 
 def test_donut_hover_holds_steady_from_inside(dash):
@@ -894,3 +896,142 @@ def test_donut_single_status_renders_full_circle(green_dash):
     # SVG <text>: text_content, not inner_text (Playwright: "Node is not an HTMLElement").
     assert (page.locator(".donut-pct").text_content() or "").strip() == "100%"
     assert green_dash.errors == []
+
+
+def test_coverage_bench_shows_next_to_duration_when_present(dash):
+    # Coverage rides the detail payload from XCom (absent in the dev server), so inject
+    # it via response interception and assert a 6th KPI card renders with the percent.
+    page = dash.page
+
+    def add_coverage(route):
+        resp = route.fetch()
+        data = resp.json()
+        data["coverage"] = 0.83
+        route.fulfill(response=resp, json=data)
+
+    page.route("**/api/reports/*", add_coverage)
+    page.click("tr.lgrp:has-text('alpha')")
+    page.locator("tr.clickable").first.click()
+    expect(page.locator("dialog#detail")).to_be_visible()
+    kpis = page.locator("#detail .kpis .kpi")
+    expect(kpis).to_have_count(6)  # passed/failed/errors/skipped/duration + coverage
+    assert any("83%" in tx for tx in kpis.all_inner_texts())
+    assert dash.errors == []
+
+
+def test_coverage_bench_absent_without_coverage(dash):
+    # A run with no coverage in XCom (the dev server always) -> only the 5 base cards.
+    page = dash.page
+    page.click("tr.lgrp:has-text('alpha')")
+    page.locator("tr.clickable").first.click()
+    expect(page.locator("dialog#detail")).to_be_visible()
+    expect(page.locator("#detail .kpis .kpi")).to_have_count(5)  # no coverage card
+    assert dash.errors == []
+
+
+def test_coverage_bench_appears_via_poll_for_fresh_run(dash):
+    # A just-finished run may not carry coverage on first open: the operator archives
+    # the report mid-task but pushes coverage to XCom only at task end. The viewer
+    # polls a *fresh* run a few times and the bench appears on its own -- no email or
+    # reopen. Simulate: the first detail fetch has no coverage, a later one does; the
+    # payload's created_at is "now" so the recency gate lets the poll run.
+    from datetime import datetime, timezone
+
+    page = dash.page
+    fresh = datetime.now(timezone.utc).isoformat()
+    state = {"n": 0}
+
+    def route_detail(route):
+        resp = route.fetch()
+        data = resp.json()
+        if (
+            isinstance(data, dict) and "cases" in data
+        ):  # single-report detail, not the list
+            data["created_at"] = fresh
+            state["n"] += 1
+            if state["n"] >= 2:  # 2nd+ fetch: XCom coverage is now available
+                data["coverage"] = 0.77
+            else:
+                data.pop("coverage", None)  # first open: not yet
+        route.fulfill(response=resp, json=data)
+
+    page.route("**/api/reports/*", route_detail)
+    page.click("tr.lgrp:has-text('alpha')")
+    page.locator("tr.clickable").first.click()
+    expect(page.locator("dialog#detail")).to_be_visible()
+    expect(page.locator("#detail .kpis .kpi")).to_have_count(
+        5
+    )  # first render: no coverage yet
+    # The poller re-fetches within a few seconds and the 6th card appears in place.
+    expect(page.locator("#detail .kpis .kpi")).to_have_count(6, timeout=8000)
+    assert any(
+        "77%" in tx for tx in page.locator("#detail .kpis .kpi").all_inner_texts()
+    )
+    assert dash.errors == []
+
+
+def test_coverage_card_tint_bands(dash):
+    # The coverage card's health colour must follow the bands: >=0.8 green (c-pass),
+    # [0.5,0.8) neutral (no tint), <0.5 red (c-fail). Only 0.83 was covered before, so a
+    # flipped threshold or rounding regression would repaint the number misleadingly.
+    page = dash.page
+    cov = {"v": 0.45}
+
+    def add_coverage(route):
+        resp = route.fetch()
+        data = resp.json()
+        if isinstance(data, dict) and "cases" in data:
+            data["coverage"] = cov["v"]
+        route.fulfill(response=resp, json=data)
+
+    page.route("**/api/reports/*", add_coverage)
+    page.click("tr.lgrp:has-text('alpha')")  # expand the group once
+    row = page.locator("tr.clickable").first
+
+    def open_value_class():
+        row.click()
+        expect(page.locator("dialog#detail")).to_be_visible()
+        cls = (
+            page.locator("#detail .kpis .kpi")
+            .last.locator(".value")
+            .get_attribute("class")
+        )
+        page.keyboard.press("Escape")
+        expect(page.locator("dialog#detail")).to_be_hidden()
+        return cls or ""
+
+    cov["v"] = 0.45
+    assert "c-fail" in open_value_class()  # below 0.5 -> red
+    cov["v"] = 0.65
+    neutral = open_value_class()  # mid band -> no health tint
+    assert "c-fail" not in neutral and "c-pass" not in neutral
+    cov["v"] = 0.9
+    assert "c-pass" in open_value_class()  # >=0.8 -> green
+    assert dash.errors == []
+
+
+def test_coverage_poll_skipped_for_old_run(dash):
+    # Old runs (created_at far in the past) must NOT trigger the coverage poll -- they
+    # either already carry coverage or never will, so polling would only waste requests.
+    page = dash.page
+    calls = {"n": 0}
+
+    def count_detail(route):
+        resp = route.fetch()
+        data = resp.json()
+        if isinstance(data, dict) and "cases" in data:
+            calls["n"] += 1
+            data["created_at"] = (
+                "2020-01-01T00:00:00+00:00"  # ancient -> outside the poll window
+            )
+            data.pop("coverage", None)
+        route.fulfill(response=resp, json=data)
+
+    page.route("**/api/reports/*", count_detail)
+    page.click("tr.lgrp:has-text('alpha')")
+    page.locator("tr.clickable").first.click()
+    expect(page.locator("dialog#detail")).to_be_visible()
+    expect(page.locator("#detail .kpis .kpi")).to_have_count(5)
+    page.wait_for_timeout(3000)  # longer than the first poll delay (~2s)
+    assert calls["n"] == 1  # only the initial open fetched detail; no poll fetch fired
+    assert dash.errors == []

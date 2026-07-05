@@ -1240,7 +1240,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
         + "Flaky/Stability are radar-only snapshots, so they're not in the line.",
       cId: "ID", cStatus: "Status", cDag: "DAG", cTask: "Task", cRun: "Run", cTry: "Try",
       cTotal: "Total", cPass: "Pass", cFail: "Fail", cErr: "Err", cSkip: "Skip",
-      cDuration: "Duration", cWhen: "When", cRuns: "Runs", cPassRate: "Pass %", cAvgDur: "Avg time",
+      cDuration: "Duration", cCoverage: "Coverage", cWhen: "When", cRuns: "Runs", cPassRate: "Pass %", cAvgDur: "Avg time",
       kRuns: "Runs", kPassingRuns: "Passing runs", kTests: "Unique tests", kFailures: "Failures",
       kAll: "all", kAllTip: "Counts every run in view — not narrowed by a group selection",
       chartInfoAl: "About the runs chart", flakyInfoAl: "About flaky tests",
@@ -1365,7 +1365,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
         + "«Зелёный» и Нестабильность — снимки только на радаре, в линию не входят.",
       cId: "ID", cStatus: "Статус", cDag: "DAG", cTask: "Задача", cRun: "Запуск", cTry: "Попытка",
       cTotal: "Всего", cPass: "Усп", cFail: "Пров", cErr: "Ошиб", cSkip: "Проп",
-      cDuration: "Время", cWhen: "Когда", cRuns: "Прогоны", cPassRate: "Проход %", cAvgDur: "Ср. время",
+      cDuration: "Время", cCoverage: "Покрытие", cWhen: "Когда", cRuns: "Прогоны", cPassRate: "Проход %", cAvgDur: "Ср. время",
       kRuns: "Прогонов", kPassingRuns: "Успешных прогонов", kTests: "Уникальные тесты", kFailures: "Падений",
       kAll: "все", kAllTip: "Считает все прогоны в поле зрения — не сужается выбором группы",
       chartInfoAl: "О диаграмме прогонов", flakyInfoAl: "О нестабильных тестах",
@@ -3038,13 +3038,12 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     });
     var pct = total > 0 ? Math.round((m.passed / total) * 100) : null;
     var ofN = esc(t("ofWord")) + " " + total;
-    // Centre the number by its INK, not its em box: digits/% have no descenders, so
-    // em-box centring (dominant-baseline) leaves them visually high. Baseline 65.4 puts
-    // the measured ink centre of the 21px digits on (60,60) — pinned by a pixel-scan UI
-    // test. Holds for any value: digit ink height is constant, text-anchor centres width.
-    var center = '<text x="60" y="65.4" text-anchor="middle" class="donut-pct">'
+    // Centre the % + "of N" STACK on (60,60), not just the % ink. The label below adds
+    // visual mass, so the % is lifted a touch above the ring's midline to keep the pair
+    // symmetric (baseline pinned by a pixel-scan UI test that measures both texts).
+    var center = '<text x="60" y="63" text-anchor="middle" class="donut-pct">'
       + (pct == null ? "—" : pct + "%") + "</text>"
-      + '<text x="60" y="83" text-anchor="middle" class="donut-lbl">' + ofN + "</text>";
+      + '<text x="60" y="81.5" text-anchor="middle" class="donut-lbl">' + ofN + "</text>";
     return '<svg viewBox="0 0 120 120" class="donut" role="img" aria-label="'
       + (pct == null ? "" : pct + "% — ") + total + " " + esc(t("testsWord")) + '">'
       + ring + parts + center + "</svg>";
@@ -3330,14 +3329,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     document.getElementById("d-allure").hidden = !m.has_allure;
     document.getElementById("d-email").hidden = !emailAvailable;
 
-    var kpis = [
-      [t("kPassed"), m.passed, "c-pass"], [t("kFailed"), m.failed, "c-fail"],
-      [t("kErrors"), m.errors, "c-error"], [t("kSkipped"), m.skipped, "c-skip"],
-      [t("cDuration"), fmtDur(m.duration), ""],
-    ].map(function (k) {
-      return '<div class="kpi"><div class="label">' + esc(k[0]) + '</div>'
-        + '<div class="value ' + k[2] + '">' + esc(k[1]) + "</div></div>";
-    }).join("");
+    var kpis = kpiCardsHtml(m);
 
     var pills = ["all", "failed", "error", "skipped", "passed"].map(function (k) {
       return '<button class="pill" type="button" data-f="' + k + '" aria-pressed="'
@@ -3476,6 +3468,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       .then(function (d) {
         detail = d; detail.cases = d.cases || []; renderDetail();
         if (focusNode) focusCaseRow(focusNode);  // jump to + expand one test
+        maybePollCoverage(detail);  // fresh run may not carry coverage yet -- pick it up live
       })
       .catch(function (e) {
         dBody.innerHTML = '<div class="state c-fail">' + esc(t("reportFail") + e.message) + "</div>";
@@ -3717,6 +3710,62 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   // After a manual send the run's stored history has a fresh entry (delivered OR
   // failed). Re-pull the detail and refresh the ✉ bench in place, so the user sees
   // the updated split without reopening the run.
+  // The KPI cards (passed/failed/errors/skipped/duration + optional coverage).
+  // Factored out so the coverage poller can re-render just this block in place
+  // when coverage arrives after the run opened.
+  function kpiCardsHtml(m) {
+    var kpiRows = [
+      [t("kPassed"), m.passed, "c-pass"], [t("kFailed"), m.failed, "c-fail"],
+      [t("kErrors"), m.errors, "c-error"], [t("kSkipped"), m.skipped, "c-skip"],
+      [t("cDuration"), fmtDur(m.duration), ""],
+    ];
+    // Coverage bench next to Duration -- only when the operator pushed it to XCom
+    // (operator >= 0.6 with coverage=True). A number in [0,1] -> percent, tinted by
+    // how healthy it is; absent -> no card at all.
+    if (typeof m.coverage === "number") {
+      var covCls = m.coverage >= 0.8 ? "c-pass" : (m.coverage < 0.5 ? "c-fail" : "");
+      kpiRows.push([t("cCoverage"), Math.round(m.coverage * 100) + "%", covCls]);
+    }
+    return kpiRows.map(function (k) {
+      return '<div class="kpi"><div class="label">' + esc(k[0]) + '</div>'
+        + '<div class="value ' + k[2] + '">' + esc(k[1]) + "</div></div>";
+    }).join("");
+  }
+  // The operator archives the report mid-task but only pushes coverage to XCom at
+  // task end, so a run opened right after it finishes may not carry coverage yet.
+  // The reader caches XCom coverage on read, so re-fetching a *fresh* run a few
+  // times lets the bench appear on its own -- no email/reopen needed. Bounded to
+  // recent runs (older ones either already have it or never will) and a few tries.
+  var COV_POLL_MAX_AGE_MS = 15 * 60 * 1000;
+  var COV_POLL_TRIES = 3;
+  function maybePollCoverage(m) {
+    if (!m || typeof m.coverage === "number" || !m.created_at) return;
+    // Age from the run's server timestamp. A negative age just means the browser clock
+    // lags the server (clock skew) -- the run is brand new, so poll it; only skip runs
+    // genuinely older than the window (coverage is already baked in, or was never measured).
+    var age = Date.now() - new Date(m.created_at).getTime();
+    if (isNaN(age) || age > COV_POLL_MAX_AGE_MS) return;
+    pollCoverage(currentId, 0);
+  }
+  function pollCoverage(forId, attempt) {
+    if (attempt >= COV_POLL_TRIES) return;
+    setTimeout(function () {
+      if (currentId !== forId || !detail || typeof detail.coverage === "number") return;
+      fetch(API + "reports/" + encodeURIComponent(forId))
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (d) {
+          if (!d || currentId !== forId || !detail) return;
+          if (typeof d.coverage === "number") {
+            detail.coverage = d.coverage;
+            var box = dBody.querySelector(".kpis");
+            if (box) box.innerHTML = kpiCardsHtml(detail);
+          } else {
+            pollCoverage(forId, attempt + 1);
+          }
+        })
+        .catch(function () { pollCoverage(forId, attempt + 1); });
+    }, 2000 + attempt * 2500);  // ~2s, 4.5s, 7s
+  }
   function refreshAlertsBench() {
     var forId = currentId;
     if (!forId) return;
