@@ -1621,3 +1621,32 @@ def test_token_with_smuggled_junk_bytes_is_rejected(client):
     assert client.get(f"/api/reports/{dirty}").status_code == 400
     assert client.post(f"/api/reports/{dirty}/email", json={}).status_code == 400
     assert client.delete(f"/api/reports/{dirty}").status_code == 400
+
+
+def test_email_endpoint_log_lines_are_single_line(reports_root, monkeypatch, caplog):
+    # The report token is unsigned, so its decoded dag_id/run_id can carry newlines.
+    # Every log line the email endpoint emits must be sanitized to ONE line so a crafted
+    # request can't forge extra log entries (CodeQL: log injection).
+    import logging
+
+    from airflow_pytest_plugin.models import ReportRef
+
+    ref = ReportRef("dag\nFAKE LOG LINE", "run\r\ninjected", "task", 1, -1)
+    write_report(reports_root, ref, passed=1)
+
+    class _SpyMailer:
+        def send(
+            self, **kw
+        ):  # succeeds -> the audit _log.info fires with the ref fields
+            pass
+
+    monkeypatch.setattr(
+        "airflow_pytest_plugin.web.routes.reports.build_mailer", lambda: _SpyMailer()
+    )
+    monkeypatch.setenv("AIRFLOW_PYTEST_ALERTS_EMAIL_TO", "team@example.com")
+    c = TestClient(make_app(reports_root))
+    with caplog.at_level(logging.INFO):
+        r = c.post(f"/api/reports/{ref.token}/email", json={})
+    assert r.status_code == 200
+    for rec in caplog.records:
+        assert "\n" not in rec.getMessage() and "\r" not in rec.getMessage()

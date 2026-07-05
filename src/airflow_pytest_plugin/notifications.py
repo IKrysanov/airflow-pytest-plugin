@@ -36,7 +36,6 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from html import escape
@@ -70,37 +69,48 @@ _MAX_LISTED = 12
 
 
 # -- recipients: validation + dedupe ----------------------------------------------------------
-# RFC-5321-bounded address shape, checked piecewise: the address is SPLIT on '@' and '.'
-# and every piece matched against a linear regex. No nested quantifiers anywhere, so no
-# polynomial backtracking on attacker-supplied input (CodeQL: polynomial ReDoS). The
-# charsets exclude whitespace and control chars, which also blocks header injection;
-# ``\Z`` (not ``$``) so a trailing newline can't sneak past the anchor.
-#: One dot-atom of the local part (dots only BETWEEN atoms -- empty split pieces reject
-#: leading/trailing/double dots).
-_ATOM_RE = re.compile(r"[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+\Z")
-#: One LDH domain label (starts/ends alphanumeric, 1-63 chars).
-_LABEL_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\Z")
-#: The final label: an alphabetic TLD.
-_TLD_RE = re.compile(r"[A-Za-z]{2,63}\Z")
+# Validation is done with plain set-membership and length checks -- NO regex, so there is
+# provably no ReDoS surface on attacker-supplied addresses (CodeQL: polynomial ReDoS). The
+# character sets exclude whitespace and control chars, which also blocks header injection.
+_ASCII_ALPHA = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+_ALNUM = _ASCII_ALPHA | frozenset("0123456789")
+#: Local-part atom charset (RFC 5321 dot-atom specials).
+_LOCAL_CHARS = _ALNUM | frozenset("!#$%&'*+/=?^_`{|}~-")
+#: Domain-label charset (LDH: letters, digits, hyphen).
+_LABEL_CHARS = _ALNUM | frozenset("-")
 
 
 def is_valid_email(address: str) -> bool:
     """Whether ``address`` is a sane, safely-mailable email address.
 
-    Adds RFC 5321 length limits (local <= 64, total <= 254) to the shape check, so a passing
-    address can go into a header verbatim.
+    RFC-5321-bounded shape (local <= 64, total <= 254; dot-atom local, LDH domain labels,
+    alphabetic TLD), so a passing address can go into a header verbatim. Checked with
+    character-set membership, not a regex -- linear on any input.
     """
     if not address or len(address) > 254:
         return False
     local, sep, domain = address.partition("@")
-    if not sep or len(local) > 64:
+    if not sep or not 1 <= len(local) <= 64:
         return False
-    if not all(_ATOM_RE.match(atom) for atom in local.split(".")):
-        return False  # empty atom = leading/trailing/double dot (or empty local)
+    # Local part: dot-separated atoms; an empty atom == a leading/trailing/double dot.
+    for atom in local.split("."):
+        if not atom or not _LOCAL_CHARS.issuperset(atom):
+            return False
     labels = domain.split(".")
-    if len(labels) < 2 or not _TLD_RE.match(labels[-1]):
+    if len(labels) < 2:
         return False
-    return all(_LABEL_RE.match(label) for label in labels[:-1])
+    tld = labels[-1]
+    if not 2 <= len(tld) <= 63 or not _ASCII_ALPHA.issuperset(tld):
+        return False  # alphabetic TLD only
+    for label in labels[:-1]:
+        if (
+            not 1 <= len(label) <= 63
+            or label[0] == "-"
+            or label[-1] == "-"
+            or not _LABEL_CHARS.issuperset(label)
+        ):
+            return False
+    return True
 
 
 def dedupe_emails(addresses: Sequence[str]) -> tuple[str, ...]:

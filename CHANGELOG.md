@@ -40,11 +40,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   own `send_email` internals; the compat shim silences exactly that one warning.
 
 ### Security
-- CodeQL findings on the release PR fixed: report tokens are decoded with **strict** base64
-  (junk bytes — e.g. smuggled CRLF — now `400` instead of silently decoding and reaching logs
-  raw); the email validator was rebuilt from one nested-quantifier regex into per-atom linear
-  checks (no polynomial backtracking on attacker-supplied input); the send-failure log entry is
-  collapsed to one line; a no-effect statement removed.
+- CodeQL findings on the release PR fixed. Report tokens decode with **strict** base64 (junk
+  bytes — e.g. smuggled CRLF — now `400`, not silently decoded). **Log injection**: the email
+  endpoint sanitizes every user-influenced value it logs (the raw token and the token-derived
+  `dag_id`/`run_id`, which an unsigned token lets an attacker fill with newlines) to a single
+  line. **ReDoS**: the email validator is now regex-free — plain character-set and length
+  checks, provably linear on any input. Plus a removed no-effect statement.
 
 ### Internal
 - `flaky_core` extracted (web-free flaky scoring); Airflow's mail API wrapped in `compat.airflow`

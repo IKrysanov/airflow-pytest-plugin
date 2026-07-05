@@ -68,10 +68,20 @@ def _user_label(user: Any) -> str:
     return "anonymous"
 
 
+def _log_safe(value: object) -> str:
+    """Collapse whitespace/newlines from a user-influenced value before it is logged.
+
+    The report token is attacker-supplied (unsigned) and its decoded ``dag_id`` /
+    ``run_id`` can carry newlines, so logging them raw would let a crafted request forge
+    extra log lines (CodeQL: log injection). Collapsing to a single line neutralizes that.
+    """
+    return " ".join(str(value).split())[:200]
+
+
 def _safe_reason(exc: Exception) -> str:
     """One-line send-failure summary (type + message), safe for the RBAC-gated caller:
     no traceback, no password (the mailer never puts it in the exception)."""
-    msg = " ".join(str(exc).split())  # collapse whitespace/newlines
+    msg = _log_safe(exc)  # collapse whitespace/newlines
     text = f"{type(exc).__name__}: {msg}" if msg else type(exc).__name__
     return text[:200]
 
@@ -655,9 +665,11 @@ def build_router(deps: RouteDeps) -> APIRouter:
                 attachments=allure_attachment(src, ref),
             )
         except Exception as exc:
-            # _safe_reason collapses newlines -> the entry stays one log line even if
-            # the exception text carries user-influenced content (CodeQL: log injection).
-            _log.warning("emailing run %s failed: %s", report_id, _safe_reason(exc))
+            # Both args are user-influenced -> sanitized so the entry can't forge log
+            # lines (CodeQL: log injection). report_id is the raw token; exc text is free-form.
+            _log.warning(
+                "emailing run %s failed: %s", _log_safe(report_id), _safe_reason(exc)
+            )
             record_sent_alert(src, ref, alert, recipients, ok=False, manual=True)
             # Surface a short, safe reason (type + message, no traceback/password) so the
             # caller can act -- e.g. "SMTPAuthenticationError: (535, ...)". Safe because the
@@ -667,9 +679,9 @@ def build_router(deps: RouteDeps) -> APIRouter:
         # Audit: who emailed which run to how many recipients (count only, no addresses).
         _log.info(
             "emailed run %s·%s·%s to %d recipient(s) (user=%s)",
-            ref.dag_id,
-            ref.task_id,
-            ref.run_id,
+            _log_safe(ref.dag_id),  # token-derived -> sanitize before logging
+            _log_safe(ref.task_id),
+            _log_safe(ref.run_id),
             len(recipients),
             _user_label(user),
         )
