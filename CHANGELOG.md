@@ -39,6 +39,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **No more `get_connection_from_secrets` DeprecationWarning per send** — emitted by Airflow's
   own `send_email` internals; the compat shim silences exactly that one warning.
 
+### Security
+- CodeQL findings on the release PR fixed: report tokens are decoded with **strict** base64
+  (junk bytes — e.g. smuggled CRLF — now `400` instead of silently decoding and reaching logs
+  raw); the email validator was rebuilt from one nested-quantifier regex into per-atom linear
+  checks (no polynomial backtracking on attacker-supplied input); the send-failure log entry is
+  collapsed to one line; a no-effect statement removed.
+
 ### Internal
 - `flaky_core` extracted (web-free flaky scoring); Airflow's mail API wrapped in `compat.airflow`
   (`send_airflow_email`) so compat is again the only module importing Airflow; `run_tracking_url`

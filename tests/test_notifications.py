@@ -1131,3 +1131,21 @@ def test_run_tracking_url_encodes_hostile_run_id(monkeypatch):
     assert url is not None
     assert "\n" not in url and " " not in url
     assert "%0A" in url and "%20" in url and "%26" in url  # \n, space, & all encoded
+
+
+def test_is_valid_email_linear_on_adversarial_input():
+    # The validator is split into per-atom LINEAR regexes (no nested quantifiers), so
+    # classic polynomial-backtracking payloads finish instantly (CodeQL: poly ReDoS).
+    import time
+
+    from airflow_pytest_plugin.notifications import is_valid_email
+
+    hostile = [
+        "!" * 253 + "@",  # the CodeQL example: many '!' repetitions
+        "a." * 126 + "a",  # maximal atom churn, no @
+        ("a" * 63 + ".") * 3 + "@x",  # long atoms, bad domain
+    ]
+    start = time.perf_counter()
+    for address in hostile * 200:
+        assert is_valid_email(address) is False
+    assert time.perf_counter() - start < 0.5  # 600 hostile inputs, far under a second

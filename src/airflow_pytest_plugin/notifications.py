@@ -70,16 +70,18 @@ _MAX_LISTED = 12
 
 
 # -- recipients: validation + dedupe ----------------------------------------------------------
-#: RFC-5321-bounded address shape: printable local part (dots only BETWEEN atoms -- no
-#: leading/trailing/double dots), dot-separated LDH domain labels, alphabetic TLD. The charset
-#: excludes whitespace and control chars, which also blocks header injection. ``\Z`` (not
-#: ``$``) so a trailing newline can't sneak past the anchor.
-_EMAIL_RE = re.compile(
-    r"[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+)*"
-    r"@"
-    r"(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
-    r"[A-Za-z]{2,63}\Z"
-)
+# RFC-5321-bounded address shape, checked piecewise: the address is SPLIT on '@' and '.'
+# and every piece matched against a linear regex. No nested quantifiers anywhere, so no
+# polynomial backtracking on attacker-supplied input (CodeQL: polynomial ReDoS). The
+# charsets exclude whitespace and control chars, which also blocks header injection;
+# ``\Z`` (not ``$``) so a trailing newline can't sneak past the anchor.
+#: One dot-atom of the local part (dots only BETWEEN atoms -- empty split pieces reject
+#: leading/trailing/double dots).
+_ATOM_RE = re.compile(r"[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+\Z")
+#: One LDH domain label (starts/ends alphanumeric, 1-63 chars).
+_LABEL_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\Z")
+#: The final label: an alphabetic TLD.
+_TLD_RE = re.compile(r"[A-Za-z]{2,63}\Z")
 
 
 def is_valid_email(address: str) -> bool:
@@ -90,10 +92,15 @@ def is_valid_email(address: str) -> bool:
     """
     if not address or len(address) > 254:
         return False
-    local, sep, _domain = address.partition("@")
+    local, sep, domain = address.partition("@")
     if not sep or len(local) > 64:
         return False
-    return _EMAIL_RE.match(address) is not None
+    if not all(_ATOM_RE.match(atom) for atom in local.split(".")):
+        return False  # empty atom = leading/trailing/double dot (or empty local)
+    labels = domain.split(".")
+    if len(labels) < 2 or not _TLD_RE.match(labels[-1]):
+        return False
+    return all(_LABEL_RE.match(label) for label in labels[:-1])
 
 
 def dedupe_emails(addresses: Sequence[str]) -> tuple[str, ...]:
@@ -419,7 +426,8 @@ class Mailer(Protocol):
         recipients: Sequence[str],
         html: str | None = None,
         attachments: Sequence[Attachment] = (),
-    ) -> None: ...
+    ) -> None:
+        """Deliver one message (implementations: AirflowMailer / SmtpMailer / test spies)."""
 
 
 def _header_safe(value: str) -> str:

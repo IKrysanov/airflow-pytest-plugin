@@ -1610,3 +1610,14 @@ def test_endpoints_tolerate_source_rows_without_outcome(reports_root):
     assert hist.status_code == 200
     entry = hist.json()["history"][0]
     assert entry["outcome"] is None and entry["duration"] == 0.1
+
+
+def test_token_with_smuggled_junk_bytes_is_rejected(client):
+    # Lax base64 silently skips non-alphabet bytes, so 4 CRLF chars inside a valid
+    # token used to decode "successfully" and carry the raw string into logs
+    # (CodeQL: log injection). Strict decoding must 400 it on every endpoint.
+    good = ReportRef("dag", "run", "task", 1).token
+    dirty = good[:10] + "%0D%0A%0D%0A" + good[10:]  # \r\n\r\n url-encoded in the path
+    assert client.get(f"/api/reports/{dirty}").status_code == 400
+    assert client.post(f"/api/reports/{dirty}/email", json={}).status_code == 400
+    assert client.delete(f"/api/reports/{dirty}").status_code == 400

@@ -655,7 +655,9 @@ def build_router(deps: RouteDeps) -> APIRouter:
                 attachments=allure_attachment(src, ref),
             )
         except Exception as exc:
-            _log.warning("emailing run %s failed: %s", report_id, exc)
+            # _safe_reason collapses newlines -> the entry stays one log line even if
+            # the exception text carries user-influenced content (CodeQL: log injection).
+            _log.warning("emailing run %s failed: %s", report_id, _safe_reason(exc))
             record_sent_alert(src, ref, alert, recipients, ok=False, manual=True)
             # Surface a short, safe reason (type + message, no traceback/password) so the
             # caller can act -- e.g. "SMTPAuthenticationError: (535, ...)". Safe because the

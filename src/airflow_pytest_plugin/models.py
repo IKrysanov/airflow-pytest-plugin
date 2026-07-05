@@ -29,7 +29,10 @@ def _encode_token(payload: dict[str, Any]) -> str:
 
 def _decode_token(token: str) -> dict[str, Any]:
     pad = "=" * (-len(token) % 4)
-    raw = base64.urlsafe_b64decode(token + pad)
+    # validate=True rejects ANY byte outside the alphabet. The lax default silently
+    # skips junk, so a token with e.g. CRLF smuggled in could still decode and carry
+    # the raw (log-injectable) string through every ``report_id`` code path.
+    raw = base64.b64decode(token + pad, altchars=b"-_", validate=True)
     return cast("dict[str, Any]", json.loads(raw))
 
 
