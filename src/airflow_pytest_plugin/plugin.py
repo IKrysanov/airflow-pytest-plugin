@@ -12,21 +12,56 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Plugin entry point: mounts the FastAPI app and a nav link."""
+"""Plugin entry point: mounts the FastAPI app and a nav link.
+
+Also home to :func:`run_tracking_url` — the viewer's address is defined here
+(``URL_PREFIX``), so composing a deep link to a run belongs here too.
+"""
 
 from __future__ import annotations
 
 import logging
 from typing import TYPE_CHECKING, Any
+from urllib.parse import quote
 
 from .compat import get_airflow_plugin_base
-from .config import ENABLE_ENV_VAR, is_plugin_enabled
+from .config import ENABLE_ENV_VAR, get_base_url, is_plugin_enabled
+
+if TYPE_CHECKING:
+    from .models import ReportRef
 
 _log = logging.getLogger(__name__)
 
 URL_PREFIX = "/pytest-reports"
 APP_NAME = "Pytest Reports"
 NAV_NAME = "Pytest"
+#: The Airflow SPA route rendering this plugin's page (``external_views[].url_route``).
+PLUGIN_ROUTE = "pytest-reports"
+
+
+def run_tracking_url(ref: ReportRef) -> str | None:
+    """Deep link to ``ref`` in the Pytest Reports viewer, or ``None`` without a base URL.
+
+    Points at the **Airflow plugin page** (``/plugin/<route>``) — the viewer inside the
+    Airflow chrome (sidebar and all) — not the bare mounted app, which renders without
+    any navigation. The query rides the parent URL; the embedded viewer reads it from
+    there. Deliberately the SHORT human-readable form (``?dag=…&run=…&task=…&try=…``),
+    not the opaque ``?report=<token>`` one: the ~200-char token gets wrapped/truncated
+    by log viewers, breaking the link with an HTTP 400.
+    """
+    base = get_base_url()
+    if not base:
+        return None
+    params = [
+        ("dag", ref.dag_id),
+        ("run", ref.run_id),
+        ("task", ref.task_id),
+        ("try", str(ref.try_number)),
+    ]
+    if ref.map_index != -1:
+        params.append(("map", str(ref.map_index)))
+    query = "&".join(f"{k}={quote(v, safe='')}" for k, v in params)
+    return f"{base}/plugin/{PLUGIN_ROUTE}?{query}"
 
 
 def _build_fastapi_apps() -> list[dict[str, Any]]:
@@ -56,7 +91,7 @@ def _build_external_views() -> list[dict[str, Any]]:
         {
             "name": NAV_NAME,
             "href": f"{URL_PREFIX}/",
-            "url_route": "pytest-reports",
+            "url_route": PLUGIN_ROUTE,
             "destination": "nav",
             "icon": f"{URL_PREFIX}/icon.svg",
             "icon_dark_mode": f"{URL_PREFIX}/icon-dark.svg",

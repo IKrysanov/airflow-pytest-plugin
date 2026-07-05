@@ -91,6 +91,7 @@ def send_airflow_email(
     """
     import os
     import tempfile
+    import warnings
 
     from airflow.utils.email import send_email
 
@@ -101,12 +102,23 @@ def send_airflow_email(
             with open(path, "wb") as handle:
                 handle.write(payload)
             files.append(path)
-        send_email(
-            to=to,
-            subject=subject,
-            html_content=html_content,
-            files=files or None,
-        )
+        with warnings.catch_warnings():
+            # Airflow 3's own ``send_mime_email`` still calls the deprecated
+            # ``Connection.get_connection_from_secrets`` (airflow/utils/email.py) —
+            # NOT our code, and there is no public alternative to ``send_email``
+            # to switch to. Silence exactly that one warning so every emailing
+            # task's log isn't spammed; any other deprecation still surfaces.
+            warnings.filterwarnings(
+                "ignore",
+                category=DeprecationWarning,
+                message=".*get_connection_from_secrets.*",
+            )
+            send_email(
+                to=to,
+                subject=subject,
+                html_content=html_content,
+                files=files or None,
+            )
 
 
 def airflow_auth_available() -> bool:

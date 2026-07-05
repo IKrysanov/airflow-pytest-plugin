@@ -112,6 +112,12 @@ class ArchivingResultParser(JUnitResultParser):  # type: ignore[misc, unused-ign
             _log.exception(
                 "Failed to write %s sidecar next to %s", META_FILENAME, report_path
             )
+        # Tracking link into the task log, so the archived run is one click away.
+        # Best-effort like everything post-archive: never masks the test outcome.
+        try:
+            self._log_tracking_url()
+        except Exception:
+            _log.debug("Could not build the viewer tracking URL", exc_info=True)
         # Best-effort alerting: opt-in and isolated -- a mail/config failure must never
         # mask the outcome either. No-ops immediately when disabled (default).
         try:
@@ -121,6 +127,29 @@ class ArchivingResultParser(JUnitResultParser):  # type: ignore[misc, unused-ign
         return result
 
     # -- internals -------------------------------------------------------
+
+    def _log_tracking_url(self) -> None:
+        """Log a deep link to the archived run in the Pytest Reports viewer.
+
+        With no base URL configured (``[api] base_url`` / ``[webserver] base_url``)
+        it still logs the run's coordinates, plus how to get a clickable link.
+        """
+        # Same resolution as _write_meta, so the link matches the archived location.
+        ref = self._pending_ref or self._resolve_ref(get_current_context())
+        from ..plugin import run_tracking_url
+
+        url = run_tracking_url(ref)
+        if url:
+            _log.info("Pytest report archived — view it at %s", url)
+        else:
+            _log.info(
+                "Pytest report archived (dag=%s run=%s task=%s try=%s); set "
+                "[api] base_url to get a clickable viewer link here",
+                ref.dag_id,
+                ref.run_id,
+                ref.task_id,
+                ref.try_number,
+            )
 
     def _maybe_notify(self) -> None:
         """Email a notification for the run just archived, per the opt-in flags.

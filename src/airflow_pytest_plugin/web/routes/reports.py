@@ -26,7 +26,6 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 
 from ...config import (
-    get_alerts_recipients,
     get_flaky_window,
     get_slow_factor,
     get_slow_min_delta,
@@ -95,8 +94,9 @@ def _resolve_recipients(body: dict[str, Any]) -> tuple[str, ...]:
     """
     raw = body.get("recipients")
     if raw is None or raw == "":
-        # Configured default, normalized the same way (invalid dropped, deduped).
-        return dedupe_emails([a for a in get_alerts_recipients() if is_valid_email(a)])
+        # Configured default via the policy, so ONE place normalizes it (invalid
+        # dropped, deduped, capped) for both the automatic and the manual path.
+        return AlertPolicy.from_config().recipients
     if isinstance(raw, str):
         raw = re.split(r"[,;]", raw)
     if not isinstance(raw, list):

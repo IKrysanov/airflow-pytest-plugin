@@ -980,3 +980,154 @@ def test_airflow_mailer_prefers_supplied_html_and_forwards_attachments(monkeypat
     )
     assert captured["html"] == "<b>rich</b>"  # supplied HTML wins over the fallback
     assert captured["attachments"] == payload
+
+
+# --- config validation hardening ---------------------------------------------------------------
+
+
+def test_smtp_from_with_header_injection_falls_back_to_default(monkeypatch, caplog):
+    # A config-borne CRLF in the sender must never reach the From: header.
+    monkeypatch.setenv("AIRFLOW_PYTEST_SMTP_HOST", "smtp.example.com")
+    monkeypatch.setenv("AIRFLOW_PYTEST_SMTP_FROM", "evil@x.io\r\nBcc: attacker@x.io")
+    with caplog.at_level(logging.WARNING):
+        cfg = SmtpConfig.from_config()
+    assert cfg is not None and cfg.sender == "airflow-pytest@localhost"
+    assert any("smtp_from" in r.getMessage() for r in caplog.records)
+
+
+def test_smtp_from_keeps_internal_relay_addresses(monkeypatch):
+    # Deliberately laxer than is_valid_email: user@mailhost (no TLD) must survive.
+    monkeypatch.setenv("AIRFLOW_PYTEST_SMTP_HOST", "smtp.example.com")
+    monkeypatch.setenv("AIRFLOW_PYTEST_SMTP_FROM", "reports@mailhost")
+    cfg = SmtpConfig.from_config()
+    assert cfg is not None and cfg.sender == "reports@mailhost"
+
+
+@pytest.mark.parametrize("bad_port", ["0", "70000", "-5", "abc"])
+def test_smtp_port_out_of_range_or_garbage_falls_back_to_25(
+    monkeypatch, caplog, bad_port
+):
+    monkeypatch.setenv("AIRFLOW_PYTEST_SMTP_HOST", "smtp.example.com")
+    monkeypatch.setenv("AIRFLOW_PYTEST_SMTP_PORT", bad_port)
+    with caplog.at_level(logging.WARNING):
+        cfg = SmtpConfig.from_config()
+    assert cfg is not None and cfg.port == 25
+    assert any("smtp_port" in r.getMessage() for r in caplog.records)
+
+
+def test_smtp_user_without_password_warns_about_skipped_login(monkeypatch, caplog):
+    # The exact misconfiguration behind an opaque "530 Authentication Required".
+    monkeypatch.setenv("AIRFLOW_PYTEST_SMTP_HOST", "smtp.example.com")
+    monkeypatch.setenv("AIRFLOW_PYTEST_SMTP_USER", "user@example.com")
+    monkeypatch.delenv("AIRFLOW_PYTEST_SMTP_PASSWORD", raising=False)
+    with caplog.at_level(logging.WARNING):
+        cfg = SmtpConfig.from_config()
+    assert cfg is not None
+    assert any("NOT authenticate" in r.getMessage() for r in caplog.records)
+
+
+def test_config_recipients_capped_with_warning(monkeypatch, caplog):
+    # 60 configured recipients -> the first 50 kept, loudly.
+    many = ",".join(f"user{i:02d}@example.com" for i in range(60))
+    monkeypatch.setenv("AIRFLOW_PYTEST_ALERTS_EMAIL_TO", many)
+    with caplog.at_level(logging.WARNING):
+        policy = AlertPolicy.from_config()
+    assert len(policy.recipients) == 50
+    assert policy.recipients[0] == "user00@example.com"
+    assert policy.recipients[-1] == "user49@example.com"
+    assert any("mailing-list" in r.getMessage() for r in caplog.records)
+
+
+# --- run tracking URL ----------------------------------------------------------------------
+
+
+def test_run_tracking_url_builds_short_readable_link(monkeypatch):
+    # The short ?dag=&run=&task=&try= form — a log viewer can't break it the way it
+    # wraps/truncates a ~200-char token, and a human can read where it points.
+    from airflow_pytest_plugin import config
+    from airflow_pytest_plugin.plugin import run_tracking_url
+
+    monkeypatch.setattr(
+        config,
+        "get_conf_value",
+        lambda section, key: (
+            "http://airflow.example.com/" if key == "base_url" else None
+        ),
+    )
+    ref = ReportRef("etl", "manual__2026-07-05T12:00:00+00:00", "unit", 2, -1)
+    url = run_tracking_url(ref)
+    assert url == (
+        "http://airflow.example.com/plugin/pytest-reports"
+        "?dag=etl&run=manual__2026-07-05T12%3A00%3A00%2B00%3A00&task=unit&try=2"
+    )  # /plugin/<route> = the viewer INSIDE the Airflow chrome, not the bare app
+    # '+' MUST be %2B — a raw '+' in a query decodes to a space and misses the run.
+    assert "+" not in url.split("?", 1)[1]
+
+
+def test_run_tracking_url_includes_map_index_only_when_mapped(monkeypatch):
+    from airflow_pytest_plugin import config
+    from airflow_pytest_plugin.plugin import run_tracking_url
+
+    monkeypatch.setattr(
+        config,
+        "get_conf_value",
+        lambda section, key: "http://af" if key == "base_url" else None,
+    )
+    plain = run_tracking_url(ReportRef("d", "r", "t", 1, -1))
+    mapped = run_tracking_url(ReportRef("d", "r", "t", 1, 3))
+    assert plain is not None and "map=" not in plain
+    assert mapped is not None and mapped.endswith("&map=3")
+
+
+def test_run_tracking_url_none_without_base_url(monkeypatch):
+    from airflow_pytest_plugin import config
+    from airflow_pytest_plugin.plugin import run_tracking_url
+
+    monkeypatch.setattr(config, "get_conf_value", lambda s, k: None)
+    assert run_tracking_url(ReportRef("dag", "r", "t", 1, -1)) is None
+
+
+def test_parser_logs_tracking_url_after_archive(monkeypatch, caplog):
+    from airflow_pytest_plugin import plugin as plugin_mod
+    from airflow_pytest_plugin.producer import ArchivingResultParser
+
+    monkeypatch.setattr(
+        plugin_mod,
+        "run_tracking_url",
+        lambda ref: "http://af/pytest-reports/?report=tok",
+    )
+    parser = ArchivingResultParser()
+    parser._pending_ref = ReportRef("dag", "run1", "task", 1, -1)
+    with caplog.at_level(logging.INFO):
+        parser._log_tracking_url()
+    assert any(
+        "http://af/pytest-reports/?report=tok" in r.getMessage() for r in caplog.records
+    )
+
+
+def test_parser_logs_coordinates_when_no_base_url(monkeypatch, caplog):
+    from airflow_pytest_plugin import plugin as plugin_mod
+    from airflow_pytest_plugin.producer import ArchivingResultParser
+
+    monkeypatch.setattr(plugin_mod, "run_tracking_url", lambda ref: None)
+    parser = ArchivingResultParser()
+    parser._pending_ref = ReportRef("dag", "run1", "task", 1, -1)
+    with caplog.at_level(logging.INFO):
+        parser._log_tracking_url()
+    msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+    assert any("base_url" in m and "run1" in m for m in msgs)
+
+
+def test_run_tracking_url_encodes_hostile_run_id(monkeypatch):
+    # Control characters / spaces in coordinates must be percent-encoded — the URL is
+    # logged as one token and must stay clickable and log-injection-proof.
+    from airflow_pytest_plugin import config
+    from airflow_pytest_plugin.plugin import run_tracking_url
+
+    monkeypatch.setattr(
+        config, "get_conf_value", lambda s, k: "http://af" if k == "base_url" else None
+    )
+    url = run_tracking_url(ReportRef("dag", "run\nid with spaces&x=1", "t", 1, -1))
+    assert url is not None
+    assert "\n" not in url and " " not in url
+    assert "%0A" in url and "%20" in url and "%26" in url  # \n, space, & all encoded

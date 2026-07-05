@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "airflow-pytest-plugin"
-version = "0.5.1"
+version = "0.6.0"
 description = "View airflow-pytest-operator results in the Airflow 3 web UI."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -38,7 +38,7 @@ classifiers = [
 # so it is an optional extra here rather than a hard dependency: the
 # producer-side parser needs neither FastAPI nor Airflow imported eagerly.
 dependencies = [
-    "airflow-pytest-operator>=0.5",
+    "airflow-pytest-operator>=0.6",
 ]
 
 [project.optional-dependencies]

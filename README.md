@@ -137,6 +137,11 @@ PytestOperator(
 )
 ```
 
+After each run the task log gets a tracking link straight to the archived report, opened
+**inside the Airflow UI** (`Pytest report archived — view it at
+http://…/plugin/pytest-reports?dag=…&run=…&task=…&try=1`), provided `[api] base_url` (or
+`[webserver] base_url`) is set — without it the log lists the run's coordinates instead.
+
 **2. Tell both sides where reports live** (one place, read by producer and
 reader alike):
 
@@ -294,7 +299,7 @@ Download them from a report's detail view, or `GET
 | `AIRFLOW_PYTEST_SLOW_MIN_DELTA` (env/cfg) | `0.5` | minimum absolute slowdown in seconds for a regression to register (filters jittery fast tests) |
 | `AIRFLOW_PYTEST_SUCCESS_THRESHOLD` (env/cfg) | `0.85` | pass-rate (0–1) over executed tests at/above which a run counts as successful (*Passing runs*); `1.0` = strict, zero failures/errors |
 | `AIRFLOW_PYTEST_METRICS_TOKEN` (env/cfg) | — | bearer token that **enables** the Prometheus `/api/metrics` endpoint; unset = disabled (see [below](#prometheus-metrics)) |
-| `AIRFLOW_PYTEST_ALERTS_EMAIL_TO` (env/cfg) | — | comma-separated alert recipients (empty = alerting stays off; the per-task `email=True` flag is the on-switch — see [below](#email-alerts)) |
+| `AIRFLOW_PYTEST_ALERTS_EMAIL_TO` (env/cfg) | — | comma-separated alert recipients (empty = alerting stays off; the per-task `email=True` flag is the on-switch — see [below](#email-alerts)). Validated, case-insensitively deduped, capped at 50 (use a mailing-list address for bigger audiences) |
 | `AIRFLOW_PYTEST_SMTP_*` (env/cfg) | — | standalone SMTP (`_HOST`, `_PORT`, `_USER`, `_PASSWORD`, `_FROM`, `_STARTTLS`); when `_HOST` is set it is used directly (takes precedence over Airflow's `send_email`), otherwise it's the fallback |
 
 **Enable / disable the reader.** Set `AIRFLOW_PYTEST_PLUGIN_ENABLE` to a falsey

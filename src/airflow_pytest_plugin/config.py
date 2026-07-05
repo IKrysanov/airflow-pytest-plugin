@@ -255,3 +255,16 @@ def get_reports_root() -> str:
         return os.path.abspath(conf.strip())
 
     return os.path.abspath(DEFAULT_ROOT)
+
+
+def get_base_url() -> str | None:
+    """Airflow's externally-reachable base URL (``[api]``, then legacy ``[webserver]``).
+
+    ``None`` when neither is configured — links that need it degrade gracefully.
+    """
+    base = (
+        get_conf_value("api", "base_url")
+        or get_conf_value("webserver", "base_url")
+        or ""
+    ).rstrip("/")
+    return base or None

@@ -7,67 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.5.1] - 2026-07-...
+## [0.6.0] - 2026-07-05
 
 ### Added
-- **Email alerts (opt-in, producer-side) with styled HTML** — a run can email an adaptive
-  inline-CSS summary (table layout for email-client compatibility): green for a clean pass, amber
-  for flaky, red for a failure, listing the failed / flaky tests and linking back to the run
-  (everything HTML-escaped). Two per-task switches on `ArchivingResultParser`: `email=True` mails
-  **every** run (a "run finished" notice so a team needn't watch it), `email_only_fail=True` mails
-  **only** a failed / flaky run and wins over `email=True`; the default (both off) sends nothing, so
-  a noisy ping / smoke suite can't spam the mailbox. A run is "failing" (which colours the email)
-  below `AIRFLOW_PYTEST_SUCCESS_THRESHOLD`. Recipients come from `AIRFLOW_PYTEST_ALERTS_EMAIL_TO`,
-  validated and deduped case-insensitively so one mailbox gets one email (an invalid configured
-  address is dropped with a warning; `email=` with no recipients logs one "nothing sent" warning per
-  run). Mail rides Airflow's SMTP, or a standalone client from `AIRFLOW_PYTEST_SMTP_*` (which wins
-  over `send_email` when its host is set). Best-effort — a mail / config failure never fails the task.
-- **Email a run from the UI** — a run's toolbar gains an ✉ **Email** button (shown only when a mail
-  transport is configured) that sends that run's styled summary (any outcome) via
-  `POST /api/reports/{id}/email`: RBAC-gated (read permission on the DAG), recipients optional and
-  validated client- and server-side, capped, subject header-sanitized, failure reason surfaced.
-- **Email-send log per run (✉ bench)** — every attempt (automatic or manual) is recorded in the
-  run's `meta.json` (`alerts`: timestamp, kind, recipients, delivered-ok, manual; sanitized, newest
-  50). The toolbar shows an ✉ **Emails N** bench opening the log with a ✓ delivered / ✗ failed mark
-  per send. Exposed via the detail payload (`alerts`) and a new optional `ReportSource.record_alert`.
-- **Allure results attached to notification emails** — when the run has raw Allure results the email
-  carries them as `allure-results.zip` (skipped above 10 MB; a build failure never blocks the email).
-- **Run-health trend** — a sparkline under the reliability radar tracks run health over time (per
-  run, the mean of the three continuous axes: pass rate, no-errors, completeness) as a moving
-  average, with a time axis (first / last run dates), a current value calibrated to the line's right
-  edge, and a ▲/▼ delta vs the older half. Scoped by the same filters + group selection as the
-  radar; a pure read of already-loaded data (no new request); its ⓘ popup explains the reading.
-- **Case table sorts by Outcome** — the run detail's OUTCOME column sorts like the others
-  (ascending = broken first, descending = passing first).
+- **Email alerts (opt-in, producer-side)** — styled HTML summaries (green pass / amber flaky /
+  red fail, inline-CSS for mail clients, everything escaped) with the failed / flaky tests and a
+  link back to the run. Per-task switches: `ArchivingResultParser(email=True)` mails every run,
+  `email_only_fail=True` mails only fail / flaky (wins when both set); default sends nothing.
+  Recipients from `AIRFLOW_PYTEST_ALERTS_EMAIL_TO` (validated, case-insensitively deduped, capped
+  at 50); transport = Airflow's SMTP, or the standalone `AIRFLOW_PYTEST_SMTP_*` client (wins when
+  its host is set). Raw Allure results ride along as `allure-results.zip` (skipped over 10 MB).
+  Best-effort: a mail / config failure never fails the task.
+- **Email a run from the UI** — an ✉ button (shown only with a transport) sends the run's summary
+  via `POST /api/reports/{id}/email`: RBAC-gated (DAG read), recipients validated client- and
+  server-side, capped at 10, subject header-sanitized, failure reason surfaced.
+- **Per-run send log (✉ bench)** — every attempt lands in `meta.json` (`alerts`, sanitized, newest
+  50; new optional `ReportSource.record_alert`). The toolbar bench shows green = delivered /
+  red = failed counts, refreshes in place after a manual send, and opens the per-send log.
+- **Tracking URL in the task log** — after archiving, the parser logs a short readable deep link
+  that opens the run inside the Airflow UI (`…/plugin/pytest-reports?dag=…&run=…&task=…&try=…`).
+  Needs `[api]`/`[webserver]` `base_url`; otherwise the log lists the run's coordinates.
+- **Run-health trend** — a sparkline under the reliability radar (moving average of pass rate,
+  no-errors, completeness) with a date axis, a current value and a ▲/▼ delta; scoped by the same
+  filters as the radar, no extra request.
+- **Case table sorts by Outcome** (ascending = broken first).
+
+### Fixed
+- **Donut polish** — slices are real SVG arcs (dash-drawn circles rendered faceted edges in
+  Chrome), the % label is ink-centred for any digit count with "of N" clear below, and hovering
+  from the hole no longer strobes (the lifted slice always covers the resting one).
+- **No more `get_connection_from_secrets` DeprecationWarning per send** — emitted by Airflow's
+  own `send_email` internals; the compat shim silences exactly that one warning.
 
 ### Internal
-- Extracted the pure flaky-scoring logic into a web-free `flaky_core` module (no FastAPI import
-  needed to unit-test the `/api/flaky` scoring).
-- Moved Airflow's `send_email` behind the `compat.airflow` shim (`send_airflow_email` +
-  `airflow_email_available`), so `compat.airflow` is again the *only* module that imports Airflow
-  — a mail-API change across Airflow versions is now a one-file fix.
-- Hardening from a full functional/security/load audit: the alert-log write is atomic and
-  concurrency-safe (each writer stages a uniquely-named temp file before the replace, so parallel
-  archives can't clobber it); building the Allure attachment is memory-bounded (raw results above
-  50 MB aren't buffered into the email at all); and every `test_outcomes` consumer (heatmap, flaky,
-  compare, test-history, alerting) tolerates a row lacking an `outcome` field — a lax custom
-  `ReportSource` degrades to "unknown" instead of a 500.
+- `flaky_core` extracted (web-free flaky scoring); Airflow's mail API wrapped in `compat.airflow`
+  (`send_airflow_email`) so compat is again the only module importing Airflow; `run_tracking_url`
+  lives in `plugin` with `config.get_base_url()` — the link is independent of the email flags.
+- Audit hardening: atomic, concurrency-safe alert-log writes; memory-bounded Allure attachment
+  (>50 MB raw never buffered); every `test_outcomes` consumer tolerates a row without `outcome`;
+  SMTP config validated (header-safe sender, port range, half-credentials warning, recipient cap)
+  with one normalization path for automatic and manual sends.
 
 ### Tests
-- Alerting: pure classification + HTML rendering (variant colours, escaped hostile ids, capped
-  lists); gather + orchestrator against a temp source + spy mailer (silent on a clean pass, sends on
-  fail / flaky, `always` sends a pass, dry-run / no-recipient no-ops, send failure swallowed, warns
-  when unconfigured); recipient validation / dedupe; the SMTP transport as `multipart/alternative`
-  via a fake server (+ header-injection guard) and explicit-SMTP precedence; a load test
-  (window-bounded on a 400-run history); the producer `email=` gate; and the `compat.airflow` mail
-  shim. Endpoint `POST /api/reports/{id}/email`: RBAC 403, 400 on bad / too-many / injection
-  recipients, 404 / 503 / 502, HTML delivered. Send-log + attachment: history recorded for delivered
-  and failed sends (not dry-run), capped at 50, hostile fields truncated; Allure zip attached when
-  present, skipped when oversized. UI: the trend + its date axis, the ✉ button (hidden without a
-  transport) + dialog validation, the ✉ bench modal, Outcome sorting. A real **end-to-end suite**:
-  10 archived runs of a `@pytest.mark.flaky(reruns=3)` test — every run settles green, parses
-  cleanly, stays invisible to the cross-run flaky detector (junit stores only the final outcome),
-  and notifies as "passed".
+- 336 unit / 75 UI. Alerting end to end (pure classification + HTML, orchestrator vs a temp
+  source + spy mailer, SMTP transport + header-injection guard, endpoint RBAC / validation
+  errors, send-log + attachments, config validation, a window-bounded load test) plus UI
+  coverage for the trend, ✉ dialog + live bench, donut geometry (ink-centre pixel scan, hover
+  stability, full-circle case), short deep-links (happy + stale), and a real e2e suite: 10 runs
+  of a `@pytest.mark.flaky(reruns=3)` test settle green and stay invisible to the detector.
 
 ## [0.5.0] - 2026-07-02
 
@@ -392,7 +379,8 @@ the Airflow 3 web UI.
 - CI/CD: lint, type-check, unit (py3.10–3.13) + Airflow 3 integration matrices,
   CodeQL, OpenSSF Scorecard, DCO, and Trusted-Publishing release workflows.
 
-[Unreleased]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.3.1...v0.3.2

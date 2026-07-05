@@ -74,8 +74,8 @@ def test_donut_small_slices_do_not_overlap(dash):
     segs = page.eval_on_selector_all(
         ".dseg",
         "els => els.map(c => ({"
-        " drawn: parseFloat(c.getAttribute('stroke-dasharray').split(' ')[0]),"
-        " start: -parseFloat(c.getAttribute('stroke-dashoffset')),"
+        " drawn: parseFloat(c.getAttribute('data-drawn')),"
+        " start: parseFloat(c.getAttribute('data-start')),"
         " status: c.getAttribute('data-status')}))",
     )
     assert len(segs) >= 3, f"expected pass+fail+error slices, got {segs}"
@@ -512,17 +512,25 @@ def test_email_button_hidden_without_transport(dash):
 
 
 def test_alerts_bench_lists_recipients_and_status(dash):
-    # The run's toolbar shows an ✉ bench with the send count; clicking it opens the log
-    # listing each send's recipients with a delivered ✓ / failed ✗ mark.
+    # The run's toolbar shows an ✉ bench whose count is SPLIT by delivery outcome —
+    # a green ✓N for delivered and a red ✗N for failed — so a bounce is visible
+    # without opening the log; clicking still opens the per-send list.
     page = dash.page
     page.click("tr.lgrp:has-text('alpha')")
     page.locator(
         "tr.clickable"
-    ).first.click()  # alpha's newest run carries 2 alert entries
+    ).first.click()  # alpha's newest run carries 2 alert entries (1 ok + 1 failed)
     expect(page.locator("dialog#detail")).to_be_visible()
     btn = page.locator("#alerts-btn")
     expect(btn).to_be_visible()
-    assert btn.locator(".af-count").inner_text().strip() == "2"
+    ok_chip = btn.locator(".af-count.ok")
+    bad_chip = btn.locator(".af-count.bad")
+    # Plain numbers — colour alone says delivered (green) vs failed (red), no glyphs.
+    assert ok_chip.inner_text().strip() == "1"
+    assert bad_chip.inner_text().strip() == "1"
+    ok_color = ok_chip.evaluate("el => getComputedStyle(el).color")
+    bad_color = bad_chip.evaluate("el => getComputedStyle(el).color")
+    assert ok_color != bad_color
     btn.click()
     expect(page.locator("dialog#alerts-dlg")).to_be_visible()
     rows = page.locator("#al-list .al-row")
@@ -539,6 +547,15 @@ def test_alerts_bench_lists_recipients_and_status(dash):
     page.click("#al-close")
     expect(page.locator("dialog#alerts-dlg")).to_be_hidden()
     assert dash.errors == []
+
+
+def test_short_deep_link_opens_the_run(page, base_url):
+    # The task-log tracking link uses the SHORT readable form (?dag=&run=&task=&try=),
+    # not the long opaque token — the viewer resolves it against the loaded list.
+    page.goto(base_url + "/?dag=alpha&run=r005&task=suite&try=1")
+    expect(page.locator("dialog#detail")).to_be_visible(timeout=20000)
+    header = page.locator("dialog#detail").inner_text()
+    assert "alpha" in header and "suite" in header
 
 
 def test_alerts_bench_absent_without_history(dash):
@@ -648,6 +665,37 @@ def test_email_dialog_dedupes_duplicate_addresses(email_dash):
     )
 
 
+def test_manual_send_updates_bench_without_reopening(email_dash):
+    # A manual send must refresh the ✉ bench IN PLACE — no reopening the run. The
+    # fixture's SMTP host refuses connections, so the send fails -> a "failed" entry
+    # lands in the history -> the red count grows live. (Order-independent: other
+    # email tests on this session server may already have recorded sends.)
+    page = email_dash.page
+    _open_first_run(page)
+    # Let any in-flight history write from a PRIOR email test settle, then take the
+    # baseline from the SERVER (the bench may lag behind by design — that's the point).
+    page.wait_for_timeout(600)
+    before = page.evaluate(
+        """() => {
+          const id = new URLSearchParams(location.search).get('report');
+          return fetch('api/reports/' + encodeURIComponent(id))
+            .then(r => r.json()).then(d => (d.alerts || []).length);
+        }"""
+    )
+    page.click("#d-email")
+    expect(page.locator("dialog#email-dlg")).to_be_visible()
+    page.click("#em-send")  # empty field -> configured recipients
+    expect(page.locator("#em-status")).to_have_class(re.compile("err"), timeout=15000)
+    btn = page.locator("#alerts-btn")
+    expect(btn).to_be_visible(timeout=5000)  # present WITHOUT reopening the run
+    expect(btn.locator(".af-count.bad")).to_have_text(str(before + 1), timeout=5000)
+    # And the log modal opens from the live-updated bench.
+    page.click("#em-cancel")
+    btn.click()
+    expect(page.locator("dialog#alerts-dlg")).to_be_visible()
+    assert page.locator("#al-list .al-row").count() == before + 1
+
+
 def test_toolbar_buttons_adapt_to_any_viewport(dash):
     # A run accumulates many toolbar actions (links, compare, flaky, heatmap, clusters,
     # emails) -- at ANY width they must wrap into rows without overlapping or overflowing.
@@ -739,3 +787,110 @@ def test_chart_bar_hover_does_not_change_fill(dash):
         f"bar hover must not filter the fill, got {st['filter']}"
     )
     assert st["shadow"] not in ("none", ""), "bar hover should show a ring"
+
+
+def test_donut_pct_label_is_dead_centre(dash):
+    # The % number must be centred by its INK (rendered pixels), not its em box —
+    # digits have no descenders, so em-box centring leaves them visually high.
+    # Measure: rasterize the svg with the "of N" label hidden, scan the hole area.
+    page = dash.page
+    page.click("tr.lgrp:has-text('alpha')")
+    page.locator("tr.clickable").first.click()
+    expect(page.locator("dialog#detail")).to_be_visible()
+    page.wait_for_selector("svg.donut")
+    ink = page.evaluate(
+        """async () => {
+          const svg = document.querySelector('svg.donut');
+          const lbl = svg.querySelector('.donut-lbl');
+          const prev = lbl.style.visibility; lbl.style.visibility = 'hidden';
+          const pct = svg.querySelector('.donut-pct');
+          pct.style.fill = '#000';  // solid, measurable colour
+          const xml = new XMLSerializer().serializeToString(svg);
+          const img = new Image();
+          const done = new Promise(r => (img.onload = r));
+          img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(xml);
+          await done;
+          const S = 4;  // supersample: 1 viewBox unit = 4px
+          const c = document.createElement('canvas'); c.width = c.height = 120 * S;
+          const g = c.getContext('2d'); g.drawImage(img, 0, 0, 120 * S, 120 * S);
+          const d = g.getImageData(0, 0, 120 * S, 120 * S).data;
+          // Scan only the hole (radius < 38 units) so the arcs don't interfere.
+          let top = 1e9, bot = -1e9, left = 1e9, right = -1e9;
+          for (let y = 0; y < 120 * S; y++) for (let x = 0; x < 120 * S; x++) {
+            const dx = x / S - 60, dy = y / S - 60;
+            if (dx * dx + dy * dy > 38 * 38) continue;
+            if (d[(y * 120 * S + x) * 4 + 3] > 40) {
+              if (y < top) top = y; if (y > bot) bot = y;
+              if (x < left) left = x; if (x > right) right = x;
+            }
+          }
+          lbl.style.visibility = prev; pct.style.fill = '';
+          return { cx: (left + right) / 2 / S, cy: (top + bot) / 2 / S };
+        }"""
+    )
+    assert abs(ink["cx"] - 60) < 1.2, f"ink off-centre horizontally: {ink['cx']}"
+    assert abs(ink["cy"] - 60) < 1.2, f"ink off-centre vertically: {ink['cy']}"
+
+
+def test_donut_hover_holds_steady_from_inside(dash):
+    # Cursor entering a slice FROM THE HOLE must acquire hover and keep it (the old
+    # scale-only lift moved the inner edge away from the cursor -> strobing hover).
+    page = dash.page
+    page.click("tr.lgrp:has-text('alpha')")
+    page.locator("tr.clickable").first.click()
+    expect(page.locator("dialog#detail")).to_be_visible()
+    svg = page.locator("svg.donut").bounding_box()
+    cx, cy = svg["x"] + svg["width"] / 2, svg["y"] + svg["height"] / 2
+    unit = svg["width"] / 120  # CSS px per viewBox unit
+    # Walk out of the hole to just inside the ring's INNER edge (ring spans r=44..56).
+    import math
+
+    hover_seen = False
+    for deg in range(0, 360, 15):  # find an angle where a slice is drawn
+        x = cx + math.cos(math.radians(deg)) * 45.5 * unit
+        y = cy + math.sin(math.radians(deg)) * 45.5 * unit
+        page.mouse.move(cx, cy)  # start in the hole, like a real cursor path
+        page.mouse.move(x, y, steps=4)
+        page.wait_for_timeout(180)  # let the lift transition finish
+        if page.evaluate("!!document.querySelector('.dseg:hover')"):
+            hover_seen = True
+            # Poll across two more transition periods: hover must never drop.
+            for _ in range(3):
+                page.wait_for_timeout(130)
+                assert page.evaluate("!!document.querySelector('.dseg:hover')"), (
+                    "hover strobed off — the scaled slice escaped the cursor"
+                )
+            break
+    assert hover_seen, "no slice found under any probe angle"
+    assert dash.errors == []
+
+
+def test_short_deep_link_with_unknown_run_is_harmless(page, base_url):
+    # Coordinates that match nothing (stale link, pruned run) must not open a dialog,
+    # show an error, or throw — the dashboard just loads normally.
+    errors: list = []
+    page.on("pageerror", lambda exc: errors.append(str(exc)))
+    page.goto(base_url + "/?dag=alpha&run=r005&task=suite&try=99")  # try mismatch
+    page.wait_for_selector("#kpis:not([hidden])", timeout=20000)
+    page.wait_for_timeout(400)
+    assert not page.locator("dialog#detail").is_visible()
+    assert errors == []
+
+
+def test_donut_single_status_renders_full_circle(green_dash):
+    # An all-passed run exercises the degenerate-arc branch: ONE slice drawn as a
+    # genuine full <circle> (a 360° path arc collapses), labelled 100%.
+    page = green_dash.page
+    page.locator("tr.clickable, tr.lgrp").first.click()
+    row = page.locator("tr.clickable").first
+    if row.count():
+        row.click()
+    expect(page.locator("dialog#detail")).to_be_visible()
+    page.wait_for_selector(".dseg")
+    segs = page.eval_on_selector_all(
+        ".dseg", "els => els.map(e => ({tag: e.tagName, status: e.dataset.status}))"
+    )
+    assert segs == [{"tag": "circle", "status": "passed"}]
+    # SVG <text>: text_content, not inner_text (Playwright: "Node is not an HTMLElement").
+    assert (page.locator(".donut-pct").text_content() or "").strip() == "100%"
+    assert green_dash.errors == []

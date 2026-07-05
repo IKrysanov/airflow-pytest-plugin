@@ -390,13 +390,18 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .detail-top .kpis { flex: 1 1 280px; margin: 0; }
   /* overflow:visible so a lifted slice isn't clipped at the svg's edge. */
   .donut { width: 124px; height: 124px; flex: 0 0 auto; overflow: visible; }
-  .donut-pct { font-size: 27px; font-weight: 700; fill: var(--fg); }
-  .donut-lbl { font-size: 11px; fill: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
-  /* Hovering a slice lifts it (scaling a centred circle pushes its arc out). */
+  .donut-pct { font-size: 21px; font-weight: 700; fill: var(--fg); }
+  .donut-lbl { font-size: 10px; fill: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  /* Highest-quality anti-aliasing for the ring's arcs (no crisp-edge stair-stepping). */
+  .donut path, .donut circle { shape-rendering: geometricPrecision; }
+  /* Hovering a slice lifts it (scaling a centred circle pushes its arc out). The
+     thicker hover stroke keeps the scaled ring a SUPERSET of the resting one
+     ([50*1.07±10] covers [50±6]), so a cursor entering from the hole can't fall off
+     the arc mid-transition and strobe the hover on/off. */
   .dseg { cursor: pointer; stroke-linecap: round;
-    transition: opacity .12s, transform .12s ease-out;
+    transition: opacity .12s, transform .12s ease-out, stroke-width .12s ease-out;
     transform-box: view-box; transform-origin: 60px 60px; }
-  .dseg:hover { opacity: 1; transform: scale(1.07); }
+  .dseg:hover { opacity: 1; transform: scale(1.07); stroke-width: 20; }
   .af-links { display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
     margin: 16px 0 2px; font-size: 13px; }
   .af-link { display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px;
@@ -542,10 +547,13 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .al-main { flex: 1 1 auto; min-width: 0; }
   .al-rcpts { overflow-wrap: anywhere; }
   .al-meta { color: var(--muted); font-size: 12px; margin-top: 2px; }
-  /* Count chip inside the toolbar "Emails" button. */
+  /* Count chips inside the toolbar "Emails" button; tinted per outcome so the
+     delivered/failed split reads at a glance. */
   .af-count { background: var(--surface-2); border: 1px solid var(--border);
     border-radius: 999px; padding: 0 7px; font-size: 11px; font-weight: 700;
     font-variant-numeric: tabular-nums; }
+  .af-count.ok { color: var(--pass); border-color: color-mix(in srgb, var(--pass) 45%, var(--border)); }
+  .af-count.bad { color: var(--fail); border-color: color-mix(in srgb, var(--fail) 45%, var(--border)); }
   #panel-info-body p { margin: 0; color: var(--fg); font-size: 13.5px; line-height: 1.6; }
   /* Heatmap wants width (more run columns). Wide on its own; inset when opened from
      inside a run so it doesn't touch the run dialog's frame. */
@@ -2530,7 +2538,24 @@ _INDEX_HTML = r"""<!DOCTYPE html>
         applyFilter();
         loadFlaky();
         // Open a deep-linked report; the param rides the parent URL when embedded.
-        var want = new URLSearchParams(linkLoc().search).get("report");
+        var dlq = new URLSearchParams(linkLoc().search);
+        var want = dlq.get("report");
+        if (!want && dlq.get("dag") && dlq.get("run") && dlq.get("task")) {
+          // Short human-readable form (the task-log tracking link): resolve the
+          // coordinates against the loaded list, so the URL needs no long token
+          // that a log viewer could wrap or truncate.
+          var wTry = dlq.get("try"), wMap = dlq.get("map");
+          for (var di = 0; di < allReports.length; di++) {
+            var s0 = allReports[di];
+            if (s0.dag_id === dlq.get("dag") && s0.run_id === dlq.get("run")
+                && s0.task_id === dlq.get("task")
+                && (wTry === null || String(s0.try_number) === wTry)
+                && (wMap === null || String(s0.map_index) === wMap)) {
+              want = s0.id;
+              break;
+            }
+          }
+        }
         if (want && !detail) openDetail(want);
       })
       .catch(function (e) {
@@ -2964,10 +2989,12 @@ _INDEX_HTML = r"""<!DOCTYPE html>
 
   function outcomeLabel(o) { return t(o) || o; }
 
-  // Success donut: clickable slices filter the case table by status.
+  // Success donut: clickable slices filter the case table by status. Slices are REAL
+  // <path> arcs, not dashed circles — Chrome flattens dashes on a curve into visible
+  // facets ("ribbed" colour edges), while genuine arcs anti-alias smoothly at any scale.
   function donut(m) {
     var total = m.total || 0;
-    var SW = 12, R = 50;
+    var SW = 12, R = 50, CX = 60, CY = 60;
     var C = 2 * Math.PI * R;
     var ring = '<circle cx="60" cy="60" r="50" fill="none" stroke="var(--surface-2)" stroke-width="' + SW + '"/>';
     var segs = [["passed", "var(--pass)", m.passed], ["skipped", "var(--skip)", m.skipped],
@@ -2987,21 +3014,40 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       var pct = Math.round((v / total) * 100);
       var lit = filter === "all" || filter === s[0];
       var drawn = Math.max((v / total) * avail, 0.1);  // tiny share -> a rounded dot
-      parts += '<circle class="dseg" data-status="' + s[0] + '" data-count="' + v
-        + '" data-pct="' + pct + '" cx="60" cy="60" r="50" '
-        + 'fill="none" stroke="' + s[1] + '" stroke-width="' + SW + '" stroke-dasharray="'
-        + drawn.toFixed(2) + " " + (C - drawn).toFixed(2) + '" stroke-dashoffset="'
-        + (-(cursor + GAP / 2)).toFixed(2) + '" opacity="' + (lit ? 1 : 0.3) + '"></circle>';
+      // data-drawn/data-start keep the layout inspectable (tests) now that no
+      // dasharray carries it.
+      var attrs = 'class="dseg" data-status="' + s[0] + '" data-count="' + v
+        + '" data-pct="' + pct + '" data-drawn="' + drawn.toFixed(2)
+        + '" data-start="' + (cursor + GAP / 2).toFixed(2)
+        + '" fill="none" stroke="' + s[1] + '" stroke-width="' + SW
+        + '" opacity="' + (lit ? 1 : 0.3) + '"';
+      if (nSeg === 1) {
+        // The whole ring: a 360° arc degenerates, so draw the full circle.
+        parts += "<circle " + attrs + ' cx="60" cy="60" r="50"></circle>';
+      } else {
+        // Angles from 12 o'clock; arc length / R converts the footprint to radians.
+        var a0 = -Math.PI / 2 + (cursor + GAP / 2) / R;
+        var a1 = a0 + drawn / R;
+        parts += "<path " + attrs + ' d="M ' + (CX + R * Math.cos(a0)).toFixed(3) + " "
+          + (CY + R * Math.sin(a0)).toFixed(3) + " A " + R + " " + R + " 0 "
+          + ((a1 - a0) > Math.PI ? 1 : 0) + " 1 "
+          + (CX + R * Math.cos(a1)).toFixed(3) + " " + (CY + R * Math.sin(a1)).toFixed(3)
+          + '"></path>';
+      }
       cursor += drawn + GAP;
     });
     var pct = total > 0 ? Math.round((m.passed / total) * 100) : null;
     var ofN = esc(t("ofWord")) + " " + total;
-    var center = '<text x="60" y="58" text-anchor="middle" class="donut-pct">'
+    // Centre the number by its INK, not its em box: digits/% have no descenders, so
+    // em-box centring (dominant-baseline) leaves them visually high. Baseline 65.4 puts
+    // the measured ink centre of the 21px digits on (60,60) — pinned by a pixel-scan UI
+    // test. Holds for any value: digit ink height is constant, text-anchor centres width.
+    var center = '<text x="60" y="65.4" text-anchor="middle" class="donut-pct">'
       + (pct == null ? "—" : pct + "%") + "</text>"
-      + '<text x="60" y="76" text-anchor="middle" class="donut-lbl">' + ofN + "</text>";
+      + '<text x="60" y="83" text-anchor="middle" class="donut-lbl">' + ofN + "</text>";
     return '<svg viewBox="0 0 120 120" class="donut" role="img" aria-label="'
       + (pct == null ? "" : pct + "% — ") + total + " " + esc(t("testsWord")) + '">'
-      + '<g transform="rotate(-90 60 60)">' + ring + parts + "</g>" + center + "</svg>";
+      + ring + parts + center + "</svg>";
   }
 
   // Links back to the run's DAG / DAG run / task instance in the Airflow UI.
@@ -3048,13 +3094,24 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     }
     // How many times this run was mailed; opens the send log.
     if ((m.alerts || []).length > 0) {
-      var mail = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"'
-        + ' stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
-        + '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg>';
       out += '<button type="button" class="af-link" id="alerts-btn" data-i18n-al="alertsBtnAl">'
-        + mail + esc(t("alertsBtn")) + ' <span class="af-count">' + m.alerts.length + "</span></button>";
+        + alertsBenchHtml(m.alerts) + "</button>";
     }
     return out + "</div>";
+  }
+  var MAIL_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"'
+    + ' stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+    + '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg>';
+  // The ✉ bench's inner HTML: counts split by delivery outcome — green = delivered,
+  // red = failed — colour alone carries the meaning (no glyphs), numbers stay clean.
+  function alertsBenchHtml(alerts) {
+    var ok = 0;
+    for (var i = 0; i < alerts.length; i++) if (alerts[i].ok) ok++;
+    var fail = alerts.length - ok;
+    var chips = "";
+    if (ok > 0) chips += ' <span class="af-count ok">' + ok + "</span>";
+    if (fail > 0) chips += ' <span class="af-count bad">' + fail + "</span>";
+    return MAIL_SVG + esc(t("alertsBtn")) + chips;
   }
   function outcomeDot(o) {
     var col = { passed: "--pass", failed: "--fail", error: "--error", skipped: "--skip" }[o] || "--muted";
@@ -3657,6 +3714,35 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     emTo.focus();
   }
   function closeEmail() { if (emailDlg.open) emailDlg.close(); else emailDlg.removeAttribute("open"); }
+  // After a manual send the run's stored history has a fresh entry (delivered OR
+  // failed). Re-pull the detail and refresh the ✉ bench in place, so the user sees
+  // the updated split without reopening the run.
+  function refreshAlertsBench() {
+    var forId = currentId;
+    if (!forId) return;
+    fetch(API + "reports/" + encodeURIComponent(forId))
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) {
+        if (!d || !detail || currentId !== forId) return;  // run switched meanwhile
+        detail.alerts = d.alerts || [];
+        var links = dBody.querySelector(".af-links");
+        if (!links) return;
+        var btn = document.getElementById("alerts-btn");
+        if (!detail.alerts.length) { if (btn) btn.remove(); return; }
+        if (!btn) {  // first send for this run: the bench appears live
+          btn = document.createElement("button");
+          btn.type = "button";
+          btn.className = "af-link";
+          btn.id = "alerts-btn";
+          btn.setAttribute("data-i18n-al", "alertsBtnAl");
+          btn.title = t("alertsBtnAl");
+          btn.addEventListener("click", function () { openAlertsLog(detail); });
+          links.appendChild(btn);
+        }
+        btn.innerHTML = alertsBenchHtml(detail.alerts);
+      })
+      .catch(function () { /* cosmetic refresh only; the send result is already shown */ });
+  }
   // Mirrors the backend validator (the server re-checks anyway) for instant feedback.
   var EMAIL_JS_RE = /^[A-Za-z0-9!#$%&'*+\/=?^_`{|}~-]+(?:\.[A-Za-z0-9!#$%&'*+\/=?^_`{|}~-]+)*@(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$/;
   function validEmail(s) {
@@ -3692,6 +3778,9 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     }).then(function (r) {
       return r.json().catch(function () { return {}; }).then(function (d) { return { ok: r.ok, d: d }; });
     }).then(function (res) {
+      // Either way the run's history may have a new entry (a failed handoff is
+      // recorded too) — refresh the ✉ bench so it updates without reopening.
+      refreshAlertsBench();
       if (res.ok && res.d && res.d.sent) {
         setEmStatus(t("emailSent"), "ok");
         setTimeout(function () { if (emailDlg.open) closeEmail(); }, 900);

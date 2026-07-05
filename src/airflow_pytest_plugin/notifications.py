@@ -49,6 +49,7 @@ from .config import (
     DEFAULT_FLAKY_WINDOW,
     DEFAULT_SUCCESS_THRESHOLD,
     get_alerts_recipients,
+    get_base_url,
     get_conf_value,
     get_flaky_min_score,
     get_flaky_window,
@@ -108,6 +109,12 @@ def dedupe_emails(addresses: Sequence[str]) -> tuple[str, ...]:
 
 
 # -- policy -----------------------------------------------------------------------------------
+#: Upper bound on CONFIGURED recipients (env / cfg). Generous — a team list belongs in a
+#: mailing-list address anyway — but keeps a runaway config from turning every archive
+#: into a mass mailing. (The manual UI endpoint has its own, much lower cap.)
+_MAX_CONFIG_RECIPIENTS = 50
+
+
 @dataclass(frozen=True)
 class AlertPolicy:
     """Who to email, the bar below which a run counts as failing, and the flaky window."""
@@ -137,8 +144,17 @@ class AlertPolicy:
                 _log.warning(
                     "dropping invalid alert recipient from config: %r", address
                 )
+        recipients = dedupe_emails(valid)
+        if len(recipients) > _MAX_CONFIG_RECIPIENTS:
+            _log.warning(
+                "%d alert recipients configured; keeping the first %d "
+                "(use a mailing-list address for larger audiences)",
+                len(recipients),
+                _MAX_CONFIG_RECIPIENTS,
+            )
+            recipients = recipients[:_MAX_CONFIG_RECIPIENTS]
         return cls(
-            recipients=dedupe_emails(valid),
+            recipients=recipients,
             success_threshold=get_success_threshold(),
             flaky_window=get_flaky_window(),
             flaky_min_score=get_flaky_min_score(),
@@ -436,6 +452,29 @@ class AirflowMailer:
         )
 
 
+_DEFAULT_SENDER = "airflow-pytest@localhost"
+
+
+def _sanitize_sender(raw: str | None) -> str:
+    """A header-safe ``From`` address, falling back to the default on garbage.
+
+    Config is operator-controlled but still deserves defence in depth: a value with
+    control characters or whitespace could smuggle extra headers into the message, and
+    one without ``@`` is guaranteed to bounce. Deliberately laxer than
+    :func:`is_valid_email` so internal relay addresses (``user@mailhost``, no TLD)
+    keep working.
+    """
+    s = (raw or "").strip()
+    if not s:
+        return _DEFAULT_SENDER
+    if "@" not in s or any(ord(ch) <= 32 or ord(ch) == 127 for ch in s):
+        _log.warning(
+            "ignoring invalid smtp_from %r; sending as %r", s[:100], _DEFAULT_SENDER
+        )
+        return _DEFAULT_SENDER
+    return s
+
+
 @dataclass(frozen=True)
 class SmtpConfig:
     """Standalone SMTP settings (used when ``AIRFLOW_PYTEST_SMTP_HOST`` is set)."""
@@ -444,12 +483,17 @@ class SmtpConfig:
     port: int = 25
     user: str | None = None
     password: str | None = None
-    sender: str = "airflow-pytest@localhost"
+    sender: str = _DEFAULT_SENDER
     starttls: bool = True
 
     @classmethod
     def from_config(cls) -> SmtpConfig | None:
-        """Build from env / cfg, or ``None`` when no SMTP host is configured."""
+        """Build from env / cfg, or ``None`` when no SMTP host is configured.
+
+        Values are validated, not trusted: a bad port falls back to 25 with a warning,
+        the sender is header-sanitized, and a user *or* password alone (login would be
+        silently skipped, ending in an opaque 530 from the server) is called out.
+        """
 
         def val(env: str, key: str) -> str | None:
             raw = os.environ.get(env)
@@ -461,20 +505,33 @@ class SmtpConfig:
         if not host:
             return None
         port_raw = val("AIRFLOW_PYTEST_SMTP_PORT", "smtp_port")
-        try:
-            port = int(port_raw) if port_raw else 25
-        except ValueError:
-            port = 25
+        port = 25
+        if port_raw:
+            try:
+                port = int(port_raw)
+            except ValueError:
+                _log.warning("invalid smtp_port %r; using 25", port_raw[:20])
+                port = 25
+            else:
+                if not 1 <= port <= 65535:
+                    _log.warning("smtp_port %d out of range; using 25", port)
+                    port = 25
+        user = val("AIRFLOW_PYTEST_SMTP_USER", "smtp_user")
+        password = val("AIRFLOW_PYTEST_SMTP_PASSWORD", "smtp_password")
+        if bool(user) != bool(password):
+            _log.warning(
+                "smtp_user and smtp_password must BOTH be set for SMTP login; "
+                "only one is configured, so the send will NOT authenticate"
+            )
         starttls_raw = (
             val("AIRFLOW_PYTEST_SMTP_STARTTLS", "smtp_starttls") or ""
         ).lower()
         return cls(
             host=host,
             port=port,
-            user=val("AIRFLOW_PYTEST_SMTP_USER", "smtp_user"),
-            password=val("AIRFLOW_PYTEST_SMTP_PASSWORD", "smtp_password"),
-            sender=val("AIRFLOW_PYTEST_SMTP_FROM", "smtp_from")
-            or "airflow-pytest@localhost",
+            user=user,
+            password=password,
+            sender=_sanitize_sender(val("AIRFLOW_PYTEST_SMTP_FROM", "smtp_from")),
             starttls=starttls_raw not in {"0", "false", "no", "off", "n", "f"},
         )
 
@@ -589,15 +646,6 @@ def flaky_nodes_for(
     )
 
 
-def _resolve_base_url() -> str | None:
-    base = (
-        get_conf_value("api", "base_url")
-        or get_conf_value("webserver", "base_url")
-        or ""
-    ).rstrip("/")
-    return base or None
-
-
 def build_run_alert(
     source: ReportSource,
     ref: ReportRef,
@@ -635,7 +683,7 @@ def build_run_alert(
         policy,
         failures=failures,
         flaky=flaky,
-        base_url=_resolve_base_url(),
+        base_url=get_base_url(),
         always=always,
     )
     return alerts[0] if alerts else None

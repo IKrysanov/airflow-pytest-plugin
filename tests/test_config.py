@@ -170,3 +170,40 @@ def test_slow_min_delta_default_env_and_floor(monkeypatch):
     for bad in ("x", "-1"):  # invalid / negative -> default
         monkeypatch.setenv(config.SLOW_MIN_DELTA_ENV, bad)
         assert config.get_slow_min_delta() == config.DEFAULT_SLOW_MIN_DELTA
+
+
+# --- get_base_url -------------------------------------------------------------------
+
+
+def test_get_base_url_prefers_api_section(monkeypatch):
+    from airflow_pytest_plugin import config as cfg
+
+    monkeypatch.setattr(
+        cfg,
+        "get_conf_value",
+        lambda s, k: {"api": "http://api.host/"}.get(s) if k == "base_url" else None,
+    )
+    assert cfg.get_base_url() == "http://api.host"  # trailing slash stripped
+
+
+def test_get_base_url_falls_back_to_webserver(monkeypatch):
+    from airflow_pytest_plugin import config as cfg
+
+    monkeypatch.setattr(
+        cfg,
+        "get_conf_value",
+        lambda s, k: (
+            {"webserver": "http://legacy.host"}.get(s) if k == "base_url" else None
+        ),
+    )
+    assert cfg.get_base_url() == "http://legacy.host"
+
+
+def test_get_base_url_none_when_unset_or_blank(monkeypatch):
+    from airflow_pytest_plugin import config as cfg
+
+    monkeypatch.setattr(cfg, "get_conf_value", lambda s, k: None)
+    assert cfg.get_base_url() is None
+    # A lone "/" (or whitespace-ish value) must not yield an empty-string base.
+    monkeypatch.setattr(cfg, "get_conf_value", lambda s, k: "/")
+    assert cfg.get_base_url() is None

@@ -204,3 +204,42 @@ def test_send_airflow_email_attachment_name_cannot_escape_staging_dir(monkeypatc
     )
     assert captured["names"] == ["evil.zip", "attachment.bin"]
     assert all("apx-mail-" in p for p in captured["parents"])  # staged, not elsewhere
+
+
+def test_send_airflow_email_silences_only_the_connection_deprecation(
+    monkeypatch, recwarn
+):
+    # Airflow's send_mime_email emits a get_connection_from_secrets DeprecationWarning
+    # on EVERY send (their code, not ours) — it must not spam each task log.
+    import warnings as w
+
+    def fake_send_email(*, to, subject, html_content, files):
+        w.warn(
+            "Using Connection.get_connection_from_secrets from `airflow.models` "
+            "is deprecated. Please use `get` on Connection from sdk",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
+    email_mod = types.ModuleType("airflow.utils.email")
+    email_mod.send_email = fake_send_email
+    _inject_module(monkeypatch, "airflow.utils.email", email_mod)
+
+    compat.send_airflow_email(to=["a@x.io"], subject="S", html_content="h")
+    leaked = [r for r in recwarn if "get_connection_from_secrets" in str(r.message)]
+    assert leaked == []
+
+
+def test_send_airflow_email_lets_other_deprecations_through(monkeypatch, recwarn):
+    # The filter is surgical: any OTHER deprecation must still surface.
+    import warnings as w
+
+    def fake_send_email(*, to, subject, html_content, files):
+        w.warn("something unrelated is deprecated", DeprecationWarning, stacklevel=2)
+
+    email_mod = types.ModuleType("airflow.utils.email")
+    email_mod.send_email = fake_send_email
+    _inject_module(monkeypatch, "airflow.utils.email", email_mod)
+
+    compat.send_airflow_email(to=["a@x.io"], subject="S", html_content="h")
+    assert any("something unrelated" in str(r.message) for r in recwarn)
