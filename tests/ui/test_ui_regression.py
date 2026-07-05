@@ -74,8 +74,8 @@ def test_donut_small_slices_do_not_overlap(dash):
     segs = page.eval_on_selector_all(
         ".dseg",
         "els => els.map(c => ({"
-        " drawn: parseFloat(c.getAttribute('stroke-dasharray').split(' ')[0]),"
-        " start: -parseFloat(c.getAttribute('stroke-dashoffset')),"
+        " drawn: parseFloat(c.getAttribute('data-drawn')),"
+        " start: parseFloat(c.getAttribute('data-start')),"
         " status: c.getAttribute('data-status')}))",
     )
     assert len(segs) >= 3, f"expected pass+fail+error slices, got {segs}"
@@ -445,6 +445,290 @@ def test_radar_pass_rate_matches_chart_avg_globally(dash):
     )
 
 
+def test_reliability_trend_renders(dash):
+    # A run-health sparkline sits under the radar: a current value, a delta chip, and a line.
+    page = dash.page
+    expect(page.locator("#rel-trend .rt-spark")).to_be_visible()
+    now = int(page.locator(".rt-now").text_content().strip())
+    assert 0 <= now <= 100
+    # The line has >= 2 points and an even 2px stroke everywhere (non-scaling under the
+    # stretched viewBox -> no thickness "walk", the same guarantee as the chart hover ring).
+    pts = page.eval_on_selector(".rt-line", "el => el.getAttribute('points')")
+    assert pts and len(pts.split()) >= 2
+    assert (
+        page.eval_on_selector(".rt-line", "el => getComputedStyle(el).strokeWidth")
+        == "2px"
+    )
+    # The delta arrow agrees with its sign class (▲ up / ▼ down / → flat).
+    txt = page.locator(".rt-delta").text_content().strip()
+    cls = page.get_attribute(".rt-delta", "class")
+    arrow = txt[0]
+    assert (
+        (arrow == "▲" and "rt-up" in cls)
+        or (arrow == "▼" and "rt-down" in cls)
+        or (arrow == "→" and "rt-flat" in cls)
+    ), f"arrow/class mismatch: {txt!r} / {cls}"
+    assert dash.errors == []
+
+
+def test_reliability_trend_declines_on_degrading_history(declining_dash):
+    # When run health falls over time, the trend reads as a decline (▼, negative, red).
+    page = declining_dash.page
+    expect(page.locator("#rel-trend .rt-spark")).to_be_visible()
+    txt = page.locator(".rt-delta").text_content().strip()
+    cls = page.get_attribute(".rt-delta", "class")
+    assert "rt-down" in cls, f"expected a declining trend, got {cls} / {txt!r}"
+    assert txt.startswith("▼")
+    assert int(re.search(r"-?\d+", txt).group()) < 0
+    assert int(page.locator(".rt-now").text_content().strip()) < 100
+    assert declining_dash.errors == []
+
+
+def test_reliability_info_modal_covers_the_trend(dash):
+    # The ⓘ popup appends a paragraph explaining the trend (so radar vs trend is self-evident).
+    page = dash.page
+    page.click("#rel-info-btn")
+    expect(page.locator("dialog#rel-info")).to_be_visible()
+    page.wait_for_selector("#rel-info-body .rel-info-list li")
+    # Two intro paragraphs: the axes intro + the appended trend note.
+    assert page.locator("#rel-info-body .rel-info-intro").count() == 2
+    assert (
+        page.locator("#rel-info-body .rel-info-intro").last.inner_text().strip() != ""
+    )
+
+
+def _open_first_run(page):
+    page.click("tr.lgrp:has-text('beta')")  # expand a group
+    page.locator("tr.clickable").first.click()
+    expect(page.locator("dialog#detail")).to_be_visible()
+
+
+def test_email_button_hidden_without_transport(dash):
+    # The default server has no mail transport -> email_available is false -> button hidden.
+    page = dash.page
+    _open_first_run(page)
+    expect(page.locator("#d-email")).to_be_hidden()
+    assert dash.errors == []
+
+
+def test_alerts_bench_lists_recipients_and_status(dash):
+    # The run's toolbar shows an ✉ bench whose count is SPLIT by delivery outcome —
+    # a green ✓N for delivered and a red ✗N for failed — so a bounce is visible
+    # without opening the log; clicking still opens the per-send list.
+    page = dash.page
+    page.click("tr.lgrp:has-text('alpha')")
+    page.locator(
+        "tr.clickable"
+    ).first.click()  # alpha's newest run carries 2 alert entries (1 ok + 1 failed)
+    expect(page.locator("dialog#detail")).to_be_visible()
+    btn = page.locator("#alerts-btn")
+    expect(btn).to_be_visible()
+    ok_chip = btn.locator(".af-count.ok")
+    bad_chip = btn.locator(".af-count.bad")
+    # Plain numbers — colour alone says delivered (green) vs failed (red), no glyphs.
+    assert ok_chip.inner_text().strip() == "1"
+    assert bad_chip.inner_text().strip() == "1"
+    ok_color = ok_chip.evaluate("el => getComputedStyle(el).color")
+    bad_color = bad_chip.evaluate("el => getComputedStyle(el).color")
+    assert ok_color != bad_color
+    btn.click()
+    expect(page.locator("dialog#alerts-dlg")).to_be_visible()
+    rows = page.locator("#al-list .al-row")
+    assert rows.count() == 2
+    # Newest first: the manual failed send (2 recipients, ✗) then the auto delivered one (✓).
+    first, second = rows.nth(0), rows.nth(1)
+    assert (
+        "me@example.com" in first.inner_text()
+        and "boss@example.com" in first.inner_text()
+    )
+    expect(first.locator(".al-fail")).to_be_visible()
+    assert "team@example.com" in second.inner_text()
+    expect(second.locator(".al-ok")).to_be_visible()
+    page.click("#al-close")
+    expect(page.locator("dialog#alerts-dlg")).to_be_hidden()
+    assert dash.errors == []
+
+
+def test_short_deep_link_opens_the_run(page, base_url):
+    # The task-log tracking link uses the SHORT readable form (?dag=&run=&task=&try=),
+    # not the long opaque token — the viewer resolves it against the loaded list.
+    page.goto(base_url + "/?dag=alpha&run=r005&task=suite&try=1")
+    expect(page.locator("dialog#detail")).to_be_visible(timeout=20000)
+    header = page.locator("dialog#detail").inner_text()
+    assert "alpha" in header and "suite" in header
+
+
+def test_alerts_bench_absent_without_history(dash):
+    # A run that was never emailed shows no ✉ bench at all.
+    page = dash.page
+    page.click("tr.lgrp:has-text('beta')")
+    page.locator("tr.clickable").first.click()
+    expect(page.locator("dialog#detail")).to_be_visible()
+    expect(page.locator("#alerts-btn")).to_have_count(0)
+
+
+def test_trend_shows_its_time_span(dash):
+    # The run-health line now carries an explicit time axis: the dates of the first and
+    # last run in view sit under the sparkline, so "over time" is visible, not implied.
+    page = dash.page
+    expect(page.locator("#rel-trend .rt-spark")).to_be_visible()
+    labels = page.locator(".rt-axis span")
+    assert labels.count() == 2
+    assert labels.nth(0).inner_text().strip() != ""
+    assert labels.nth(1).inner_text().strip() != ""
+    # The axis must sit inside the reliability card (no overflow).
+    card = page.locator("#pentagon-card").bounding_box()
+    axis = page.locator(".rt-axis").bounding_box()
+    assert axis["x"] >= card["x"] - 1
+    assert axis["x"] + axis["width"] <= card["x"] + card["width"] + 1
+
+
+def test_trend_dates_differ_over_a_long_history(large_dash):
+    # 3200 runs spread over months: the left (oldest) and right (newest) dates differ.
+    page = large_dash.page
+    expect(page.locator("#rel-trend .rt-spark")).to_be_visible()
+    labels = page.locator(".rt-axis span")
+    assert labels.nth(0).inner_text().strip() != labels.nth(1).inner_text().strip()
+
+
+def test_case_table_sorts_by_outcome(dash):
+    # OUTCOME sorts like the other case columns: ascending puts broken tests first,
+    # descending puts passing ones first.
+    page = dash.page
+    page.click("tr.lgrp:has-text('alpha')")
+    page.locator("tr.clickable").first.click()  # 17 pass / 1 fail / 1 error
+    expect(page.locator("dialog#detail")).to_be_visible()
+    page.wait_for_selector("#case-head th.sortable[data-key='outcome']")
+    page.click("#case-head th.sortable[data-key='outcome']")  # asc: worst first
+    first_badge = (
+        page.locator("#d-body tbody tr").first.locator("td").first.inner_text()
+    )
+    assert "pass" not in first_badge.lower(), f"worst-first sort, got {first_badge!r}"
+    page.click("#case-head th.sortable[data-key='outcome']")  # desc: passing first
+    first_badge = (
+        page.locator("#d-body tbody tr").first.locator("td").first.inner_text()
+    )
+    assert "pass" in first_badge.lower(), f"passing-first sort, got {first_badge!r}"
+    assert dash.errors == []
+
+
+def test_email_dialog_validates_client_side_before_any_request(email_dash):
+    # A malformed recipient is rejected INSTANTLY in the dialog (readable message naming the
+    # address) and no request is even sent -- the server still re-validates as defence.
+    page = email_dash.page
+    _open_first_run(page)
+    expect(page.locator("#d-email")).to_be_visible()
+    page.click("#d-email")
+    expect(page.locator("dialog#email-dlg")).to_be_visible()
+    posts: list = []
+    page.on(
+        "request",
+        lambda r: (
+            posts.append(r.url) if "/email" in r.url and r.method == "POST" else None
+        ),
+    )
+    page.fill("#em-to", "good@example.com, not-an-email")
+    page.click("#em-send")
+    expect(page.locator("#em-status.err")).to_be_visible()
+    assert (
+        "not-an-email" in page.locator("#em-status").inner_text()
+    )  # names the bad address
+    page.wait_for_timeout(300)
+    assert posts == [], "invalid input must never reach the server"
+    page.click("#em-cancel")
+    expect(page.locator("dialog#email-dlg")).to_be_hidden()
+    assert email_dash.errors == []  # no console 400s: nothing was sent
+
+
+def test_email_dialog_dedupes_duplicate_addresses(email_dash):
+    # Two identical addresses (any case) -> the request carries the mailbox once.
+    page = email_dash.page
+    _open_first_run(page)
+    page.click("#d-email")
+    expect(page.locator("dialog#email-dlg")).to_be_visible()
+    payloads: list = []
+    page.on(
+        "request",
+        lambda r: (
+            payloads.append(r.post_data)
+            if "/email" in r.url and r.method == "POST"
+            else None
+        ),
+    )
+    page.fill("#em-to", "dup@example.com, DUP@example.com; dup@example.com")
+    page.click("#em-send")
+    expect(page.locator("#em-status")).to_be_visible()
+    page.wait_for_timeout(400)
+    assert len(payloads) == 1
+    assert (
+        payloads[0].count("dup@example.com") + payloads[0].count("DUP@example.com") == 1
+    )
+
+
+def test_manual_send_updates_bench_without_reopening(email_dash):
+    # A manual send must refresh the ✉ bench IN PLACE — no reopening the run. The
+    # fixture's SMTP host refuses connections, so the send fails -> a "failed" entry
+    # lands in the history -> the red count grows live. (Order-independent: other
+    # email tests on this session server may already have recorded sends.)
+    page = email_dash.page
+    _open_first_run(page)
+    # Let any in-flight history write from a PRIOR email test settle, then take the
+    # baseline from the SERVER (the bench may lag behind by design — that's the point).
+    page.wait_for_timeout(600)
+    before = page.evaluate(
+        """() => {
+          const id = new URLSearchParams(location.search).get('report');
+          return fetch('api/reports/' + encodeURIComponent(id))
+            .then(r => r.json()).then(d => (d.alerts || []).length);
+        }"""
+    )
+    page.click("#d-email")
+    expect(page.locator("dialog#email-dlg")).to_be_visible()
+    page.click("#em-send")  # empty field -> configured recipients
+    expect(page.locator("#em-status")).to_have_class(re.compile("err"), timeout=15000)
+    btn = page.locator("#alerts-btn")
+    expect(btn).to_be_visible(timeout=5000)  # present WITHOUT reopening the run
+    expect(btn.locator(".af-count.bad")).to_have_text(str(before + 1), timeout=5000)
+    # And the log modal opens from the live-updated bench.
+    page.click("#em-cancel")
+    btn.click()
+    expect(page.locator("dialog#alerts-dlg")).to_be_visible()
+    assert page.locator("#al-list .al-row").count() == before + 1
+
+
+def test_toolbar_buttons_adapt_to_any_viewport(dash):
+    # A run accumulates many toolbar actions (links, compare, flaky, heatmap, clusters,
+    # emails) -- at ANY width they must wrap into rows without overlapping or overflowing.
+    page = dash.page
+    page.click("tr.lgrp:has-text('alpha')")
+    page.locator("tr.clickable").first.click()  # the busiest run (incl. the ✉ bench)
+    expect(page.locator("dialog#detail")).to_be_visible()
+    for width in (1280, 900, 640, 480, 375):
+        page.set_viewport_size({"width": width, "height": 900})
+        page.wait_for_timeout(200)
+        geo = page.evaluate(
+            "() => { const d=document.getElementById('detail');"
+            " const boxes=[...d.querySelectorAll('.af-link')].map(e=>e.getBoundingClientRect());"
+            " let overlap=false;"
+            " for (let i=0;i<boxes.length;i++) for (let j=i+1;j<boxes.length;j++) {"
+            "   const a=boxes[i], b=boxes[j];"
+            "   if (a.left < b.right-1 && b.left < a.right-1 && a.top < b.bottom-1 && b.top < a.bottom-1) overlap=true; }"
+            " const dr=d.getBoundingClientRect();"
+            " const outside=boxes.some(b=>b.right > dr.right+1 || b.left < dr.left-1);"
+            " return {n: boxes.length, overlap, outside,"
+            "  hscroll: d.scrollWidth - d.clientWidth}; }"
+        )
+        assert geo["n"] >= 5, f"expected a busy toolbar, got {geo['n']} buttons"
+        assert not geo["overlap"], f"toolbar buttons overlap at {width}px"
+        assert not geo["outside"], (
+            f"toolbar buttons spill out of the dialog at {width}px"
+        )
+        assert geo["hscroll"] <= 2, (
+            f"horizontal scroll at {width}px: {geo['hscroll']}px"
+        )
+    assert dash.errors == []
+
+
 def test_flaky_panel_scrolls_within_bounded_card(large_dash):
     # Many flaky tests: the panel fills its (bounded) card and scrolls INSIDE it, rather than
     # stretching the row to fit every row.
@@ -503,3 +787,110 @@ def test_chart_bar_hover_does_not_change_fill(dash):
         f"bar hover must not filter the fill, got {st['filter']}"
     )
     assert st["shadow"] not in ("none", ""), "bar hover should show a ring"
+
+
+def test_donut_pct_label_is_dead_centre(dash):
+    # The % number must be centred by its INK (rendered pixels), not its em box —
+    # digits have no descenders, so em-box centring leaves them visually high.
+    # Measure: rasterize the svg with the "of N" label hidden, scan the hole area.
+    page = dash.page
+    page.click("tr.lgrp:has-text('alpha')")
+    page.locator("tr.clickable").first.click()
+    expect(page.locator("dialog#detail")).to_be_visible()
+    page.wait_for_selector("svg.donut")
+    ink = page.evaluate(
+        """async () => {
+          const svg = document.querySelector('svg.donut');
+          const lbl = svg.querySelector('.donut-lbl');
+          const prev = lbl.style.visibility; lbl.style.visibility = 'hidden';
+          const pct = svg.querySelector('.donut-pct');
+          pct.style.fill = '#000';  // solid, measurable colour
+          const xml = new XMLSerializer().serializeToString(svg);
+          const img = new Image();
+          const done = new Promise(r => (img.onload = r));
+          img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(xml);
+          await done;
+          const S = 4;  // supersample: 1 viewBox unit = 4px
+          const c = document.createElement('canvas'); c.width = c.height = 120 * S;
+          const g = c.getContext('2d'); g.drawImage(img, 0, 0, 120 * S, 120 * S);
+          const d = g.getImageData(0, 0, 120 * S, 120 * S).data;
+          // Scan only the hole (radius < 38 units) so the arcs don't interfere.
+          let top = 1e9, bot = -1e9, left = 1e9, right = -1e9;
+          for (let y = 0; y < 120 * S; y++) for (let x = 0; x < 120 * S; x++) {
+            const dx = x / S - 60, dy = y / S - 60;
+            if (dx * dx + dy * dy > 38 * 38) continue;
+            if (d[(y * 120 * S + x) * 4 + 3] > 40) {
+              if (y < top) top = y; if (y > bot) bot = y;
+              if (x < left) left = x; if (x > right) right = x;
+            }
+          }
+          lbl.style.visibility = prev; pct.style.fill = '';
+          return { cx: (left + right) / 2 / S, cy: (top + bot) / 2 / S };
+        }"""
+    )
+    assert abs(ink["cx"] - 60) < 1.2, f"ink off-centre horizontally: {ink['cx']}"
+    assert abs(ink["cy"] - 60) < 1.2, f"ink off-centre vertically: {ink['cy']}"
+
+
+def test_donut_hover_holds_steady_from_inside(dash):
+    # Cursor entering a slice FROM THE HOLE must acquire hover and keep it (the old
+    # scale-only lift moved the inner edge away from the cursor -> strobing hover).
+    page = dash.page
+    page.click("tr.lgrp:has-text('alpha')")
+    page.locator("tr.clickable").first.click()
+    expect(page.locator("dialog#detail")).to_be_visible()
+    svg = page.locator("svg.donut").bounding_box()
+    cx, cy = svg["x"] + svg["width"] / 2, svg["y"] + svg["height"] / 2
+    unit = svg["width"] / 120  # CSS px per viewBox unit
+    # Walk out of the hole to just inside the ring's INNER edge (ring spans r=44..56).
+    import math
+
+    hover_seen = False
+    for deg in range(0, 360, 15):  # find an angle where a slice is drawn
+        x = cx + math.cos(math.radians(deg)) * 45.5 * unit
+        y = cy + math.sin(math.radians(deg)) * 45.5 * unit
+        page.mouse.move(cx, cy)  # start in the hole, like a real cursor path
+        page.mouse.move(x, y, steps=4)
+        page.wait_for_timeout(180)  # let the lift transition finish
+        if page.evaluate("!!document.querySelector('.dseg:hover')"):
+            hover_seen = True
+            # Poll across two more transition periods: hover must never drop.
+            for _ in range(3):
+                page.wait_for_timeout(130)
+                assert page.evaluate("!!document.querySelector('.dseg:hover')"), (
+                    "hover strobed off — the scaled slice escaped the cursor"
+                )
+            break
+    assert hover_seen, "no slice found under any probe angle"
+    assert dash.errors == []
+
+
+def test_short_deep_link_with_unknown_run_is_harmless(page, base_url):
+    # Coordinates that match nothing (stale link, pruned run) must not open a dialog,
+    # show an error, or throw — the dashboard just loads normally.
+    errors: list = []
+    page.on("pageerror", lambda exc: errors.append(str(exc)))
+    page.goto(base_url + "/?dag=alpha&run=r005&task=suite&try=99")  # try mismatch
+    page.wait_for_selector("#kpis:not([hidden])", timeout=20000)
+    page.wait_for_timeout(400)
+    assert not page.locator("dialog#detail").is_visible()
+    assert errors == []
+
+
+def test_donut_single_status_renders_full_circle(green_dash):
+    # An all-passed run exercises the degenerate-arc branch: ONE slice drawn as a
+    # genuine full <circle> (a 360° path arc collapses), labelled 100%.
+    page = green_dash.page
+    page.locator("tr.clickable, tr.lgrp").first.click()
+    row = page.locator("tr.clickable").first
+    if row.count():
+        row.click()
+    expect(page.locator("dialog#detail")).to_be_visible()
+    page.wait_for_selector(".dseg")
+    segs = page.eval_on_selector_all(
+        ".dseg", "els => els.map(e => ({tag: e.tagName, status: e.dataset.status}))"
+    )
+    assert segs == [{"tag": "circle", "status": "passed"}]
+    # SVG <text>: text_content, not inner_text (Playwright: "Node is not an HTMLElement").
+    assert (page.locator(".donut-pct").text_content() or "").strip() == "100%"
+    assert green_dash.errors == []

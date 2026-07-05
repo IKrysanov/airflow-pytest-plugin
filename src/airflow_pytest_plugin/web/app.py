@@ -34,15 +34,14 @@ if TYPE_CHECKING:
     from fastapi import FastAPI
     from fastapi.responses import HTMLResponse, Response
 else:
-    # The viewer + icon routes annotate these Response classes; with future
-    # annotations FastAPI resolves them from the module globals, so they must live
-    # here. FastAPI is optional, so guard the import.
+    # Viewer/icon routes annotate these; with future annotations FastAPI resolves
+    # them from module globals, so they must live here. FastAPI is optional.
     try:
         from fastapi.responses import HTMLResponse, Response
     except ModuleNotFoundError:  # pragma: no cover - only without fastapi installed
         HTMLResponse = Response = None
 
-#: Per-tag descriptions shown as section headers in the Swagger UI.
+#: Tag descriptions shown as Swagger UI section headers.
 _OPENAPI_TAGS = [
     {"name": "monitoring", "description": "Liveness of the reader."},
     {
@@ -70,11 +69,11 @@ _API_DESCRIPTION = (
 
 
 def _no_user() -> None:
-    """Standalone-mode user dependency: there is no Airflow user."""
+    """Standalone-mode user dependency: no Airflow user."""
     return None
 
 
-# Airflow renders external_views ``icon`` as a plain ``<img>`` (no currentColor),
+# Airflow renders external_view ``icon`` as a plain ``<img>`` (no currentColor),
 # so bake the colour into the SVG -- one per theme.
 _ICON_LIGHT = "#52525b"
 _ICON_DARK = "#a1a1aa"
@@ -101,7 +100,7 @@ def create_app(
 
     ``read_authorizer`` gates which reports a user may see/open, ``authorizer``
     who may delete; both default to Airflow DAG permissions when its auth is
-    available, else allow-all. ``user_dependency`` overrides current-user resolution.
+    available, else allow-all. ``user_dependency`` overrides current-user lookup.
     """
     from fastapi import FastAPI
 
@@ -139,7 +138,7 @@ def create_app(
     for module in (monitoring, reports, failures, compare, flaky):
         app.include_router(module.build_router(deps))
 
-    # The viewer and its icons are UI assets, not part of the documented JSON API.
+    # Viewer and icons are UI assets, not part of the documented JSON API.
     @app.get("/icon.svg", include_in_schema=False)
     def icon() -> Response:
         return Response(_flask_svg(_ICON_LIGHT), media_type="image/svg+xml")
@@ -150,9 +149,9 @@ def create_app(
 
     @app.get("/", response_class=HTMLResponse, include_in_schema=False)
     def index() -> HTMLResponse:
-        # The whole single-page app (incl. all inline JS) lives in this HTML, so it must
-        # never be served stale -- otherwise a browser/Airflow cache keeps running old JS
-        # after an upgrade. no-store guarantees every load fetches the current build.
+        # The whole SPA (incl. inline JS) lives in this HTML, so it must never be
+        # served stale -- else a browser/Airflow cache runs old JS after an upgrade.
+        # no-store guarantees every load fetches the current build.
         return HTMLResponse(
             index_html(), headers={"Cache-Control": "no-store, must-revalidate"}
         )

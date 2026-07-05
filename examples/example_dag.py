@@ -40,7 +40,7 @@ with DAG(
         test_path="tests/",
         # report_root defaults to AIRFLOW_PYTEST_REPORTS_ROOT / the
         # [pytest_reports] reports_root config / /opt/airflow/pytest-reports.
-        parser=ArchivingResultParser(allure=False),
+        parser=ArchivingResultParser(allure=False, email=True),
         # Tests failing should not abort the pipeline here; the outcome is in
         # XCom and in the reports UI either way.
         fail_on_test_failure=False,

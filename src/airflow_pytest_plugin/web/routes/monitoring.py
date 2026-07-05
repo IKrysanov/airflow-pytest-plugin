@@ -35,17 +35,17 @@ from .common import RouteDeps, ok
 TAG = "monitoring"
 _DIST_NAME = "airflow-pytest-plugin"
 
-#: Cap on per-dag·task metric series, so one scrape can't explode Prometheus cardinality
-#: (or our response size) no matter how many dag·tasks have archived runs.
+#: Caps per-dag·task series so one scrape can't blow up Prometheus cardinality (or our
+#: response size), however many dag·tasks have archived runs.
 _METRICS_MAX_GROUPS = 2000
 
 #: The Prometheus text exposition content type.
 _METRICS_CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
 
-#: Bearer scheme for /api/metrics. Declaring it (rather than a plain header param) makes
-#: Swagger render an "Authorize" box that actually sends the Authorization header — a
-#: plain header field is dropped by Swagger UI. ``auto_error=False`` so we keep returning
-#: our own 404 (disabled) / 401 (bad token) instead of FastAPI's default 403.
+#: Bearer scheme for /api/metrics. Declared (not a plain header param) so Swagger shows an
+#: "Authorize" box that actually sends the Authorization header — Swagger UI drops a plain
+#: header field. ``auto_error=False`` keeps our own 404 (disabled) / 401 (bad token) instead
+#: of FastAPI's default 403.
 _metrics_bearer = HTTPBearer(
     auto_error=False,
     scheme_name="MetricsToken",
@@ -59,9 +59,9 @@ def _esc_label(value: str) -> str:
 
 
 def _fmt(value: float | int) -> str:
-    """Render a metric value at full precision (no ``%g`` rounding -> exact timestamps).
+    """Render a metric value at full precision — no ``%g`` rounding, so timestamps stay exact.
 
-    Whole numbers (incl. integer-valued floats like unix timestamps) print without a
+    Whole numbers (including integer-valued floats like unix timestamps) print without a
     decimal or scientific notation; other floats use the shortest round-trippable repr.
     """
     if isinstance(value, int):
@@ -89,11 +89,10 @@ def render_metrics(
 ) -> str:
     """Build a Prometheus text exposition from run summaries (pure, no I/O).
 
-    Cheap by design: derives everything from the already-scanned summaries (no per-run
-    JUnit parsing), and exposes only group-level series — the LATEST run of each dag·task
-    — with bounded ``{dag_id, task_id}`` cardinality (capped at ``max_groups``). Flaky /
-    slow signals are intentionally NOT computed here (they'd make every scrape read each
-    run); use the JSON APIs for those.
+    Derives everything from the already-scanned summaries (no per-run JUnit parsing), and
+    exposes only group-level series — each dag·task's LATEST run — with ``{dag_id, task_id}``
+    cardinality capped at ``max_groups``. Flaky / slow signals are deliberately left out:
+    they'd force every scrape to read each run. Use the JSON APIs for those.
     """
     summaries = list(summaries)
     latest: dict[tuple[str, str], Any] = {}
@@ -127,8 +126,8 @@ def render_metrics(
         "Reader build info (constant 1; carries the version label).",
         [f'airflow_pytest_build_info{{version="{_esc_label(version)}"}} 1'],
     )
-    # NB: gauges, so NO `_total` suffix (that's reserved for counters; these can decrease
-    # as runs are pruned / tests get fixed).
+    # Gauges, so no `_total` suffix (reserved for counters): these can decrease as runs
+    # are pruned or tests get fixed.
     family(
         "airflow_pytest_runs",
         "Archived runs across all dag·tasks.",
@@ -241,21 +240,21 @@ def build_router(deps: RouteDeps) -> APIRouter:
         ),
     )
     def health() -> JSONResponse:
-        """Liveness + readiness of the reader. No parameters, no report reads, no auth.
+        """Liveness + readiness of the reader. No params, no report reads, no auth.
 
         Fields:
 
         - ``status`` — ``"ok"`` whenever the app is serving (liveness).
-        - ``ready`` / ``reports_root_exists`` — whether the report directory exists
-          and is readable; ``ready`` is ``false`` when the reader can't see its store.
-        - ``reports_root`` — the directory the producer writes to and the reader reads
-          from (``null`` for a non-filesystem source).
-        - ``auth`` — ``"airflow"`` when Airflow RBAC gates the data routes, else
-          ``"open"`` (standalone / allow-all).
-        - ``secure_xml`` — whether JUnit XML is parsed with the hardened ``defusedxml``
-          parser (vs the stdlib fallback).
+        - ``ready`` / ``reports_root_exists`` — whether the report directory exists and
+          is readable; ``ready`` is ``false`` when the reader can't see its store.
+        - ``reports_root`` — where the producer writes and the reader reads (``null`` for
+          a non-filesystem source).
+        - ``auth`` — ``"airflow"`` when Airflow RBAC gates the data routes, else ``"open"``
+          (standalone / allow-all).
+        - ``secure_xml`` — whether JUnit XML uses the hardened ``defusedxml`` parser (vs
+          the stdlib fallback).
 
-        Cheap by design — no directory scan — so it is safe for frequent probes.
+        No directory scan, so it's safe for frequent probes.
         """
         root = getattr(src, "report_root", None)
         exists = bool(
@@ -299,10 +298,10 @@ def build_router(deps: RouteDeps) -> APIRouter:
     ) -> PlainTextResponse:
         """Prometheus exposition of per-dag·task latest-run gauges (group-level only).
 
-        Secure-by-default: disabled (``404``) unless ``AIRFLOW_PYTEST_METRICS_TOKEN`` is
-        configured; when set, the scrape must send ``Authorization: Bearer <token>``
-        (constant-time compared). Load-cheap: one cached directory scan, summary-derived,
-        cardinality-capped — no per-run reads. Configure Prometheus with ``bearer_token``.
+        Secure by default: disabled (``404``) unless ``AIRFLOW_PYTEST_METRICS_TOKEN`` is set;
+        when set, the scrape must send ``Authorization: Bearer <token>`` (compared in constant
+        time). Cheap: one cached directory scan, summary-derived, cardinality-capped, no
+        per-run reads. Point Prometheus at it with ``bearer_token``.
         """
         token = get_metrics_token()
         if not token:

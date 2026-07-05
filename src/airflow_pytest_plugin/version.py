@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Single source of truth for the package version (read from package metadata)."""
+"""Single source of truth for the package version, read from package metadata."""
 
 from __future__ import annotations
 

@@ -21,21 +21,21 @@ import re
 
 from .models import ReportRef
 
-#: The JUnit XML filename the producer writes and the reader parses.
+#: JUnit XML the producer writes and the reader parses.
 REPORT_FILENAME = "junit.xml"
-#: The sidecar identity+summary file. Its presence marks a stored report.
+#: Sidecar identity+summary file; its presence marks a stored report.
 META_FILENAME = "meta.json"
-#: Subdir of a report holding raw Allure results (for Allure TestOps export).
+#: Report subdir holding raw Allure results, for Allure TestOps export.
 ALLURE_DIRNAME = "allure-results"
 
-# Map filesystem-unsafe chars to ``_``. Intentionally lossy; exact identity lives
-# in meta.json / the ReportRef token, never recovered from the path.
+# Lossy on purpose: exact identity lives in meta.json / the ReportRef token,
+# never recovered from the path.
 _UNSAFE = re.compile(r"[^A-Za-z0-9._=+-]")
 
 
 def _safe(component: str) -> str:
     cleaned = _UNSAFE.sub("_", component)
-    # Neutralise empty / dot-only components so a path-traversal segment can never escape the root.
+    # Reject empty / dot-only components so a traversal segment can't escape the root.
     if not cleaned or set(cleaned) <= {"."}:
         return "_"
     return cleaned
@@ -60,9 +60,9 @@ class ReportLayout:
         return os.path.join(*parts)
 
     def report_path(self, root: str, ref: ReportRef) -> str:
-        """Absolute path to the JUnit XML for ``ref``."""
+        """Path to the JUnit XML for ``ref``."""
         return os.path.join(self.dir_for(root, ref), REPORT_FILENAME)
 
     def meta_path(self, root: str, ref: ReportRef) -> str:
-        """Absolute path to the ``meta.json`` for ``ref``."""
+        """Path to the ``meta.json`` for ``ref``."""
         return os.path.join(self.dir_for(root, ref), META_FILENAME)

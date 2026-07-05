@@ -34,9 +34,9 @@ _FALSEY = frozenset({"0", "false", "no", "off", "n", "f"})
 def is_plugin_enabled() -> bool:
     """Whether the reader plugin should register with Airflow.
 
-    Reads ``AIRFLOW_PYTEST_PLUGIN_ENABLE`` -- ``True`` (the default when unset/empty)
-    registers the UI + API; a falsey value (``0``/``false``/``no``/``off``) disables
-    it. Only gates the reader; the producer-side parser is unaffected.
+    From ``AIRFLOW_PYTEST_PLUGIN_ENABLE``: default (unset/empty) registers the UI + API;
+    a falsey value (``0``/``false``/``no``/``off``) disables it. Gates only the reader,
+    not the producer-side parser.
     """
     raw = os.environ.get(ENABLE_ENV_VAR)
     if raw is None or not raw.strip():
@@ -44,18 +44,18 @@ def is_plugin_enabled() -> bool:
     return raw.strip().lower() not in _FALSEY
 
 
-#: How long (seconds) the filesystem source may reuse a directory scan. A short
-#: window lets the several summary-driven endpoints on one page load (list + flaky +
-#: unique-tests, plus filter typing) share one tree walk instead of rescanning each.
+#: How long (seconds) the filesystem source may reuse a directory scan. A short window
+#: lets the summary endpoints firing on one page load (list + flaky + unique-tests, plus
+#: filter typing) share one tree walk instead of each rescanning.
 SCAN_TTL_ENV_VAR = "AIRFLOW_PYTEST_SCAN_CACHE_TTL"
 DEFAULT_SCAN_TTL = 2.0
 
 
 def get_scan_cache_ttl() -> float:
-    """Resolve the directory-scan cache TTL in seconds (``0`` disables caching).
+    """Directory-scan cache TTL in seconds (``0`` disables caching).
 
-    Reads ``AIRFLOW_PYTEST_SCAN_CACHE_TTL``; falls back to ``DEFAULT_SCAN_TTL``.
-    A malformed or negative value falls back to the default.
+    From ``AIRFLOW_PYTEST_SCAN_CACHE_TTL``; malformed or negative falls back to
+    ``DEFAULT_SCAN_TTL``.
     """
     raw = os.environ.get(SCAN_TTL_ENV_VAR)
     if raw is None or not raw.strip():
@@ -67,8 +67,8 @@ def get_scan_cache_ttl() -> float:
     return ttl if ttl >= 0 else DEFAULT_SCAN_TTL
 
 
-#: Retention knobs (all opt-in; unset = keep everything). Each reads its env var,
-#: then the matching ``[pytest_reports]`` cfg key. Non-positive/invalid -> unset.
+#: Retention knobs (all opt-in; unset = keep everything). Each reads its env var, then
+#: the matching ``[pytest_reports]`` cfg key. Non-positive/invalid -> unset.
 RETENTION_MAX_AGE_DAYS_ENV = "AIRFLOW_PYTEST_RETENTION_MAX_AGE_DAYS"
 RETENTION_MAX_RUNS_ENV = "AIRFLOW_PYTEST_RETENTION_MAX_RUNS"
 RETENTION_MAX_TOTAL_MB_ENV = "AIRFLOW_PYTEST_RETENTION_MAX_TOTAL_MB"
@@ -107,8 +107,8 @@ FLAKY_WINDOW_ENV = "AIRFLOW_PYTEST_FLAKY_WINDOW"
 DEFAULT_FLAKY_WINDOW = 30
 FLAKY_QUARANTINE_SCORE_ENV = "AIRFLOW_PYTEST_FLAKY_QUARANTINE_SCORE"
 DEFAULT_FLAKY_QUARANTINE_SCORE = 0.5
-#: Flakiness-score floor: below it a test is too steady to count as flaky, so a lone
-#: blip in a long history (a near-zero flip rate) drops off the list.
+#: Flakiness-score floor: below it a test is too steady to count as flaky, so a lone blip
+#: in a long history (near-zero flip rate) drops off the list.
 FLAKY_MIN_SCORE_ENV = "AIRFLOW_PYTEST_FLAKY_MIN_SCORE"
 DEFAULT_FLAKY_MIN_SCORE = 0.1
 
@@ -121,7 +121,7 @@ def get_flaky_window() -> int:
 
 
 def _unit_float_setting(env_var: str, conf_key: str, default: float) -> float:
-    """A 0–1 float from env, then cfg; default on missing/invalid/out-of-range."""
+    """0–1 float from env, then cfg; default on missing/invalid/out-of-range."""
     raw = os.environ.get(env_var)
     if raw is None or not raw.strip():
         raw = get_conf_value(CONF_SECTION, conf_key)
@@ -150,10 +150,10 @@ def get_flaky_min_score() -> float:
     )
 
 
-#: Duration-regression detector. A test is flagged "slower" when its recent-half
-#: average duration is at least ``SLOW_FACTOR``× its older-half average AND the
-#: absolute increase clears ``SLOW_MIN_DELTA`` seconds (the delta filters noise on
-#: fast tests, where a tiny jitter can still beat the ratio). Shares the flaky window.
+#: Duration-regression detector. Flags "slower" when a test's recent-half avg duration is
+#: at least ``SLOW_FACTOR``× its older-half avg AND the absolute increase clears
+#: ``SLOW_MIN_DELTA`` seconds -- the delta filters noise on fast tests, where tiny jitter
+#: can still beat the ratio. Shares the flaky window.
 SLOW_FACTOR_ENV = "AIRFLOW_PYTEST_SLOW_FACTOR"
 DEFAULT_SLOW_FACTOR = 1.3
 SLOW_MIN_DELTA_ENV = "AIRFLOW_PYTEST_SLOW_MIN_DELTA"
@@ -163,7 +163,7 @@ DEFAULT_SLOW_MIN_DELTA = 0.5
 def _positive_float_setting(
     env_var: str, conf_key: str, default: float, *, minimum: float
 ) -> float:
-    """A float ≥ ``minimum`` from env, then cfg; default on missing/invalid/below."""
+    """Float ≥ ``minimum`` from env, then cfg; default on missing/invalid/below."""
     raw = os.environ.get(env_var)
     if raw is None or not raw.strip():
         raw = get_conf_value(CONF_SECTION, conf_key)
@@ -180,7 +180,7 @@ def _positive_float_setting(
 
 
 def get_slow_factor() -> float:
-    """Multiplier a test's recent-half avg duration must reach to count as a regression."""
+    """Duration multiplier a test's recent-half avg must reach to count as a regression."""
     return _positive_float_setting(
         SLOW_FACTOR_ENV, "slow_factor", DEFAULT_SLOW_FACTOR, minimum=1.0
     )
@@ -193,10 +193,10 @@ def get_slow_min_delta() -> float:
     )
 
 
-#: Pass-rate (0–1) at/above which a run counts as successful ("Passing runs"). The
-#: rate is over executed tests, so a run can carry a few failures and still pass.
-#: At 1.0 a run is successful only with zero failures/errors (the strict default of
-#: older versions). 0.85 is a common "good enough" bar (ISTQB defines no fixed number).
+#: Pass-rate (0–1) at/above which a run counts as successful ("Passing runs"). Rate is
+#: over executed tests, so a run can carry a few failures and still pass. At 1.0 a run
+#: passes only with zero failures/errors (the old strict default); 0.85 is a common
+#: "good enough" bar (ISTQB sets no fixed number).
 SUCCESS_THRESHOLD_ENV = "AIRFLOW_PYTEST_SUCCESS_THRESHOLD"
 DEFAULT_SUCCESS_THRESHOLD = 0.85
 
@@ -209,7 +209,7 @@ def get_success_threshold() -> float:
 
 
 #: Opt-in bearer token for the Prometheus ``/api/metrics`` endpoint. Secure-by-default:
-#: unset = the endpoint is DISABLED (404). When set, a scrape must send
+#: unset = endpoint DISABLED (404); when set, a scrape must send
 #: ``Authorization: Bearer <token>``. Reads the env var, then the cfg key.
 METRICS_TOKEN_ENV = "AIRFLOW_PYTEST_METRICS_TOKEN"
 
@@ -220,6 +220,28 @@ def get_metrics_token() -> str | None:
     if raw is None or not raw.strip():
         raw = get_conf_value(CONF_SECTION, "metrics_token")
     return raw.strip() if raw and raw.strip() else None
+
+
+#: Alerting: opt-in email notifications. The per-parser ``email=True`` flag on
+#: ``ArchivingResultParser`` switches on AUTOMATIC alerts (on failure / flaky); recipients
+#: come from here. A run is "failing" below ``AIRFLOW_PYTEST_SUCCESS_THRESHOLD``.
+ALERTS_EMAIL_TO_ENV = "AIRFLOW_PYTEST_ALERTS_EMAIL_TO"
+
+
+def _list_setting(env_var: str, conf_key: str) -> tuple[str, ...]:
+    """Comma/semicolon-separated list from env, then cfg (empty tuple when unset)."""
+    raw = os.environ.get(env_var)
+    if raw is None or not raw.strip():
+        raw = get_conf_value(CONF_SECTION, conf_key)
+    if raw is None or not str(raw).strip():
+        return ()
+    parts = (p.strip() for p in str(raw).replace(";", ",").split(","))
+    return tuple(p for p in parts if p)
+
+
+def get_alerts_recipients() -> tuple[str, ...]:
+    """The alert email recipients (empty = alerting stays inert)."""
+    return _list_setting(ALERTS_EMAIL_TO_ENV, "alerts_email_to")
 
 
 def get_reports_root() -> str:
@@ -233,3 +255,16 @@ def get_reports_root() -> str:
         return os.path.abspath(conf.strip())
 
     return os.path.abspath(DEFAULT_ROOT)
+
+
+def get_base_url() -> str | None:
+    """Airflow's externally-reachable base URL (``[api]``, then legacy ``[webserver]``).
+
+    ``None`` when neither is configured — links that need it degrade gracefully.
+    """
+    base = (
+        get_conf_value("api", "base_url")
+        or get_conf_value("webserver", "base_url")
+        or ""
+    ).rstrip("/")
+    return base or None

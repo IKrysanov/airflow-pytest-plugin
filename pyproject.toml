@@ -4,12 +4,12 @@ build-backend = "hatchling.build"
 
 [project]
 name = "airflow-pytest-plugin"
-version = "0.5.0"
+version = "0.6.0"
 description = "View airflow-pytest-operator results in the Airflow 3 web UI."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
-license-files = ["LICENSE"]
+license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "Ilya Krysanov" }]
 keywords = ["airflow", "pytest", "plugin", "testing", "reports", "ui"]
 
@@ -38,7 +38,7 @@ classifiers = [
 # so it is an optional extra here rather than a hard dependency: the
 # producer-side parser needs neither FastAPI nor Airflow imported eagerly.
 dependencies = [
-    "airflow-pytest-operator>=0.5",
+    "airflow-pytest-operator>=0.6",
 ]
 
 [project.optional-dependencies]
@@ -84,7 +84,9 @@ pytest_reports = "airflow_pytest_plugin.plugin:PytestReportsPlugin"
 packages = ["src/airflow_pytest_plugin"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src", "tests", "examples", "README.md", "LICENSE"]
+include = [
+    "src", "tests", "examples", "README.md", "LICENSE", "NOTICE", "CHANGELOG.md", "CONTRIBUTING.md"
+]
 
 # Coverage is opt-in: `pytest --cov=airflow_pytest_plugin`. CI adds
 # `--cov-report=xml` on one interpreter for Codecov; see .github/workflows/ci.yml.

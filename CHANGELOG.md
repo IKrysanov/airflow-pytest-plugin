@@ -7,6 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-05
+
+### Added
+- **Email alerts (opt-in, producer-side)** — styled HTML summaries (green pass / amber flaky /
+  red fail, inline-CSS for mail clients, everything escaped) with the failed / flaky tests and a
+  link back to the run. Per-task switches: `ArchivingResultParser(email=True)` mails every run,
+  `email_only_fail=True` mails only fail / flaky (wins when both set); default sends nothing.
+  Recipients from `AIRFLOW_PYTEST_ALERTS_EMAIL_TO` (validated, case-insensitively deduped, capped
+  at 50); transport = Airflow's SMTP, or the standalone `AIRFLOW_PYTEST_SMTP_*` client (wins when
+  its host is set). Raw Allure results ride along as `allure-results.zip` (skipped over 10 MB).
+  Best-effort: a mail / config failure never fails the task.
+- **Email a run from the UI** — an ✉ button (shown only with a transport) sends the run's summary
+  via `POST /api/reports/{id}/email`: RBAC-gated (DAG read), recipients validated client- and
+  server-side, capped at 10, subject header-sanitized, failure reason surfaced.
+- **Per-run send log (✉ bench)** — every attempt lands in `meta.json` (`alerts`, sanitized, newest
+  50; new optional `ReportSource.record_alert`). The toolbar bench shows green = delivered /
+  red = failed counts, refreshes in place after a manual send, and opens the per-send log.
+- **Tracking URL in the task log** — after archiving, the parser logs a short readable deep link
+  that opens the run inside the Airflow UI (`…/plugin/pytest-reports?dag=…&run=…&task=…&try=…`).
+  Needs `[api]`/`[webserver]` `base_url`; otherwise the log lists the run's coordinates.
+- **Run-health trend** — a sparkline under the reliability radar (moving average of pass rate,
+  no-errors, completeness) with a date axis, a current value and a ▲/▼ delta; scoped by the same
+  filters as the radar, no extra request.
+- **Case table sorts by Outcome** (ascending = broken first).
+
+### Fixed
+- **Donut polish** — slices are real SVG arcs (dash-drawn circles rendered faceted edges in
+  Chrome), the % label is ink-centred for any digit count with "of N" clear below, and hovering
+  from the hole no longer strobes (the lifted slice always covers the resting one).
+- **No more `get_connection_from_secrets` DeprecationWarning per send** — emitted by Airflow's
+  own `send_email` internals; the compat shim silences exactly that one warning.
+
+### Security
+- CodeQL findings on the release PR fixed. Report tokens decode with **strict** base64 (junk
+  bytes — e.g. smuggled CRLF — now `400`, not silently decoded). **Log injection**: the email
+  endpoint sanitizes every user-influenced value it logs (the raw token and the token-derived
+  `dag_id`/`run_id`, which an unsigned token lets an attacker fill with newlines) to a single
+  line. **ReDoS**: the email validator is now regex-free — plain character-set and length
+  checks, provably linear on any input. Plus a removed no-effect statement.
+
+### Internal
+- `flaky_core` extracted (web-free flaky scoring); Airflow's mail API wrapped in `compat.airflow`
+  (`send_airflow_email`) so compat is again the only module importing Airflow; `run_tracking_url`
+  lives in `plugin` with `config.get_base_url()` — the link is independent of the email flags.
+- Audit hardening: atomic, concurrency-safe alert-log writes; memory-bounded Allure attachment
+  (>50 MB raw never buffered); every `test_outcomes` consumer tolerates a row without `outcome`;
+  SMTP config validated (header-safe sender, port range, half-credentials warning, recipient cap)
+  with one normalization path for automatic and manual sends.
+
+### Tests
+- 336 unit / 75 UI. Alerting end to end (pure classification + HTML, orchestrator vs a temp
+  source + spy mailer, SMTP transport + header-injection guard, endpoint RBAC / validation
+  errors, send-log + attachments, config validation, a window-bounded load test) plus UI
+  coverage for the trend, ✉ dialog + live bench, donut geometry (ink-centre pixel scan, hover
+  stability, full-circle case), short deep-links (happy + stale), and a real e2e suite: 10 runs
+  of a `@pytest.mark.flaky(reruns=3)` test settle green and stay invisible to the detector.
+
 ## [0.5.0] - 2026-07-02
 
 ### Added
@@ -330,7 +387,8 @@ the Airflow 3 web UI.
 - CI/CD: lint, type-check, unit (py3.10–3.13) + Airflow 3 integration matrices,
   CodeQL, OpenSSF Scorecard, DCO, and Trusted-Publishing release workflows.
 
-[Unreleased]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.3.1...v0.3.2

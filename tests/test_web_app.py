@@ -527,6 +527,194 @@ def test_delete_unknown_is_404(client):
     assert client.delete(f"/api/reports/{token}").status_code == 404
 
 
+# --- email a run summary (UI action) ----------------------------------------------------------
+class _SpyMailer:
+    def __init__(self) -> None:
+        self.sent: list[dict] = []
+
+    def send(self, *, subject, body, recipients, html=None, attachments=()) -> None:
+        self.sent.append(
+            {"subject": subject, "recipients": list(recipients), "html": html}
+        )
+
+
+def _first_token(c) -> str:
+    return c.get("/api/reports").json()["reports"][0]["id"]
+
+
+def test_reports_echoes_email_available(client, monkeypatch):
+    import airflow_pytest_plugin.web.routes.reports as reports_mod
+
+    monkeypatch.setattr(reports_mod, "build_mailer", lambda: object())
+    assert client.get("/api/reports").json()["email_available"] is True
+    monkeypatch.setattr(reports_mod, "build_mailer", lambda: None)
+    assert client.get("/api/reports").json()["email_available"] is False
+
+
+def test_email_run_sends_to_configured_recipients(client, monkeypatch):
+    import airflow_pytest_plugin.web.routes.reports as reports_mod
+
+    spy = _SpyMailer()
+    monkeypatch.setattr(reports_mod, "build_mailer", lambda: spy)
+    monkeypatch.setenv("AIRFLOW_PYTEST_ALERTS_EMAIL_TO", "team@x.io")
+    r = client.post(
+        f"/api/reports/{_first_token(client)}/email"
+    )  # no body -> configured
+    assert r.status_code == 200 and r.json()["sent"] is True
+    assert r.json()["recipients"] == ["team@x.io"]
+    assert spy.sent and spy.sent[0]["recipients"] == ["team@x.io"]
+    # Styled HTML is delivered (the client fixture's run failed -> red banner).
+    assert spy.sent[0]["html"] and "#dc2626" in spy.sent[0]["html"]
+    assert r.json()["kind"] == "failed"
+
+
+def test_email_run_accepts_and_dedups_supplied_recipients(client, monkeypatch):
+    import airflow_pytest_plugin.web.routes.reports as reports_mod
+
+    spy = _SpyMailer()
+    monkeypatch.setattr(reports_mod, "build_mailer", lambda: spy)
+    r = client.post(
+        f"/api/reports/{_first_token(client)}/email",
+        json={"recipients": ["a@x.io", "b@x.io", "a@x.io", "A@X.IO"]},
+    )
+    assert r.status_code == 200
+    # Deduped case-insensitively (one mailbox = one send), first spelling kept, order kept.
+    assert r.json()["recipients"] == ["a@x.io", "b@x.io"]
+    assert spy.sent[0]["recipients"] == ["a@x.io", "b@x.io"]
+
+
+def test_email_run_rejects_invalid_and_excess_recipients(client, monkeypatch):
+    import airflow_pytest_plugin.web.routes.reports as reports_mod
+
+    spy = _SpyMailer()
+    monkeypatch.setattr(reports_mod, "build_mailer", lambda: spy)
+    token = _first_token(client)
+    assert (
+        client.post(
+            f"/api/reports/{token}/email", json={"recipients": ["nope"]}
+        ).status_code
+        == 400
+    )
+    # A header-injection attempt in a recipient is rejected by validation.
+    assert (
+        client.post(
+            f"/api/reports/{token}/email",
+            json={"recipients": ["a@x.io\nBcc: evil@x.io"]},
+        ).status_code
+        == 400
+    )
+    too_many = {"recipients": [f"a{i}@x.io" for i in range(11)]}
+    assert client.post(f"/api/reports/{token}/email", json=too_many).status_code == 400
+    assert spy.sent == []  # nothing sent on any rejection
+
+
+def test_email_run_no_recipients_is_400(client, monkeypatch):
+    import airflow_pytest_plugin.web.routes.reports as reports_mod
+
+    monkeypatch.setattr(reports_mod, "build_mailer", lambda: _SpyMailer())
+    monkeypatch.delenv("AIRFLOW_PYTEST_ALERTS_EMAIL_TO", raising=False)
+    r = client.post(
+        f"/api/reports/{_first_token(client)}/email"
+    )  # none configured/supplied
+    assert r.status_code == 400
+
+
+def test_email_run_no_transport_is_503(client, monkeypatch):
+    import airflow_pytest_plugin.web.routes.reports as reports_mod
+
+    monkeypatch.setattr(reports_mod, "build_mailer", lambda: None)
+    monkeypatch.setenv("AIRFLOW_PYTEST_ALERTS_EMAIL_TO", "team@x.io")
+    r = client.post(f"/api/reports/{_first_token(client)}/email")
+    assert r.status_code == 503
+
+
+def test_email_run_send_failure_is_502(client, monkeypatch):
+    import airflow_pytest_plugin.web.routes.reports as reports_mod
+
+    class _Boom:
+        def send(self, *, subject, body, recipients, html=None, attachments=()):
+            raise RuntimeError("smtp down")
+
+    monkeypatch.setattr(reports_mod, "build_mailer", lambda: _Boom())
+    r = client.post(
+        f"/api/reports/{_first_token(client)}/email", json={"recipients": ["a@x.io"]}
+    )
+    assert r.status_code == 502
+    # The real reason is surfaced (type + message) so the UI can show something actionable.
+    assert "smtp down" in r.json()["detail"] and "RuntimeError" in r.json()["detail"]
+
+
+def test_email_run_bad_token_is_400_and_unknown_is_404(client, monkeypatch):
+    import airflow_pytest_plugin.web.routes.reports as reports_mod
+
+    monkeypatch.setattr(reports_mod, "build_mailer", lambda: _SpyMailer())
+    assert client.post("/api/reports/%21%21bad/email").status_code == 400
+    gone = ReportRef("nope", "nope", "nope", 9).token
+    assert client.post(f"/api/reports/{gone}/email").status_code == 404
+
+
+def test_email_run_records_history_visible_in_detail(client, monkeypatch):
+    import airflow_pytest_plugin.web.routes.reports as reports_mod
+
+    monkeypatch.setattr(reports_mod, "build_mailer", lambda: _SpyMailer())
+    token = _first_token(client)
+    assert client.get(f"/api/reports/{token}").json()["alerts"] == []  # empty at first
+    assert (
+        client.post(
+            f"/api/reports/{token}/email", json={"recipients": ["a@x.io"]}
+        ).status_code
+        == 200
+    )
+    alerts = client.get(f"/api/reports/{token}").json()["alerts"]
+    assert len(alerts) == 1
+    assert alerts[0]["manual"] is True and alerts[0]["ok"] is True
+    assert alerts[0]["recipients"] == ["a@x.io"] and alerts[0]["kind"] == "failed"
+
+
+def test_email_run_accepts_string_recipients_and_rejects_non_list(client, monkeypatch):
+    import airflow_pytest_plugin.web.routes.reports as reports_mod
+
+    spy = _SpyMailer()
+    monkeypatch.setattr(reports_mod, "build_mailer", lambda: spy)
+    token = _first_token(client)
+    # A comma/semicolon string is parsed + deduped like a list.
+    r = client.post(
+        f"/api/reports/{token}/email",
+        json={"recipients": "a@x.io; b@x.io , A@X.IO"},
+    )
+    assert r.status_code == 200 and r.json()["recipients"] == ["a@x.io", "b@x.io"]
+    # A non-list, non-string recipients value is a clear 400.
+    r = client.post(
+        f"/api/reports/{token}/email", json={"recipients": {"not": "a list"}}
+    )
+    assert r.status_code == 400 and "list of email" in r.json()["detail"]
+
+
+def test_safe_reason_is_single_line_and_bounded():
+    from airflow_pytest_plugin.web.routes.reports import _safe_reason
+
+    out = _safe_reason(RuntimeError("line one\nline two\twith\rgaps"))
+    assert "\n" not in out and "\r" not in out and "\t" not in out
+    assert out.startswith("RuntimeError:")
+    assert len(_safe_reason(ValueError("x" * 500))) <= 200
+    assert _safe_reason(RuntimeError()) == "RuntimeError"  # empty message
+
+
+def test_email_run_requires_read_permission(reports_root, monkeypatch):
+    import airflow_pytest_plugin.web.routes.reports as reports_mod
+
+    write_report(reports_root, ReportRef("dag", "run", "task", 1), passed=2, failed=1)
+    monkeypatch.setattr(reports_mod, "build_mailer", lambda: _SpyMailer())
+    token = _first_token(TestClient(make_app(reports_root)))
+    denied = TestClient(make_app(reports_root, read_authorizer=lambda d, u: False))
+    assert (
+        denied.post(
+            f"/api/reports/{token}/email", json={"recipients": ["a@x.io"]}
+        ).status_code
+        == 403
+    )
+
+
 def test_delete_bad_token_is_400(client):
     assert client.delete("/api/reports/%21%21bad").status_code == 400
 
@@ -1383,3 +1571,82 @@ def test_unique_tests_respects_filter_and_rbac(reports_root):
     assert (
         c.get("/api/unique-tests?task_id=zzz").json()["count"] == 0
     )  # task filter excludes all
+
+
+# --- hardening: a lax custom source must degrade, never 500 --------------------------
+
+
+def test_endpoints_tolerate_source_rows_without_outcome(reports_root):
+    """Every ``test_outcomes`` consumer must survive a row lacking "outcome".
+
+    The filesystem source always writes the key, but the ``ReportSource`` contract is
+    open to custom implementations — a missing key must degrade to unknown/None, not
+    take the endpoint down with a KeyError 500.
+    """
+
+    class LaxSource(FileSystemReportSource):
+        def test_outcomes(self, ref):  # noqa: ARG002 - same shape for every run
+            return {"t.py::a": {"duration": 0.1}}
+
+    base = ReportRef("dag", "r1", "t", 1)
+    head = ReportRef("dag", "r2", "t", 1)
+    write_report(reports_root, base, created_at="2026-06-21T10:00:00+00:00")
+    write_report(reports_root, head, created_at="2026-06-21T11:00:00+00:00")
+    c = TestClient(
+        create_app(
+            LaxSource(report_root=reports_root),
+            authorizer=lambda dag_id, user: True,
+            read_authorizer=lambda dag_id, user: True,
+            user_dependency=lambda: _TEST_USER,
+        )
+    )
+
+    assert c.get("/api/flaky").status_code == 200
+    heat = c.get("/api/heatmap?dag_id=dag&task_id=t")
+    assert heat.status_code == 200
+    assert [t["node_id"] for t in heat.json()["tests"]] == ["t.py::a"]
+    assert c.get(f"/api/compare?base={base.token}&head={head.token}").status_code == 200
+    hist = c.get("/api/test-history?dag_id=dag&task_id=t&node_id=t.py::a")
+    assert hist.status_code == 200
+    entry = hist.json()["history"][0]
+    assert entry["outcome"] is None and entry["duration"] == 0.1
+
+
+def test_token_with_smuggled_junk_bytes_is_rejected(client):
+    # Lax base64 silently skips non-alphabet bytes, so 4 CRLF chars inside a valid
+    # token used to decode "successfully" and carry the raw string into logs
+    # (CodeQL: log injection). Strict decoding must 400 it on every endpoint.
+    good = ReportRef("dag", "run", "task", 1).token
+    dirty = good[:10] + "%0D%0A%0D%0A" + good[10:]  # \r\n\r\n url-encoded in the path
+    assert client.get(f"/api/reports/{dirty}").status_code == 400
+    assert client.post(f"/api/reports/{dirty}/email", json={}).status_code == 400
+    assert client.delete(f"/api/reports/{dirty}").status_code == 400
+
+
+def test_email_endpoint_log_lines_are_single_line(reports_root, monkeypatch, caplog):
+    # The report token is unsigned, so its decoded dag_id/run_id can carry newlines.
+    # Every log line the email endpoint emits must be sanitized to ONE line so a crafted
+    # request can't forge extra log entries (CodeQL: log injection).
+    import logging
+
+    from airflow_pytest_plugin.models import ReportRef
+
+    ref = ReportRef("dag\nFAKE LOG LINE", "run\r\ninjected", "task", 1, -1)
+    write_report(reports_root, ref, passed=1)
+
+    class _SpyMailer:
+        def send(
+            self, **kw
+        ):  # succeeds -> the audit _log.info fires with the ref fields
+            pass
+
+    monkeypatch.setattr(
+        "airflow_pytest_plugin.web.routes.reports.build_mailer", lambda: _SpyMailer()
+    )
+    monkeypatch.setenv("AIRFLOW_PYTEST_ALERTS_EMAIL_TO", "team@example.com")
+    c = TestClient(make_app(reports_root))
+    with caplog.at_level(logging.INFO):
+        r = c.post(f"/api/reports/{ref.token}/email", json={})
+    assert r.status_code == 200
+    for rec in caplog.records:
+        assert "\n" not in rec.getMessage() and "\r" not in rec.getMessage()

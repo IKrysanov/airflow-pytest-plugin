@@ -14,22 +14,25 @@
 
 """Airflow version compatibility shim -- the only module that imports Airflow.
 
-Every Airflow import is lazy (inside a function) so importing the plugin never
-drags in the Task SDK. 2.x/3.x differences resolved here, degrading gracefully
-when Airflow is absent.
+Imports are lazy (inside functions) so loading the plugin never pulls in the
+Task SDK. 2.x/3.x differences live here, degrading gracefully when Airflow is
+absent.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 _log = logging.getLogger(__name__)
 
 
 def get_current_context() -> dict[str, Any] | None:
     """Return the running task's Airflow context, or ``None`` if unavailable."""
-    # Airflow 3.x (Task SDK), then 2.x.
+    # Try 3.x (Task SDK) first, then 2.x.
     try:
         from airflow.sdk import get_current_context as _gcc3
 
@@ -56,11 +59,66 @@ def get_conf_value(section: str, key: str) -> str | None:
     try:
         from airflow.configuration import conf
 
-        # Annotate rather than cast: clean whether conf.get is typed str | None or Any.
+        # Annotate rather than cast: works whether conf.get is typed str | None or Any.
         value: str | None = conf.get(section, key, fallback=None)
         return value
     except Exception:
         return None
+
+
+def airflow_email_available() -> bool:
+    """True if Airflow's ``send_email`` is importable (i.e. a mail transport exists)."""
+    try:
+        from airflow.utils.email import send_email  # noqa: F401
+
+        return True
+    except Exception:
+        return False
+
+
+def send_airflow_email(
+    *,
+    to: list[str],
+    subject: str,
+    html_content: str,
+    attachments: Sequence[tuple[str, bytes]] = (),
+) -> None:
+    """Send through Airflow's configured SMTP (``airflow.utils.email.send_email``).
+
+    The one place that touches Airflow's mail API. ``send_email`` wants file
+    PATHS, so byte attachments are staged in a throwaway dir here. If the call's
+    name or signature shifts between Airflow versions, this is the only fix site.
+    """
+    import os
+    import tempfile
+    import warnings
+
+    from airflow.utils.email import send_email
+
+    with tempfile.TemporaryDirectory(prefix="apx-mail-") as tmp:
+        files = []
+        for name, payload in attachments:
+            path = os.path.join(tmp, os.path.basename(name) or "attachment.bin")
+            with open(path, "wb") as handle:
+                handle.write(payload)
+            files.append(path)
+        with warnings.catch_warnings():
+            # Airflow 3's own ``send_mime_email`` still calls the deprecated
+            # ``Connection.get_connection_from_secrets`` (airflow/utils/email.py) —
+            # NOT our code, and there is no public alternative to ``send_email``
+            # to switch to. Silence exactly that one warning so every emailing
+            # task's log isn't spammed; any other deprecation still surfaces.
+            warnings.filterwarnings(
+                "ignore",
+                category=DeprecationWarning,
+                message=".*get_connection_from_secrets.*",
+            )
+            send_email(
+                to=to,
+                subject=subject,
+                html_content=html_content,
+                files=files or None,
+            )
 
 
 def airflow_auth_available() -> bool:
@@ -115,7 +173,7 @@ def _is_authorized_dag(method: str, dag_id: str, user: Any) -> bool:
 
 
 def _resolve_auth_manager() -> Any:
-    """Return the active Airflow auth manager across known import locations."""
+    """Return the active Airflow auth manager, trying known import locations."""
     for module_name in (
         "airflow.api_fastapi.app",
         "airflow.www.extensions.init_auth_manager",

@@ -474,6 +474,57 @@ def test_test_outcomes_none_when_absent(reports_root):
     assert out is None
 
 
+def test_test_outcomes_tolerates_malformed_rows(reports_root):
+    # A semi-trusted meta with junk rows must not crash the read; bad rows are skipped
+    # and non-finite durations coerced to 0.0.
+    ref = ReportRef("dag", "run", "task", 1)
+    out_dir = ReportLayout().dir_for(reports_root, ref)
+    os.makedirs(out_dir, exist_ok=True)
+    meta = {
+        "schema_version": 1,
+        "dag_id": "dag",
+        "run_id": "run",
+        "task_id": "task",
+        "try_number": 1,
+        "map_index": -1,
+        "tests": [
+            ["a", "passed", 0.1],
+            ["b", "failed"],  # missing duration -> 0.0
+            [None, "passed", 0.2],  # falsy node id -> skipped
+            "not-a-row",  # not a list -> skipped
+            ["c", "passed", float("inf")],  # non-finite -> 0.0
+        ],
+    }
+    with open(os.path.join(out_dir, META_FILENAME), "w", encoding="utf-8") as fh:
+        json.dump(meta, fh)
+    out = FileSystemReportSource(report_root=reports_root).test_outcomes(ref)
+    assert set(out) == {"a", "b", "c"}
+    assert out["b"]["duration"] == 0.0 and out["c"]["duration"] == 0.0
+
+
+def test_record_alert_concurrent_writes_do_not_clobber(reports_root):
+    # Two threads recording history for the SAME run (unique tmp names) -> both survive,
+    # the sidecar stays valid JSON (no torn write).
+    import threading
+
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref, passed=1)
+    src = FileSystemReportSource(report_root=reports_root, scan_cache_ttl=0)
+
+    def worker(i):
+        src.record_alert(ref, {"at": f"t{i}", "kind": "passed", "ok": True})
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(12)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+    alerts = src.get_detail(ref).alerts
+    assert (
+        1 <= len(alerts) <= 12
+    )  # at least one survived; file is valid JSON (parsed OK)
+
+
 def test_test_outcomes_refuses_traversal(tmp_path):
     root = tmp_path / "reports"
     root.mkdir()

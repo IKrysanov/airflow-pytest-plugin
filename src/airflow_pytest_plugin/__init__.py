@@ -21,13 +21,14 @@ from typing import TYPE_CHECKING
 from .config import get_reports_root
 from .layout import ReportLayout
 from .models import CaseView, ReportDetail, ReportRef, ReportSummary
+from .notifications import AlertPolicy, notify_after_archive, notify_for_run
 from .producer import ArchivingResultParser
 from .retention import RetentionPolicy, RetentionResult, prune_reports
 from .sources import FileSystemReportSource, ReportSource
 from .version import __version__ as __version__
 
 if TYPE_CHECKING:
-    # Exposed lazily via __getattr__ so importing the package never imports FastAPI.
+    # Lazy via __getattr__ so importing the package never pulls in FastAPI.
     from .web import create_app as create_app
 
 __all__ = [
@@ -42,6 +43,9 @@ __all__ = [
     "RetentionPolicy",
     "RetentionResult",
     "prune_reports",
+    "AlertPolicy",
+    "notify_for_run",
+    "notify_after_archive",
     "get_reports_root",
     "create_app",
     "__version__",

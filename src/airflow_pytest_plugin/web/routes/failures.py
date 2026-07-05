@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Failures route — failed/errored cases across the visible runs, flat or clustered."""
+"""Failures route — failed/errored cases across visible runs, flat or clustered."""
 
 from __future__ import annotations
 
@@ -26,14 +26,14 @@ from .common import RouteDeps, ok
 
 TAG = "failures"
 
-#: Upper bound on failed cases returned, to keep the payload bounded.
+#: Bounds the returned payload.
 _FAILURES_CAP = 5000
-#: Cap on failing tests listed under a single cluster (the count is still exact).
+#: Caps tests listed per cluster; the count stays exact.
 _CLUSTER_TESTS_CAP = 200
 
-# Volatile bits scrubbed from an error message so messages that differ only by run
-# specifics collapse to one signature. Order matters: UUID before the generic digit
-# rule (a UUID is mostly digits), hex addresses before digits too.
+# Volatile bits scrubbed from a message so run-specific differences collapse to one
+# signature. Order matters: UUID before the digit rule (a UUID is mostly digits), and
+# hex addresses before digits too.
 _RE_UUID = re.compile(r"[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}")
 _RE_HEX = re.compile(r"0x[0-9a-fA-F]+")
 _RE_NUM = re.compile(r"\d+")
@@ -41,7 +41,7 @@ _RE_WS = re.compile(r"\s+")
 
 
 def _error_line(message: str | None) -> str:
-    """First meaningful line of a case message (skips our ``--- section ---`` headers)."""
+    """First meaningful line of a message (skips our ``--- section ---`` headers)."""
     for line in (message or "").splitlines():
         stripped = line.strip()
         if stripped and not stripped.startswith("---"):
@@ -50,26 +50,26 @@ def _error_line(message: str | None) -> str:
 
 
 def normalize_error(message: str | None) -> str:
-    """A stable signature for an error message: its first line with volatile bits masked.
+    """Stable signature for a message: first line with volatile bits masked.
 
-    Strips UUIDs, hex addresses and numbers (and collapses whitespace) so that
-    ``expected 5 got 7`` and ``expected 8 got 3`` share the signature
-    ``expected N got N``. Capped to keep signatures comparable and bounded.
+    Masks UUIDs, hex addresses and numbers and collapses whitespace, so
+    ``expected 5 got 7`` and ``expected 8 got 3`` share ``expected N got N``.
+    Capped to keep signatures comparable and bounded.
     """
     line = _error_line(message)
     line = _RE_UUID.sub("UUID", line)
     line = _RE_HEX.sub(
         "ADDR", line
-    )  # digit-free placeholder so the number rule won't touch it
+    )  # digit-free placeholder so the number rule skips it
     line = _RE_NUM.sub("N", line)
     return _RE_WS.sub(" ", line).strip()[:200]
 
 
 def cluster_failures(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Group failing cases by normalized message (pure), most common cluster first.
+    """Group failing cases by normalized message, most common cluster first.
 
     Each cluster carries the ``signature``, an exact ``count``, the ``outcomes`` seen,
-    a representative raw ``sample`` line, and the (capped) list of failing ``tests``.
+    a raw ``sample`` line, and the (capped) list of failing ``tests``.
     """
     clusters: dict[str, dict[str, Any]] = {}
     for it in items:
@@ -117,12 +117,12 @@ def _collect_failures(
 ) -> tuple[list[dict[str, Any]], bool]:
     """Collect failed/errored cases across readable runs (newest first).
 
-    When ``latest`` (the default for the views), only each **dag·task's** newest readable
-    run is considered — that's the pipeline's current state across all of its run_ids, so
-    a fixed test drops off once its next run is green and the list reflects *current*
-    breakage rather than every failure ever archived (older run_ids are history). Runs are
-    deduped per (dag_id, task_id); a retry wins its run via the scan's created_at/
-    try_number ordering. ``latest=False`` walks the full history. Returns ``(items, capped)``.
+    With ``latest`` (the view default), only each **dag·task's** newest readable run
+    counts — the pipeline's current state across its run_ids — so a fixed test drops off
+    once its next run is green and the list shows *current* breakage, not every failure
+    ever archived (older run_ids are history). Deduped per (dag_id, task_id); a retry wins
+    its run via the scan's created_at/try_number order. ``latest=False`` walks the full
+    history. Returns ``(items, capped)``.
     """
     src, read_auth = deps.src, deps.read_auth
     items: list[dict[str, Any]] = []
@@ -135,7 +135,7 @@ def _collect_failures(
             continue
         key = (s.ref.dag_id, s.ref.task_id)
         if latest:
-            if key in seen:  # an older run of a group whose newest we already passed
+            if key in seen:  # older run of a group whose newest we already saw
                 continue
             seen.add(
                 key
@@ -160,7 +160,7 @@ def _collect_failures(
             if with_message:
                 item["message"] = c.message
             items.append(item)
-            if len(items) >= _FAILURES_CAP:  # stop mid-run, don't over-read one big run
+            if len(items) >= _FAILURES_CAP:  # stop mid-run; don't over-read one big run
                 capped = True
                 break
         if capped:
@@ -201,13 +201,13 @@ def build_router(deps: RouteDeps) -> APIRouter:
         latest: bool = True,
         user: Any = Depends(user_dep),  # noqa: B008 - FastAPI dependency idiom
     ) -> JSONResponse:
-        """Currently-failing cases (one flat list), newest run first.
+        """Currently-failing cases as one flat list, newest run first.
 
-        By default only each dag·task's **latest** readable run is considered, so a
-        fixed test drops off once its next run is green — the list reflects what's broken
-        *now* and shrinks as code improves. Pass ``latest=0`` for the full history.
-        Filters mirror the run list (``dag_id`` / ``run_id`` / ``task_id``); RBAC; capped
-        at ``5000`` (``capped`` flags truncation).
+        By default only each dag·task's **latest** readable run counts, so a fixed test
+        drops off once its next run is green — the list shows what's broken *now* and
+        shrinks as code improves. Pass ``latest=0`` for full history. Filters mirror the
+        run list (``dag_id`` / ``run_id`` / ``task_id``); RBAC; capped at ``5000``
+        (``capped`` flags truncation).
         """
         items, capped = _collect_failures(
             deps,
@@ -256,14 +256,14 @@ def build_router(deps: RouteDeps) -> APIRouter:
         latest: bool = True,
         user: Any = Depends(user_dep),  # noqa: B008 - FastAPI dependency idiom
     ) -> JSONResponse:
-        """Currently-failing cases grouped by a normalized error signature, biggest first.
+        """Currently-failing cases grouped by normalized error signature, biggest first.
 
         Same scan/filters/RBAC/cap as ``/api/failures``, and likewise defaults to each
-        dag·task's **latest** run (``latest=0`` for full history) — so clusters reflect
-        what's broken now and shrink as tests are fixed. Instead of a flat list it
-        returns clusters, so common root causes surface instead of per-failure spam; each
-        has an exact ``count``, a representative ``sample`` message, and the (capped)
-        failing ``tests``. Scope to one ``run_id`` for the in-run view.
+        dag·task's **latest** run (``latest=0`` for full history) — clusters reflect
+        what's broken now and shrink as tests are fixed. Grouping surfaces common root
+        causes instead of per-failure spam; each cluster has an exact ``count``, a
+        ``sample`` message, and the (capped) failing ``tests``. Scope to one ``run_id``
+        for the in-run view.
         """
         items, capped = _collect_failures(
             deps,

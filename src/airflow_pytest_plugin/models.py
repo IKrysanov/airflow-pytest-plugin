@@ -29,16 +29,19 @@ def _encode_token(payload: dict[str, Any]) -> str:
 
 def _decode_token(token: str) -> dict[str, Any]:
     pad = "=" * (-len(token) % 4)
-    raw = base64.urlsafe_b64decode(token + pad)
+    # validate=True rejects ANY byte outside the alphabet. The lax default silently
+    # skips junk, so a token with e.g. CRLF smuggled in could still decode and carry
+    # the raw (log-injectable) string through every ``report_id`` code path.
+    raw = base64.b64decode(token + pad, altchars=b"-_", validate=True)
     return cast("dict[str, Any]", json.loads(raw))
 
 
 @dataclass(frozen=True)
 class ReportRef:
-    """The Airflow coordinates that uniquely identify one stored report.
+    """Airflow coordinates identifying one stored report.
 
-    ``map_index`` is ``-1`` for a non-mapped task (Airflow's convention), ``>= 0``
-    for one expanded element of a mapped task.
+    ``map_index``: ``-1`` for a non-mapped task (Airflow convention), else the
+    expanded element's index of a mapped task.
     """
 
     dag_id: str
@@ -49,7 +52,7 @@ class ReportRef:
 
     @property
     def token(self) -> str:
-        """An opaque, URL-safe, reversible id for the HTTP API."""
+        """Opaque, URL-safe, reversible id for the HTTP API."""
         return _encode_token(
             {
                 "d": self.dag_id,
@@ -82,7 +85,7 @@ class ReportRef:
 
 @dataclass(frozen=True)
 class ReportSummary:
-    """The headline numbers for one run, built from ``meta.json`` (no XML parse)."""
+    """Headline numbers for one run, from ``meta.json`` (no XML parse)."""
 
     ref: ReportRef
     total: int
@@ -118,11 +121,11 @@ class ReportSummary:
 
 
 def run_succeeds(passed: int, failed: int, errors: int, threshold: float) -> bool:
-    """Whether a run counts as successful at a given pass-rate ``threshold`` (0–1).
+    """Whether a run passes at pass-rate ``threshold`` (0-1).
 
-    The rate is over *executed* tests -- ``passed / (passed + failed + errors)`` --
-    so skipped tests neither help nor hurt; a run with nothing executed is a pass.
-    At ``threshold == 1.0`` this is exactly "no failures or errors".
+    Rate is over *executed* tests -- ``passed / (passed + failed + errors)`` -- so
+    skipped tests don't count and a run with nothing executed passes. At
+    ``threshold == 1.0`` this means "no failures or errors".
     """
     executed = passed + failed + errors
     if executed <= 0:
@@ -154,12 +157,18 @@ class CaseView:
 
 @dataclass(frozen=True)
 class ReportDetail:
-    """A summary plus its per-case rows -- the detail view's payload."""
+    """Summary plus per-case rows -- the detail view's payload.
+
+    ``alerts``: the run's email-notification history (oldest first) from the
+    ``meta.json`` sidecar; each entry has ``at``/``kind``/``recipients``/``ok``/``manual``.
+    """
 
     summary: ReportSummary
     cases: tuple[CaseView, ...] = field(default_factory=tuple)
+    alerts: tuple[dict[str, Any], ...] = field(default_factory=tuple)
 
     def to_dict(self) -> dict[str, Any]:
         data = self.summary.to_dict()
         data["cases"] = [c.to_dict() for c in self.cases]
+        data["alerts"] = list(self.alerts)
         return data

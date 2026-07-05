@@ -70,8 +70,8 @@ def test_large_donut_small_slices_do_not_overlap(large_dash):
     segs = page.eval_on_selector_all(
         ".dseg",
         "els => els.map(c => ({"
-        " drawn: parseFloat(c.getAttribute('stroke-dasharray').split(' ')[0]),"
-        " start: -parseFloat(c.getAttribute('stroke-dashoffset')),"
+        " drawn: parseFloat(c.getAttribute('data-drawn')),"
+        " start: parseFloat(c.getAttribute('data-start')),"
         " status: c.getAttribute('data-status')}))",
     )
     assert len(segs) >= 3, f"expected pass+fail+error slices, got {segs}"

@@ -39,12 +39,12 @@ _log = logging.getLogger(__name__)
 META_SCHEMA_VERSION = 1
 
 
-# The operator base is typed as Any when the operator package ships without type info (some
-# environments) and concretely typed in others -- so the misc subclass error only fires
-# sometimes. Listing `unused-ignore` keeps this quiet whether or not misc fires.
+# The operator base is Any when its package ships without type info, concretely typed
+# otherwise, so the misc subclass error fires only sometimes. `unused-ignore` keeps this
+# quiet either way.
 class ArchivingResultParser(JUnitResultParser):  # type: ignore[misc, unused-ignore]
-    """Archives each run under the reports layout: the operator's JUnit result
-    plus (with ``allure=True``) the raw Allure results for TestOps export."""
+    """Archive each run under the reports layout: the operator's JUnit result,
+    plus (with ``allure=True``) raw Allure results for TestOps export."""
 
     def __init__(
         self,
@@ -52,16 +52,26 @@ class ArchivingResultParser(JUnitResultParser):  # type: ignore[misc, unused-ign
         report_root: str | None = None,
         layout: ReportLayout | None = None,
         allure: bool = False,
+        email: bool = False,
+        email_only_fail: bool = False,
     ) -> None:
         super().__init__()  # base report_dir stays None; we compute per-run
         self._report_root = os.path.abspath(report_root or get_reports_root())
         self._layout = layout or ReportLayout()
-        # When True, also point pytest at ``--alluredir`` (needs allure-pytest in
-        # the worker, else pytest errors on the unknown arg) so raw Allure results
-        # are archived alongside junit.xml for Allure TestOps export.
+        # When True, also pass pytest ``--alluredir`` (requires allure-pytest in the
+        # worker, else pytest errors on the unknown arg) so raw Allure results land
+        # beside junit.xml for TestOps export.
         self._allure = allure
-        # Ref resolved in report_request, reused by parse() to name the sidecar.
-        # One parser instance serves one task, so a single slot suffices.
+        # Per-task switches for automatic email (both need
+        # ``AIRFLOW_PYTEST_ALERTS_EMAIL_TO`` recipients + a mail transport):
+        #   email=True           -> mail after EVERY run (styled by outcome).
+        #   email_only_fail=True -> mail ONLY on fail/flaky, no success mail
+        #                           (wins when both flags are set).
+        # Both False (default) -> no mail, so a noisy ping/smoke suite can't spam the box.
+        self._email = email
+        self._email_only_fail = email_only_fail
+        # Ref resolved in report_request, reused by parse() to name the sidecar. One
+        # parser instance serves one task, so a single slot suffices.
         self._pending_ref: ReportRef | None = None
         self._pending_context: dict[str, Any] | None = None
 
@@ -70,9 +80,8 @@ class ArchivingResultParser(JUnitResultParser):  # type: ignore[misc, unused-ign
         return self._report_root
 
     def report_request(self, report_dir: str) -> ReportRequest:
-        # Resolve coordinates now (inside execute()) and point the base parser's
-        # report_dir at our archive location; reusing super() keeps the JUnit flags
-        # defined in one place.
+        # Resolve coordinates now (inside execute()) and aim the base parser's
+        # report_dir at our archive location; super() keeps the JUnit flags in one place.
         context = get_current_context()
         ref = self._resolve_ref(context)
         self._pending_ref = ref
@@ -103,9 +112,63 @@ class ArchivingResultParser(JUnitResultParser):  # type: ignore[misc, unused-ign
             _log.exception(
                 "Failed to write %s sidecar next to %s", META_FILENAME, report_path
             )
+        # Tracking link into the task log, so the archived run is one click away.
+        # Best-effort like everything post-archive: never masks the test outcome.
+        try:
+            self._log_tracking_url()
+        except Exception:
+            _log.debug("Could not build the viewer tracking URL", exc_info=True)
+        # Best-effort alerting: opt-in and isolated -- a mail/config failure must never
+        # mask the outcome either. No-ops immediately when disabled (default).
+        try:
+            self._maybe_notify()
+        except Exception:
+            _log.exception("Post-archive alert evaluation failed for %s", report_path)
         return result
 
     # -- internals -------------------------------------------------------
+
+    def _log_tracking_url(self) -> None:
+        """Log a deep link to the archived run in the Pytest Reports viewer.
+
+        With no base URL configured (``[api] base_url`` / ``[webserver] base_url``)
+        it still logs the run's coordinates, plus how to get a clickable link.
+        """
+        # Same resolution as _write_meta, so the link matches the archived location.
+        ref = self._pending_ref or self._resolve_ref(get_current_context())
+        from ..plugin import run_tracking_url
+
+        url = run_tracking_url(ref)
+        if url:
+            _log.info("Pytest report archived — view it at %s", url)
+        else:
+            _log.info(
+                "Pytest report archived (dag=%s run=%s task=%s try=%s); set "
+                "[api] base_url to get a clickable viewer link here",
+                ref.dag_id,
+                ref.run_id,
+                ref.task_id,
+                ref.try_number,
+            )
+
+    def _maybe_notify(self) -> None:
+        """Email a notification for the run just archived, per the opt-in flags.
+
+        ``email=True`` -> mail for EVERY run (styled by outcome). ``email_only_fail=True``
+        -> mail only on fail/flaky (wins over ``email=True``, so success mail can be
+        silenced). Both off (default) -> nothing. Imported lazily; the default path does
+        no work.
+        """
+        if not self._email and not self._email_only_fail:
+            return
+        from ..notifications import notify_after_archive
+
+        ref = self._pending_ref or self._resolve_ref(get_current_context())
+        notify_after_archive(
+            ref,
+            report_root=self._report_root,
+            always=self._email and not self._email_only_fail,
+        )
 
     def _resolve_ref(self, context: dict[str, Any] | None) -> ReportRef:
         """Build a :class:`ReportRef` from context, or a synthetic ref off-task."""
@@ -166,8 +229,8 @@ class ArchivingResultParser(JUnitResultParser):  # type: ignore[misc, unused-ign
             "report_file": REPORT_FILENAME,
             "allure": self._archive_allure(out_dir, ref),
             "summary": result.to_xcom(),
-            # Compact per-test outcomes [node_id, outcome, duration] so cross-run
-            # views (compare/flaky/history) need not re-parse junit.xml.
+            # Compact [node_id, outcome, duration] rows so cross-run views
+            # (compare/flaky/history) need not re-parse junit.xml.
             "tests": _test_rows(result),
         }
         # Atomic write: a reader scanning concurrently never sees a half file.
@@ -177,7 +240,7 @@ class ArchivingResultParser(JUnitResultParser):  # type: ignore[misc, unused-ign
         os.replace(tmp, os.path.join(out_dir, META_FILENAME))
 
     def _archive_allure(self, out_dir: str, ref: ReportRef) -> bool:
-        """True if Allure results were produced here; drop an executor.json so the
+        """True if Allure results exist here; also drop an executor.json so the
         TestOps launch links back to this Airflow run. Best-effort."""
         allure_dir = os.path.join(out_dir, ALLURE_DIRNAME)
         try:
@@ -196,8 +259,8 @@ class ArchivingResultParser(JUnitResultParser):  # type: ignore[misc, unused-ign
 
 
 def _executor_json(ref: ReportRef) -> dict[str, Any]:
-    """Allure executor.json: shows the Airflow run as the build, linking the
-    TestOps launch back to the task instance when the base URL is configured."""
+    """Allure executor.json: presents the Airflow run as the build, linking the
+    TestOps launch back to the task instance when a base URL is configured."""
     data: dict[str, Any] = {
         "name": "Airflow",
         "type": "airflow",
