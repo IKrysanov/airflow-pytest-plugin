@@ -29,7 +29,7 @@ jobs:
       # Third-party actions are pinned by commit SHA, not a floating tag, so a
       # compromised upstream action cannot run with our PyPI OIDC permissions.
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
         with:
           python-version: "3.12"
       - name: Install build tooling
@@ -91,7 +91,7 @@ jobs:
           path: dist/
       - name: Generate Sigstore attestation for the distributions
         id: attest
-        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32  # v4.1.0
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373  # v4.1.1
         with:
           subject-path: "dist/*"
       - name: Assemble release assets
