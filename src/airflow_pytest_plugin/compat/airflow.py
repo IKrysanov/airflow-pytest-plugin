@@ -176,6 +176,21 @@ def airflow_auth_available() -> bool:
         return False
 
 
+def airflow_available() -> bool:
+    """True if Airflow itself is importable, regardless of whether its auth is.
+
+    Lets the app tell "running standalone, nobody to authorize against" apart from
+    "running INSIDE Airflow but its auth API moved" -- the first may safely serve
+    everything, the second must not.
+    """
+    try:
+        import airflow  # noqa: F401
+
+        return True
+    except Exception:
+        return False
+
+
 def get_user_dependency() -> Any:
     """Return Airflow's ``get_user`` FastAPI dependency (call only when auth available)."""
     from airflow.api_fastapi.core_api.security import get_user

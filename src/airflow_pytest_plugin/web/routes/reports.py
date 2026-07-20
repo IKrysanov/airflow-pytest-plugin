@@ -31,6 +31,7 @@ from ...config import (
     get_flaky_window,
     get_slow_factor,
     get_slow_min_delta,
+    get_success_coverage,
     get_success_threshold,
 )
 from ...notifications import (
@@ -628,6 +629,16 @@ def build_router(deps: RouteDeps) -> APIRouter:
                     no_coverage.clear()
                 no_coverage.add(report_id)
         payload["coverage"] = coverage
+        # The bar the UI labels/tints the coverage card against. A bar pinned by the
+        # producer (ArchivingResultParser(coverage_threshold=...)) wins, since the suite
+        # knows its own standard better than one global reader-side setting; otherwise
+        # AIRFLOW_PYTEST_SUCCESS_COVERAGE applies. Presentational only -- a run below the
+        # bar is still a passing run; enforcing coverage is the operator's cov_fail_under.
+        payload["coverage_threshold"] = (
+            detail.coverage_threshold
+            if detail.coverage_threshold is not None
+            else get_success_coverage()
+        )
         return JSONResponse(payload)
 
     @router.delete(

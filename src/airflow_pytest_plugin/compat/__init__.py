@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from .airflow import (
     airflow_auth_available,
+    airflow_available,
     get_airflow_plugin_base,
     get_conf_value,
     get_current_context,
@@ -32,6 +33,7 @@ __all__ = [
     "get_airflow_plugin_base",
     "get_conf_value",
     "get_run_coverage",
+    "airflow_available",
     "airflow_auth_available",
     "get_user_dependency",
     "is_authorized_to_read",

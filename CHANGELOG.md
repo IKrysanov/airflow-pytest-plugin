@@ -7,31 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.6.1] - 2026-07-...
+## [0.6.1] - 2026-07-20
 
 ### Added
-- **Coverage bench in a run** — when the run was produced by `airflow-pytest-operator` >= 0.6
-  with `coverage=True`, the operator pushes the overall line-coverage fraction to its
-  `return_value` XCom; the run detail now reads it from there and shows a **Coverage** card next
-  to Duration (tinted green ≥ 80% / red < 50%). The run-detail payload gains a `coverage` field
-  (0–1, or `null`). No coverage in XCom — or off Airflow (the standalone dev server) — and the
-  card is simply omitted. Read via a new `compat.get_run_coverage`, so `compat.airflow` stays the
-  only module importing Airflow; the api-server queries the DB-backed `XComModel` (Airflow 3's
-  `XCom.get_one` is a task-side facade that doesn't work server-side). On first view the value is
-  **baked into the run's `meta.json`** (new optional `ReportSource.record_coverage`), so it becomes
-  a stable part of the report. A run opened right after it finishes — before the task has committed
-  its XCom — picks the value up **live** (the detail refreshes the card in place for a few seconds),
-  then serves it from the report on every later view with no XCom round-trip.
+- **Coverage card in a run** — the run detail shows overall line coverage next to Duration
+  (payload gains `coverage`, 0–1 or `null`; omitted when a run carries none). Switch it on with
+  `ArchivingResultParser(coverage=True)`, which is self-contained — the operator needs no
+  `coverage=True` of its own, and setting both is harmless. Coverage is read at archive time and
+  baked into `meta.json`, so it **survives a failed run** (the operator raises before pushing its
+  XCom, but the parser has already run) and costs the api-server no metadata-DB round-trip. Use
+  `coverage_source="src"` when the project already narrows coverage — pytest-cov unions scopes, so
+  a bare `--cov` would widen the number. Runs archived without the flag still fall back to reading
+  the operator's XCom (successful runs only), baking it in on first view.
+- **ⓘ notes on the KPI cards** — *Unique tests*, *Failures*, *Slowdowns* and *Coverage* each
+  explain how they are computed (the 1000-run scan cap, "latest run of each dag·task", the
+  1.3×/0.5 s slowdown rule, where coverage comes from and which bar applies), reusing the same
+  popup as the chart and radar. Keyboard-reachable, localised, and they don't trigger the card's
+  own drill-down.
+- **Coverage target** — `AIRFLOW_PYTEST_SUCCESS_COVERAGE` (env/cfg, 0–1, default `0.85`) sets the
+  bar: at or above it the card is green (*meets target 85%*), below it red. A suite can pin its
+  own bar with `ArchivingResultParser(coverage_threshold=0.5)`, which **outranks** the env var —
+  one global setting can't say a core library belongs at 95% while a legacy suite is fine at 50%.
+  Out-of-range values are rejected with a warning rather than clamped (`90` meaning `0.9` falls
+  back to the default instead of painting every run red). **Presentational only:** a shortfall
+  never fails a run — enforcing coverage stays the operator's `cov_fail_under` gate. The verdict
+  is spelled out in words beside the number, so it doesn't depend on seeing the tint.
+
+### Security
+- **Auth fails closed inside Airflow** — if Airflow is installed but its auth API can't be
+  imported (e.g. after an upgrade moved it), the reader now denies every report and logs the
+  reason, instead of falling back to allow-all as it did for the standalone dev server. Without
+  Airflow at all, standalone stays open as before.
 
 ### Fixed
+- **The viewer follows Airflow's language** — the parent's `<html lang>` was read before the
+  language i18next actually stores, so a served `index.html` with a hardcoded `lang="en"` pinned
+  the plugin to English on a Russian stand. The stored choice now wins, and a late write during
+  Airflow's boot is picked up instead of being missed.
+- **KPI titles shrink instead of wrapping** — a long localised title ("УСПЕШНЫХ ПРОГОНОВ") used
+  to wrap, stranding the "all" chip beside a two-line block so it read as unrelated content. The
+  title now stays on one line and scales down to fit (growing back on resize), and the card grid's
+  minimum widened to 190px so it never has to shrink far enough to clip. No wrap and no ellipsis
+  from 320px to 1440px.
+- **A closed run stays closed** — opening a run via the task-log tracking link
+  (`?dag=…&run=…&task=…`) then dismissing it left those params in the URL, so the next refresh
+  (the ⟳ button or a browser reload) reopened it. Closing now clears every deep-link param.
 - **Donut % sits balanced with its caption** — the percentage is lifted a touch above the ring
   midline so the number and the "of N" caption below it straddle the centre symmetrically.
 
 ### Changed
-- **Coverage reads don't hammer the metadata DB** — a run confirmed to carry no coverage (older
-  operator, `coverage=False`, or a report with no readable `meta.json`) is remembered per process
-  once it has settled, so its detail view stops re-querying the shared Airflow metadata DB on every
-  open. Freshly-finished runs keep being probed so late-arriving coverage is never missed.
+- **Coverage reads don't hammer the metadata DB** — a settled run confirmed to carry no XCom
+  coverage is remembered per process, so its detail stops re-querying Airflow's shared metadata
+  DB on every open. Fresh runs keep being probed, so late-arriving coverage is never missed.
 
 ## [0.6.0] - 2026-07-05
 

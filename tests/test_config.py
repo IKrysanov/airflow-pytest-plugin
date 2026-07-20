@@ -207,3 +207,26 @@ def test_get_base_url_none_when_unset_or_blank(monkeypatch):
     # A lone "/" (or whitespace-ish value) must not yield an empty-string base.
     monkeypatch.setattr(cfg, "get_conf_value", lambda s, k: "/")
     assert cfg.get_base_url() is None
+
+
+def test_success_coverage_default_env_and_clamp(monkeypatch):
+    monkeypatch.delenv(config.SUCCESS_COVERAGE_ENV, raising=False)
+    monkeypatch.setattr(config, "get_conf_value", lambda s, k: None)
+    assert config.get_success_coverage() == config.DEFAULT_SUCCESS_COVERAGE == 0.85
+    monkeypatch.setenv(config.SUCCESS_COVERAGE_ENV, "0.6")
+    assert config.get_success_coverage() == 0.6
+    monkeypatch.setenv(config.SUCCESS_COVERAGE_ENV, "0")  # accept-everything mode
+    assert config.get_success_coverage() == 0.0
+    for bad in ("x", "1.5", "-0.1", ""):  # invalid / out of 0-1 -> default
+        monkeypatch.setenv(config.SUCCESS_COVERAGE_ENV, bad)
+        assert config.get_success_coverage() == config.DEFAULT_SUCCESS_COVERAGE
+
+
+def test_success_coverage_falls_back_to_airflow_cfg(monkeypatch):
+    monkeypatch.delenv(config.SUCCESS_COVERAGE_ENV, raising=False)
+    monkeypatch.setattr(
+        config,
+        "get_conf_value",
+        lambda s, k: "0.7" if k == "success_coverage" else None,
+    )
+    assert config.get_success_coverage() == 0.7

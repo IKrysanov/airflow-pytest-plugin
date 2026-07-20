@@ -46,6 +46,7 @@ It has two halves that share one on-disk layout:
 - [How it works](#how-it-works)
 - [HTTP API](#http-api)
 - [Access control (RBAC)](#access-control-rbac)
+- [Coverage](#coverage)
 - [Configuration](#configuration)
 - [Prometheus metrics](#prometheus-metrics)
 - [Architecture (SOLID)](#architecture-solid)
@@ -69,8 +70,8 @@ select a whole group to chart its trend:
 **A single run** — a clickable success donut (pass-rate over the test count;
 click a slice to filter by status), a **coverage** card next to the duration (when the
 run was produced by [`airflow-pytest-operator`](https://github.com/IKrysanov/airflow-pytest-operator)
-`>= 0.6` with `coverage=True`, which pushes the overall line-coverage fraction to XCom —
-otherwise omitted), a **test-duration histogram** (10-second buckets, scrollable), case
+`>= 0.6` with `coverage=True` — see [Coverage](#coverage); omitted when the run carries
+none), a **test-duration histogram** (10-second buckets, scrollable), case
 search / group-by-module, and every test's captured output on expand:
 
 ![Pytest Reports — a single run](https://raw.githubusercontent.com/IKrysanov/airflow-pytest-plugin/main/docs/screenshots/detail.png)
@@ -263,8 +264,28 @@ inherits your existing per-DAG roles with no extra configuration.
 **Plugin visibility.** The nav entry is an Airflow `external_views` item, which
 has no per-permission gate, so the menu link is visible to every signed-in user;
 access is enforced on the **content** (a user who may read no DAG sees an empty
-list and `403` on direct links). The standalone dev server (no Airflow auth)
-allows everything.
+list and `403` on direct links).
+
+**When auth is unavailable** the fallback depends on why. With **no Airflow** installed —
+the bundled dev server — everything is allowed, which is the point of that mode. With
+**Airflow installed but its auth API unreachable** (an upgrade moved it, say) the reader
+**denies every report** and logs the reason: it cannot verify DAG permissions, and serving
+every team's runs would be the worst possible reading of "auth unavailable". `GET
+/api/health` reports which mode is live as `auth: "airflow" | "open"` — worth asserting in a
+smoke check for a shared deployment.
+
+**Two things sit outside per-DAG RBAC**, by design — worth knowing before a wide rollout:
+
+- **`GET /api/metrics`** is gated by `AIRFLOW_PYTEST_METRICS_TOKEN` (constant-time compare),
+  not by DAG permissions: any holder of that token sees `{dag_id, task_id}` series for
+  **every** archived dag·task. It is disabled (`404`) until you set the token — treat the
+  token as a read-everything credential and scope it to your Prometheus scraper.
+- **`GET /api/health`** and **`GET /api/version`** need no auth. They expose no run data, but
+  health does report the configured `reports_root` path.
+
+Report tokens encode a run's coordinates (`dag·run·task·try`) and nothing else — they are
+identifiers, never capabilities. Guessing one gains nothing: every token-addressed route
+re-checks permission on the run's DAG before serving.
 
 ## Allure / TestOps export
 
@@ -281,6 +302,81 @@ the report, with an `executor.json` linking the launch back to the Airflow run.
 Download them from a report's detail view, or `GET
 /api/reports/{id}/allure.zip` — then upload to [Allure TestOps](https://qameta.io/)
 (`allurectl upload …`). The JUnit viewer is unaffected; both artifacts coexist.
+
+## Coverage
+
+The run detail shows a **Coverage** card next to Duration. It needs `pytest-cov` on the
+worker, and the fraction reaches the viewer by one of two routes.
+
+**Recommended: with the archive.** One flag on the parser is enough — the operator does
+*not* need `coverage=True`:
+
+```python
+PytestOperator(
+    ...,
+    result_parser=ArchivingResultParser(coverage=True),
+)
+```
+
+The parser adds `--cov` plus `--cov-report=json:<archive>/coverage.json`, then reads the
+fraction while archiving and bakes it into the run's `meta.json` on the spot. Prefer this
+route, because it:
+
+- **survives a failed run.** The operator raises on a red suite (`fail_on_test_failure=True`,
+  the default) or a tripped `cov_fail_under` gate, so its `return_value` XCom is never
+  pushed — but the parser has already run, so the coverage of exactly the runs you most
+  want to inspect is preserved;
+- **needs no metadata-DB query.** The value is served from the report, so the api-server
+  never round-trips to Airflow's shared metadata DB to render the card;
+- **coexists with the operator.** Setting `coverage=True` on both is fine: the runner appends
+  the parser's flags after the operator has built its own, so the operator still splices its
+  flags, still parses its terminal `TOTAL` row for the XCom value, and its `cov_fail_under`
+  gate is unaffected. A duplicate `--cov` measures the same thing once.
+
+**Scope.** A bare `--cov` measures everything. If your project already narrows coverage —
+say `addopts = "--cov=src"` in `pyproject.toml` — pass the same scope, because pytest-cov
+*unions* scopes and a bare `--cov` on top would silently widen the number (usually by
+pulling the tests themselves in):
+
+```python
+ArchivingResultParser(coverage=True, coverage_source="src")   # -> --cov=src
+```
+
+**Fallback: from XCom.** Without the parser flag, and with `coverage=True` on the operator,
+the viewer reads the fraction from the operator's `return_value` XCom on first view and bakes
+it in from there. This still works, but only for runs that finished successfully (see above),
+and a run opened seconds after it finishes may show the card a moment late while the XCom lands.
+
+Either way the card is simply omitted when a run carries no coverage.
+
+**The bar it is read against** comes from one of two places — the **per-task** one wins:
+
+```bash
+# 1. Global default for every run this viewer shows.
+export AIRFLOW_PYTEST_SUCCESS_COVERAGE=0.7
+```
+
+```python
+# 2. Pinned to one suite; travels in the run's meta.json and OUTRANKS the env var.
+ArchivingResultParser(coverage=True, coverage_threshold=0.5)   # legacy suite, gentler bar
+ArchivingResultParser(coverage=True, coverage_threshold=0.95)  # core library, strict bar
+```
+
+A single reader-side variable cannot say that a core library should sit at 95% while a
+legacy smoke suite is fine at 50% — so the suite may state its own standard, and the viewer
+honours it. Leave `coverage_threshold` unset and the env var (then `0.85`) applies. A value
+outside 0–1 is rejected with a warning and falls back to the default, rather than clamped —
+a task that meant `0.9` but wrote `90` should not silently paint every run red.
+
+At or above the bar the card is green and reads *meets target 70%*; below it the card is red
+and reads *below target 70%*. The verdict is spelled out in words next to the colour, so it
+does not depend on seeing the tint.
+
+> **Coverage never fails a run.** Falling short only paints the card red — the run's own
+> pass/fail is decided by its tests (and `AIRFLOW_PYTEST_SUCCESS_THRESHOLD`). If you want a
+> shortfall to actually **fail the task**, that is the operator's job: set `cov_fail_under`
+> on `PytestOperator`. The two are independent on purpose — you can watch coverage in the UI
+> long before you are ready to enforce it in CI.
 
 ## Configuration
 
@@ -300,8 +396,9 @@ Download them from a report's detail view, or `GET
 | `AIRFLOW_PYTEST_SLOW_FACTOR` (env/cfg) | `1.3` | how much slower (recent-half avg ÷ older half, ≥1) a test must get to count as a duration regression |
 | `AIRFLOW_PYTEST_SLOW_MIN_DELTA` (env/cfg) | `0.5` | minimum absolute slowdown in seconds for a regression to register (filters jittery fast tests) |
 | `AIRFLOW_PYTEST_SUCCESS_THRESHOLD` (env/cfg) | `0.85` | pass-rate (0–1) over executed tests at/above which a run counts as successful (*Passing runs*); `1.0` = strict, zero failures/errors |
+| `AIRFLOW_PYTEST_SUCCESS_COVERAGE` (env/cfg) | `0.85` | line-coverage fraction (0–1) at/above which a run's **coverage** card reads as passing; below it the card turns red. Presentational only — it never fails a run (see [Coverage](#coverage)) |
 | `AIRFLOW_PYTEST_METRICS_TOKEN` (env/cfg) | — | bearer token that **enables** the Prometheus `/api/metrics` endpoint; unset = disabled (see [below](#prometheus-metrics)) |
-| `AIRFLOW_PYTEST_ALERTS_EMAIL_TO` (env/cfg) | — | comma-separated alert recipients (empty = alerting stays off; the per-task `email=True` flag is the on-switch — see [below](#email-alerts)). Validated, case-insensitively deduped, capped at 50 (use a mailing-list address for bigger audiences) |
+| `AIRFLOW_PYTEST_ALERTS_EMAIL_TO` (env/cfg) | — | comma-separated alert recipients (empty = alerting stays off; a per-task `email=True` *or* `email_only_fail=True` flag is the on-switch — see [below](#email-alerts)). Validated, case-insensitively deduped, capped at 50 (use a mailing-list address for bigger audiences) |
 | `AIRFLOW_PYTEST_SMTP_*` (env/cfg) | — | standalone SMTP (`_HOST`, `_PORT`, `_USER`, `_PASSWORD`, `_FROM`, `_STARTTLS`); when `_HOST` is set it is used directly (takes precedence over Airflow's `send_email`), otherwise it's the fallback |
 
 **Enable / disable the reader.** Set `AIRFLOW_PYTEST_PLUGIN_ENABLE` to a falsey

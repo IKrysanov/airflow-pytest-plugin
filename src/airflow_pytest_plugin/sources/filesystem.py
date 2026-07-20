@@ -206,6 +206,7 @@ class FileSystemReportSource(ReportSource):
             cases=cases,
             alerts=_alerts_from_meta(meta),
             coverage=_coverage_from_meta(meta),
+            coverage_threshold=_coverage_threshold_from_meta(meta),
         )
 
     def test_outcomes(self, ref: ReportRef) -> dict[str, dict[str, Any]] | None:
@@ -512,14 +513,25 @@ def _alerts_from_meta(meta: dict[str, Any] | None) -> tuple[dict[str, Any], ...]
     )
 
 
+def _unit_fraction(value: Any) -> float | None:
+    """``value`` as a 0-1 float, or ``None`` when absent / not a number / out of range."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value) if 0.0 <= value <= 1.0 else None
+    return None
+
+
 def _coverage_from_meta(meta: dict[str, Any] | None) -> float | None:
     """The baked-in coverage fraction (0-1) from a run's meta, or ``None``."""
     if not isinstance(meta, dict):
         return None
-    coverage = meta.get("coverage")
-    if isinstance(coverage, (int, float)) and not isinstance(coverage, bool):
-        return float(coverage) if 0.0 <= coverage <= 1.0 else None
-    return None
+    return _unit_fraction(meta.get("coverage"))
+
+
+def _coverage_threshold_from_meta(meta: dict[str, Any] | None) -> float | None:
+    """The coverage bar the producer pinned to this run (0-1), or ``None`` for the default."""
+    if not isinstance(meta, dict):
+        return None
+    return _unit_fraction(meta.get("coverage_threshold"))
 
 
 def _opt_str(value: Any) -> str | None:
