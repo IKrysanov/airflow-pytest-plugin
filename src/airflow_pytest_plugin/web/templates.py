@@ -170,6 +170,41 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .kpi-info:hover { color: var(--primary); }
   .kpi-info:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px;
     border-radius: 50%; }
+  /* -- Dashboard settings: one switch per main-board panel. --------------------------- */
+  .set-group-lbl { font-size: 12px; color: var(--muted); text-transform: uppercase;
+    letter-spacing: .04em; margin-bottom: 8px; }
+  /* The whole row is the label, so the tap target is the row (>=44px tall), not the switch. */
+  .set-row { display: flex; align-items: center; gap: 10px; cursor: pointer;
+    padding: 11px 2px; border-top: 1px solid var(--border); }
+  .set-row:first-of-type { border-top: 0; }
+  .set-name { flex: 1 1 auto; min-width: 0; font-size: 14px; color: var(--fg); }
+  /* The state is spelled out next to the switch: knob position alone is a shape-and-colour
+     signal, and this also gives screen readers a visible word to read. */
+  .set-state { flex: 0 0 auto; font-size: 12px; color: var(--muted);
+    font-variant-numeric: tabular-nums; }
+  /* The checkbox IS the switch (appearance:none + a drawn knob), rather than a 0x0 hidden
+     input with a decorative span beside it: a zero-sized control is unreliable to focus and
+     has no hit area of its own, so keyboard users could be left unable to operate it. This
+     way the native element keeps focus, Space, and the checked state, and we only restyle it. */
+  .set-row input[type="checkbox"] { appearance: none; -webkit-appearance: none;
+    flex: 0 0 auto; position: relative; width: 38px; height: 22px; margin: 0;
+    border-radius: 999px; background: var(--surface-2); border: 1px solid var(--border);
+    cursor: pointer; transition: background .15s, border-color .15s; }
+  .set-row input[type="checkbox"]::after { content: ""; position: absolute; top: 2px;
+    left: 2px; width: 16px; height: 16px; border-radius: 50%; background: var(--muted);
+    transition: transform .15s, background .15s; }
+  .set-row input[type="checkbox"]:checked { background: var(--primary);
+    border-color: var(--primary); }
+  .set-row input[type="checkbox"]:checked::after { transform: translateX(16px);
+    background: var(--on-primary); }
+  .set-row input[type="checkbox"]:focus-visible { outline: 2px solid var(--ring);
+    outline-offset: 2px; }
+  .set-hint { color: var(--muted); font-size: 12px; margin: 12px 0 0; line-height: 1.5; }
+  .set-warn { color: var(--thresh); font-size: 12px; margin: 8px 0 0; line-height: 1.5; }
+  @media (prefers-reduced-motion: reduce) {
+    .set-row input[type="checkbox"],
+    .set-row input[type="checkbox"]::after { transition: none; }
+  }
   /* "all" chip: marks a KPI that counts every run in view, ignoring a group selection. */
   .kpi-all { display: inline-block; padding: 0 6px; border-radius: 999px;
     background: var(--surface-2); border: 1px solid var(--border); color: var(--muted);
@@ -936,6 +971,14 @@ _INDEX_HTML = r"""<!DOCTYPE html>
         </button>
       </div>
     </span>
+    <button id="settings-btn" class="btn icon-btn" type="button" data-i18n-al="settingsAl"
+            aria-haspopup="dialog">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="3"/>
+        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9v.09a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+      </svg>
+    </button>
     <button id="refresh" class="btn primary" type="button">
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"
            stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -1198,6 +1241,41 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   <div class="dlg-body" id="rel-info-body"></div>
 </dialog>
 
+<dialog id="settings" aria-labelledby="settings-title">
+  <div class="dlg-head">
+    <h2 id="settings-title" data-i18n="settingsTitle">Dashboard</h2>
+    <span class="grow" style="flex:1"></span>
+    <button id="settings-close" class="btn icon-btn" type="button" data-i18n-al="closeReport">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M18 6 6 18M6 6l12 12"/>
+      </svg>
+    </button>
+  </div>
+  <div class="dlg-body">
+    <div class="set-group" role="group" aria-labelledby="set-panels-lbl">
+      <div class="set-group-lbl" id="set-panels-lbl" data-i18n="settingsPanels">Panels</div>
+      <label class="set-row" for="set-chart">
+        <span class="set-name" data-i18n="settingsChart">Recent runs</span>
+        <span class="set-state" id="set-chart-state"></span>
+        <input type="checkbox" id="set-chart" role="switch" data-panel="chart" checked />
+      </label>
+      <label class="set-row" for="set-rel">
+        <span class="set-name" data-i18n="settingsRel">Reliability</span>
+        <span class="set-state" id="set-rel-state"></span>
+        <input type="checkbox" id="set-rel" role="switch" data-panel="reliability" checked />
+      </label>
+      <label class="set-row" for="set-flaky">
+        <span class="set-name" data-i18n="settingsFlaky">Flaky tests</span>
+        <span class="set-state" id="set-flaky-state"></span>
+        <input type="checkbox" id="set-flaky" role="switch" data-panel="flaky" checked />
+      </label>
+      <p class="set-hint" data-i18n="settingsHint"></p>
+      <p class="set-warn" id="set-alloff" data-i18n="settingsAllOff" hidden></p>
+    </div>
+  </div>
+</dialog>
+
 <dialog id="panel-info" aria-labelledby="panel-info-title">
   <div class="dlg-head">
     <h2 id="panel-info-title"></h2>
@@ -1272,6 +1350,13 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       cTotal: "Total", cPass: "Pass", cFail: "Fail", cErr: "Err", cSkip: "Skip",
       cDuration: "Duration", cCoverage: "Coverage", cWhen: "When", cRuns: "Runs", cPassRate: "Pass %", cAvgDur: "Avg time",
       covPass: "meets target", covFail: "below target",
+      settingsAl: "Dashboard settings", settingsTitle: "Dashboard",
+      settingsPanels: "Panels on the main board",
+      settingsHint: "Hidden panels stay hidden on this browser until you turn them back on.",
+      settingsChart: "Recent runs", settingsRel: "Reliability", settingsFlaky: "Flaky tests",
+      settingsOn: "shown", settingsOff: "hidden",
+      settingsAllOff: "Every panel is hidden — the run list is still below.",
+      settingsClose: "Done",
       kpiInfoAl: "How this is computed",
       uniqueInfoTitle: "Unique tests",
       uniqueInfoBody: "Distinct pytest node ids across the runs currently in view, so the "
@@ -1421,6 +1506,14 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       cTotal: "Всего", cPass: "Усп", cFail: "Пров", cErr: "Ошиб", cSkip: "Проп",
       cDuration: "Время", cCoverage: "Покрытие", cWhen: "Когда", cRuns: "Прогоны", cPassRate: "Проход %", cAvgDur: "Ср. время",
       covPass: "норма, порог", covFail: "ниже порога",
+      settingsAl: "Настройки дашборда", settingsTitle: "Дашборд",
+      settingsPanels: "Панели на главной",
+      settingsHint: "Скрытые панели останутся скрытыми в этом браузере, пока вы их не включите.",
+      settingsChart: "Последние прогоны", settingsRel: "Надёжность",
+      settingsFlaky: "Нестабильные тесты",
+      settingsOn: "показана", settingsOff: "скрыта",
+      settingsAllOff: "Все панели скрыты — список прогонов ниже остаётся.",
+      settingsClose: "Готово",
       kpiInfoAl: "Как это считается",
       uniqueInfoTitle: "Уникальные тесты",
       uniqueInfoBody: "Различные node id тестов среди прогонов, попавших в текущую выборку: "
@@ -1672,6 +1765,19 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     applyTheme();
     var loc = detectLocale();
     if (loc !== LOCALE) { LOCALE = loc; applyI18n(); renderAll(); }
+    syncPanelPrefsFromStorage();
+  }
+  // Panel prefs live in localStorage, which is shared across this origin's tabs -- so a
+  // change made in another tab arrives here as a storage event. Re-read it, or two open
+  // dashboards would disagree about which panels exist until one is reloaded.
+  function syncPanelPrefsFromStorage() {
+    if (typeof panelPrefs === "undefined") return;  // called before init
+    var fresh = loadPanelPrefs();
+    var changed = PANEL_IDS.some(function (p) { return fresh[p] !== panelPrefs[p]; });
+    if (!changed) return;
+    panelPrefs = fresh;
+    syncSettingsUi();
+    refreshPanels();
   }
   applyTheme(); applyI18n();
   // The parent may still be booting when this frame runs: Airflow's React app can write
@@ -2146,8 +2252,18 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   }
 
   function renderChart() {
-    renderLegend();
     var card = document.getElementById("chart-card");
+    // Off -> skip the whole build. On a few thousand runs this strip is by far the biggest
+    // DOM on the page, so an "off" panel that still rendered would keep costing on every
+    // re-render for something nobody can see.
+    if (!panelPrefs.chart) {
+      card.hidden = true;
+      var chartBox = document.getElementById("chart");
+      if (chartBox) chartBox.innerHTML = "";
+      syncBoardRow("board", ["chart-card"]);
+      return;
+    }
+    renderLegend();
     // Ticked runs filter the chart to their bars only (empty = all), so you can pick a
     // few and read just their trend.
     var selActive = selectedIds.size > 0;
@@ -2162,9 +2278,12 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       card.hidden = true; document.getElementById("chart-nav").innerHTML = "";
       var rEl0 = document.getElementById("chart-range"); if (rEl0) rEl0.innerHTML = "";
       var aEl0 = document.getElementById("chart-avg"); if (aEl0) aEl0.hidden = true;
+      syncBoardRow("board", ["chart-card"]);
       return;
     }
-    card.hidden = false;
+    // Same rule as the flaky panel: the pref is honoured where visibility is decided.
+    card.hidden = !panelPrefs.chart;
+    syncBoardRow("board", ["chart-card"]);
 
     var win = data;            // every run; the strip scrolls once past CHART_VISIBLE
     var count = win.length;
@@ -2682,7 +2801,82 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     });
   }
 
-  function renderAll() { renderKpis(); renderChart(); renderList(); renderReliability(); if (detail) renderDetail(); }
+  // -- dashboard settings: which main-board panels are shown ----------------------------
+  // Kept in localStorage so a hidden panel STAYS hidden across reloads (the whole point of
+  // the setting). Per browser/user, not per deployment -- it is a personal view preference,
+  // not policy, so it deliberately never touches the server.
+  var PANEL_KEY = "apx.panels";
+  var PANEL_CARD = { chart: "chart-card", reliability: "pentagon-card", flaky: "flaky-card" };
+  var PANEL_IDS = ["chart", "reliability", "flaky"];
+  var panelPrefs = loadPanelPrefs();
+
+  function loadPanelPrefs() {
+    var prefs = { chart: true, reliability: true, flaky: true };  // default: everything on
+    try {
+      var saved = JSON.parse(localStorage.getItem(PANEL_KEY) || "{}");
+      PANEL_IDS.forEach(function (p) {
+        if (typeof saved[p] === "boolean") prefs[p] = saved[p];
+      });
+    } catch (e) { /* absent, unreadable or corrupt -> defaults, never a broken board */ }
+    return prefs;
+  }
+  function savePanelPrefs() {
+    try { localStorage.setItem(PANEL_KEY, JSON.stringify(panelPrefs)); } catch (e) {}
+  }
+
+  // A pref may only ever HIDE. The render functions decide whether a panel has anything
+  // worth showing (the chart needs >=2 bars, the flaky panel needs flaky tests); an off
+  // switch vetoes that. Never force-shows, so those rules keep working untouched.
+  function applyPanelPrefs() {
+    PANEL_IDS.forEach(function (p) {
+      var el = document.getElementById(PANEL_CARD[p]);
+      if (el && !panelPrefs[p]) el.hidden = true;
+    });
+    syncBoardRow("board", ["chart-card"]);
+    syncBoardRow("board2", ["pentagon-card", "flaky-card"]);
+  }
+  // A flex row whose cards are all hidden still contributes its bottom margin, leaving a gap
+  // where the panels used to be. Derived in BOTH directions from the cards, because a panel
+  // can reappear after its row collapsed -- the flaky data arrives asynchronously, well
+  // after the first render decided the row was empty.
+  function syncBoardRow(rowId, cardIds) {
+    var row = document.getElementById(rowId);
+    if (!row) return;
+    var anyShown = cardIds.some(function (id) {
+      var c = document.getElementById(id);
+      return c && !c.hidden;
+    });
+    row.hidden = !anyShown || allReports.length === 0;
+  }
+  // Toggling re-runs the data-driven visibility from scratch before re-applying the prefs,
+  // so a panel switched back ON reappears (a veto-only pass could never restore it).
+  function refreshPanels() {
+    var hasRuns = allReports.length > 0;
+    document.getElementById("board").hidden = !hasRuns;
+    document.getElementById("board2").hidden = !hasRuns;
+    // The radar has no data-driven visibility rule of its own (unlike the chart, which
+    // needs >=2 bars, and the flaky panel, which needs flaky tests) -- so nothing would
+    // ever clear a veto that hid it. Reset it here, then let applyPanelPrefs decide again.
+    document.getElementById("pentagon-card").hidden = false;
+    renderChart(); renderReliability(); renderFlakyBoard();
+    applyPanelPrefs();
+  }
+
+  function syncSettingsUi() {
+    var off = 0;
+    PANEL_IDS.forEach(function (p) {
+      var box = document.querySelector('#settings input[data-panel="' + p + '"]');
+      if (!box) return;
+      box.checked = !!panelPrefs[p];
+      if (!panelPrefs[p]) off++;
+      var state = document.getElementById(box.id + "-state");
+      if (state) state.textContent = t(panelPrefs[p] ? "settingsOn" : "settingsOff");
+    });
+    var warn = document.getElementById("set-alloff");
+    if (warn) warn.hidden = off < PANEL_IDS.length;
+  }
+
+  function renderAll() { renderKpis(); renderChart(); renderList(); renderReliability(); if (detail) renderDetail(); applyPanelPrefs(); }
 
   function skeleton() {
     var rows = "";
@@ -2758,6 +2952,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     document.getElementById("board").hidden = allReports.length === 0;
     document.getElementById("board2").hidden = allReports.length === 0;
     renderKpis(); renderChart(); renderList(); renderFlakyBoard();
+    applyPanelPrefs();  // an off switch vetoes whatever the renders above decided to show
     refreshUniqueTests();
     refreshSlow();
   }
@@ -2790,9 +2985,17 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     if (!box) return;
     // No flaky anywhere -> hide the panel; the radar beside it grows to fill the row. The
     // chart is on its own full-width row, so its width doesn't depend on this panel.
+    // The pref is applied HERE, where this card's visibility is owned, so every caller --
+    // including the async flaky fetch that lands after the initial render -- honours it
+    // without each call site having to remember.
     var flakyCard = document.getElementById("flaky-card");
-    if (flakyCard) flakyCard.hidden = !allFlaky.length;
-    if (!allFlaky.length) return;
+    if (flakyCard) flakyCard.hidden = !allFlaky.length || !panelPrefs.flaky;
+    if (!allFlaky.length || !panelPrefs.flaky) {
+      if (!panelPrefs.flaky) box.innerHTML = "";  // off -> release the rows too
+      syncBoardRow("board2", ["pentagon-card", "flaky-card"]);
+      return;
+    }
+    syncBoardRow("board2", ["pentagon-card", "flaky-card"]);
     var dag = document.getElementById("f-dag").value.trim().toLowerCase();
     var task = document.getElementById("f-task").value.trim().toLowerCase();
     var qEl = document.getElementById("flk-board-q");
@@ -3017,6 +3220,17 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   function renderReliability() {
     var el = document.getElementById("pentagon");
     if (!el) return;
+    // Switched off -> do no work at all and release what was drawn. Hiding the card alone
+    // would still pay for scoring + the SVG on every re-render (filter typing, group picks,
+    // deletes), which defeats turning a panel off to lighten a heavy board.
+    if (!panelPrefs.reliability) {
+      document.getElementById("pentagon-card").hidden = true;
+      el.innerHTML = "";
+      var rt = document.getElementById("rel-trend");
+      if (rt) rt.innerHTML = "";
+      syncBoardRow("board2", ["pentagon-card", "flaky-card"]);
+      return;
+    }
     var selKeys = selKeySet();
     var sc = document.getElementById("rel-scope");
     if (sc) { sc.hidden = !selKeys; if (selKeys) sc.textContent = t("flkSelScope"); }
@@ -3065,6 +3279,37 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     if (fi) fi.addEventListener("click", function () { openPanelInfo("flakyInfoTitle", "flakyInfoBody"); });
     var pc = document.getElementById("panel-info-close");
     if (pc) pc.addEventListener("click", closePanelInfo);
+    // Dashboard settings.
+    var setDlg = document.getElementById("settings");
+    var setBtn = document.getElementById("settings-btn");
+    if (setBtn && setDlg) {
+      setBtn.addEventListener("click", function () {
+        syncSettingsUi();
+        if (typeof setDlg.showModal === "function") {
+          if (!setDlg.open) setDlg.showModal();
+        } else setDlg.setAttribute("open", "");
+        updateParentDim();
+        var first = setDlg.querySelector('input[data-panel]');
+        if (first) first.focus();
+      });
+      var closeSet = function () {
+        if (setDlg.open) setDlg.close(); else setDlg.removeAttribute("open");
+      };
+      var sc = document.getElementById("settings-close");
+      if (sc) sc.addEventListener("click", closeSet);
+      setDlg.addEventListener("close", updateParentDim);
+      closeOnBackdrop(setDlg, closeSet);
+      // Apply on change: the board updates behind the open dialog, so the effect of a
+      // switch is visible immediately -- no "save" step to forget.
+      setDlg.querySelectorAll("input[data-panel]").forEach(function (box) {
+        box.addEventListener("change", function () {
+          panelPrefs[box.getAttribute("data-panel")] = box.checked;
+          savePanelPrefs();
+          syncSettingsUi();
+          refreshPanels();
+        });
+      });
+    }
     if (panelInfoDlg) { panelInfoDlg.addEventListener("close", updateParentDim); closeOnBackdrop(panelInfoDlg, closePanelInfo); }
   })();
   // Duration-regression scan honouring the top dag/task/run filters (like the other KPIs):

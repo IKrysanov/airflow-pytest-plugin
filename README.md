@@ -63,9 +63,17 @@ search and a quarantined-only toggle), KPI cards (including a clickable **unique
 tests** count), and Airflow-matched colours and font. The run list is **grouped by
 dag·task** by default (a checkbox toggles the flat list) — collapsible groups with
 run count, pass-rate, average duration and last status, each sortable on its own;
-select a whole group to chart its trend:
+select a whole group to chart its trend. The ⚙ button in the header opens **dashboard
+settings**, where each main-board panel (*Recent runs*, *Reliability*, *Flaky tests*) can be
+switched off — it is then not rendered at all, and the choice is remembered in your browser
+across reloads. Everything is on by default and the run list is never affected:
 
 ![Pytest Reports — overview](https://raw.githubusercontent.com/IKrysanov/airflow-pytest-plugin/main/docs/screenshots/overview.png)
+
+**Dashboard settings** — switch any main-board panel off and it is not rendered at all; the
+choice is remembered in your browser across reloads:
+
+![Pytest Reports — dashboard settings](https://raw.githubusercontent.com/IKrysanov/airflow-pytest-plugin/main/docs/screenshots/settings.png)
 
 **A single run** — a clickable success donut (pass-rate over the test count;
 click a slice to filter by status), a **coverage** card next to the duration (when the

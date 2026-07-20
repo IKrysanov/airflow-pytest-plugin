@@ -24,7 +24,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from ...compat import get_run_coverage
 from ...config import (
@@ -780,11 +780,24 @@ def build_router(deps: RouteDeps) -> APIRouter:
             raise HTTPException(
                 status_code=403, detail="not authorized to read this report"
             )
-        data = src.allure_archive(ref)
-        if data is None:
-            raise HTTPException(status_code=404, detail="no Allure results")
-        return Response(
-            data,
+        # Streamed, not built in memory: this plugin runs INSIDE Airflow's api-server, and
+        # holding a whole Allure archive per request meant a few concurrent downloads of a
+        # large results tree could exhaust the process that serves the rest of Airflow.
+        # Sources that don't implement streaming fall back to the in-memory archive.
+        stream = src.allure_stream(ref)
+        if stream is None:
+            data = src.allure_archive(ref)
+            if data is None:
+                raise HTTPException(status_code=404, detail="no Allure results")
+            return Response(
+                data,
+                media_type="application/zip",
+                headers={
+                    "Content-Disposition": 'attachment; filename="allure-results.zip"'
+                },
+            )
+        return StreamingResponse(
+            stream,
             media_type="application/zip",
             headers={
                 "Content-Disposition": 'attachment; filename="allure-results.zip"'
