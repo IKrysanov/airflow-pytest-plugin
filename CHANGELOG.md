@@ -37,7 +37,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Auth fails closed inside Airflow** — if Airflow is installed but its auth API can't be
   imported (e.g. after an upgrade moved it), the reader now denies every report and logs the
   reason, instead of falling back to allow-all as it did for the standalone dev server. Without
-  Airflow at all, standalone stays open as before.
+  Airflow at all, standalone stays open as before. `GET /api/health` gained a third `auth` value,
+  `denied`, for that state — reporting it as `open` would tell an operator the opposite of what
+  is happening.
 
 ### Fixed
 - **The viewer follows Airflow's language** — the parent's `<html lang>` was read before the

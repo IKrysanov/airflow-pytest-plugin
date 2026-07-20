@@ -270,9 +270,16 @@ list and `403` on direct links).
 the bundled dev server — everything is allowed, which is the point of that mode. With
 **Airflow installed but its auth API unreachable** (an upgrade moved it, say) the reader
 **denies every report** and logs the reason: it cannot verify DAG permissions, and serving
-every team's runs would be the worst possible reading of "auth unavailable". `GET
-/api/health` reports which mode is live as `auth: "airflow" | "open"` — worth asserting in a
-smoke check for a shared deployment.
+every team's runs would be the worst possible reading of "auth unavailable".
+
+`GET /api/health` reports which mode is live — worth asserting in a smoke check for a shared
+deployment:
+
+| `auth` | Meaning |
+| --- | --- |
+| `airflow` | Airflow's RBAC is consulted per request (the normal deployment) |
+| `open` | No Airflow — the standalone dev server, everything is served |
+| `denied` | Airflow present but its auth unreachable: every report is refused |
 
 **Two things sit outside per-DAG RBAC**, by design — worth knowing before a wide rollout:
 

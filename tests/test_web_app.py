@@ -2137,17 +2137,51 @@ def test_delete_needs_more_than_read(reports_root):
     assert c.get(f"/api/reports/{tok}").status_code == 200  # still there
 
 
+def _force_auth_env(monkeypatch, *, auth: bool, airflow: bool):
+    """Pin BOTH modules' view of Airflow: create_app wires the authorizers from its own
+    import, /api/health reports the mode from monitoring's. Patching only one leaves the
+    other reading the real environment -- which is why this passed without Airflow
+    installed and failed on the integration matrix."""
+    import airflow_pytest_plugin.web.app as app_mod
+    import airflow_pytest_plugin.web.routes.monitoring as mon_mod
+
+    for mod in (app_mod, mon_mod):
+        monkeypatch.setattr(mod, "airflow_auth_available", lambda: auth)
+        monkeypatch.setattr(mod, "airflow_available", lambda: airflow)
+    return app_mod
+
+
 def test_standalone_without_airflow_serves_openly(reports_root, monkeypatch):
     # No Airflow at all = the bundled dev server: there is no user to authorize, and
     # allow-all is the documented behaviour (health reports auth="open").
-    import airflow_pytest_plugin.web.app as app_mod
-
-    monkeypatch.setattr(app_mod, "airflow_auth_available", lambda: False)
-    monkeypatch.setattr(app_mod, "airflow_available", lambda: False)
+    app_mod = _force_auth_env(monkeypatch, auth=False, airflow=False)
     write_report(reports_root, ReportRef("dag", "run", "task", 1))
     c = TestClient(app_mod.create_app(FileSystemReportSource(report_root=reports_root)))
     assert len(c.get("/api/reports").json()["reports"]) == 1
     assert c.get("/api/health").json()["auth"] == "open"
+
+
+def test_health_reports_denied_when_auth_is_unreachable(reports_root, monkeypatch):
+    # health is the documented smoke check for a shared deployment, so it must not call
+    # the fail-closed state "open" -- that would report the exact opposite of the truth.
+    app_mod = _force_auth_env(monkeypatch, auth=False, airflow=True)
+    write_report(reports_root, ReportRef("dag", "run", "task", 1))
+    c = TestClient(app_mod.create_app(FileSystemReportSource(report_root=reports_root)))
+    assert c.get("/api/health").json()["auth"] == "denied"
+    assert c.get("/api/reports").json()["reports"] == []  # and it really is denying
+
+
+def test_health_reports_airflow_when_rbac_is_live(reports_root, monkeypatch):
+    app_mod = _force_auth_env(monkeypatch, auth=True, airflow=True)
+    c = TestClient(
+        app_mod.create_app(
+            FileSystemReportSource(report_root=reports_root),
+            read_authorizer=lambda d, u: True,
+            authorizer=lambda d, u: True,
+            user_dependency=lambda: None,
+        )
+    )
+    assert c.get("/api/health").json()["auth"] == "airflow"
 
 
 def test_airflow_present_but_auth_broken_fails_closed(
@@ -2155,10 +2189,7 @@ def test_airflow_present_but_auth_broken_fails_closed(
 ):
     # The dangerous middle case: we ARE inside Airflow but cannot reach its RBAC. Serving
     # every team's runs would be the worst reading of "auth unavailable" -- deny instead.
-    import airflow_pytest_plugin.web.app as app_mod
-
-    monkeypatch.setattr(app_mod, "airflow_auth_available", lambda: False)
-    monkeypatch.setattr(app_mod, "airflow_available", lambda: True)
+    app_mod = _force_auth_env(monkeypatch, auth=False, airflow=True)
     write_report(reports_root, ReportRef("dag", "run", "task", 1))
     with caplog.at_level("ERROR"):
         c = TestClient(
