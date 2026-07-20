@@ -137,20 +137,50 @@ _INDEX_HTML = r"""<!DOCTYPE html>
 
   main { padding: 18px 20px 40px; max-width: 1600px; margin: 0 auto; }
 
-  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  /* 190px, not 150: a KPI title sits on ONE line beside its chip, and at 150 the longest
+     localised titles ("УСПЕШНЫХ ПРОГОНОВ") had to shrink past readability or clip. Wider
+     minimum = one column instead of two on a phone, which is the better read anyway. */
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
     gap: 12px; margin-bottom: 18px; }
   .kpi { background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
     padding: 14px 16px; box-shadow: var(--shadow); }
   .kpi.clickable { cursor: pointer; transition: background .12s, border-color .12s; }
   .kpi.clickable:hover { background: var(--surface-2); border-color: var(--muted); }
   .kpi.clickable:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
+  /* A flex row, NOT inline flow: the chip and ⓘ must never be pushed onto a line of their
+     own when the title is long or the card is narrow (they'd read as separate content).
+     The title keeps its own box and may wrap inside it; the badges stay pinned beside it. */
   .kpi .label { font-size: 12px; color: var(--muted); text-transform: uppercase;
-    letter-spacing: .04em; }
+    letter-spacing: .04em; display: flex; align-items: center; gap: 6px;
+    flex-wrap: nowrap; }
+  /* One line, always: the title SHRINKS to fit (see fitKpiLabels) instead of wrapping, which
+     would strand the chip beside a two-line block and read as unrelated content. It may
+     shrink past its content width (flex 0 1 auto + min-width 0); the ellipsis is only a
+     safety net for a title still too long at the smallest step. */
+  .kpi .label-text { min-width: 0; flex: 0 1 auto; white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis; }
+  .kpi .label > .kpi-all, .kpi .label > .kpi-info { flex: 0 0 auto; }
+  /* ⓘ by a KPI label -> the "how this is computed" popup. Same affordance as the panel
+     buttons, sized down for the small uppercase label it sits in. Sits ON the card, which is
+     itself clickable, so its handlers stopPropagation -- opening the note must not also
+     trigger the card's own drill-down. Colours come from tokens, so both themes track. */
+  .kpi-info { display: inline-flex; align-items: center; justify-content: center; padding: 0;
+    border: 0; background: none; color: var(--muted); cursor: pointer; }
+  .kpi-info svg { width: 14px; height: 14px; }
+  .kpi-info:hover { color: var(--primary); }
+  .kpi-info:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px;
+    border-radius: 50%; }
   /* "all" chip: marks a KPI that counts every run in view, ignoring a group selection. */
-  .kpi-all { display: inline-block; margin-left: 6px; padding: 0 6px; border-radius: 999px;
+  .kpi-all { display: inline-block; padding: 0 6px; border-radius: 999px;
     background: var(--surface-2); border: 1px solid var(--border); color: var(--muted);
-    font-size: 9.5px; font-weight: 700; letter-spacing: .04em; vertical-align: middle; }
-  .kpi .value { font-size: 26px; font-weight: 700; margin-top: 4px; }
+    font-size: 9.5px; font-weight: 700; letter-spacing: .04em; white-space: nowrap; }
+  .kpi .value { font-size: 26px; font-weight: 700; margin-top: 4px;
+    font-variant-numeric: tabular-nums; }
+  /* Second, TEXTUAL signal under a tinted value (e.g. coverage "low"): the tint alone
+     would encode meaning in colour only, which fails WCAG for colour-blind readers.
+     Muted so it supports the number instead of competing with it. */
+  .kpi .note { font-size: 11px; color: var(--muted); margin-top: 2px;
+    letter-spacing: .02em; }
 
   .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
     overflow: hidden; box-shadow: var(--shadow); }
@@ -1240,7 +1270,31 @@ _INDEX_HTML = r"""<!DOCTYPE html>
         + "Flaky/Stability are radar-only snapshots, so they're not in the line.",
       cId: "ID", cStatus: "Status", cDag: "DAG", cTask: "Task", cRun: "Run", cTry: "Try",
       cTotal: "Total", cPass: "Pass", cFail: "Fail", cErr: "Err", cSkip: "Skip",
-      cDuration: "Duration", cWhen: "When", cRuns: "Runs", cPassRate: "Pass %", cAvgDur: "Avg time",
+      cDuration: "Duration", cCoverage: "Coverage", cWhen: "When", cRuns: "Runs", cPassRate: "Pass %", cAvgDur: "Avg time",
+      covPass: "meets target", covFail: "below target",
+      kpiInfoAl: "How this is computed",
+      uniqueInfoTitle: "Unique tests",
+      uniqueInfoBody: "Distinct pytest node ids across the runs currently in view, so the "
+        + "same test counted once however many times it ran. Follows the top filters. To keep "
+        + "the count cheap only the 1000 newest runs are scanned — past that it is a lower "
+        + "bound and says so. Click the card for the full catalogue with per-test stats.",
+      failuresInfoTitle: "Failures",
+      failuresInfoBody: "Tests failing or erroring in the LATEST run of each dag·task — what "
+        + "is broken right now, not a historical total, so a test drops off as soon as a newer "
+        + "run passes it. Unlike Runs and Passing runs, this narrows to a selected group. "
+        + "Click the card to see them grouped by dag·task.",
+      slowInfoTitle: "Slowdowns",
+      slowInfoBody: "Tests that got measurably slower: their recent-half average duration is "
+        + "at least 1.3× the older half AND at least 0.5 s worse (both configurable via "
+        + "AIRFLOW_PYTEST_SLOW_FACTOR and AIRFLOW_PYTEST_SLOW_MIN_DELTA). The absolute floor "
+        + "keeps jittery fast tests out. A test needs at least 4 runs to qualify, and drops "
+        + "off once it speeds back up. Click the card for the regressions and the slowest tests.",
+      coverageInfoTitle: "Coverage",
+      coverageInfoBody: "Overall share of lines covered by this run, measured by pytest-cov. "
+        + "It is archived with the run when the parser sets coverage=True, otherwise read from "
+        + "the operator's XCom. Green at or above the target, red below it; the target is the "
+        + "one pinned to this suite, else AIRFLOW_PYTEST_SUCCESS_COVERAGE (85% by default). "
+        + "Missing the target only colours the card — it never fails the run.",
       kRuns: "Runs", kPassingRuns: "Passing runs", kTests: "Unique tests", kFailures: "Failures",
       kAll: "all", kAllTip: "Counts every run in view — not narrowed by a group selection",
       chartInfoAl: "About the runs chart", flakyInfoAl: "About flaky tests",
@@ -1365,7 +1419,34 @@ _INDEX_HTML = r"""<!DOCTYPE html>
         + "«Зелёный» и Нестабильность — снимки только на радаре, в линию не входят.",
       cId: "ID", cStatus: "Статус", cDag: "DAG", cTask: "Задача", cRun: "Запуск", cTry: "Попытка",
       cTotal: "Всего", cPass: "Усп", cFail: "Пров", cErr: "Ошиб", cSkip: "Проп",
-      cDuration: "Время", cWhen: "Когда", cRuns: "Прогоны", cPassRate: "Проход %", cAvgDur: "Ср. время",
+      cDuration: "Время", cCoverage: "Покрытие", cWhen: "Когда", cRuns: "Прогоны", cPassRate: "Проход %", cAvgDur: "Ср. время",
+      covPass: "норма, порог", covFail: "ниже порога",
+      kpiInfoAl: "Как это считается",
+      uniqueInfoTitle: "Уникальные тесты",
+      uniqueInfoBody: "Различные node id тестов среди прогонов, попавших в текущую выборку: "
+        + "один и тот же тест считается один раз, сколько бы раз он ни запускался. Учитывает "
+        + "фильтры сверху. Чтобы счёт оставался дешёвым, просматриваются только 1000 самых "
+        + "свежих прогонов — дальше значение становится оценкой снизу, о чём говорится прямо. "
+        + "Нажмите на карточку, чтобы открыть полный каталог со статистикой по каждому тесту.",
+      failuresInfoTitle: "Падений",
+      failuresInfoBody: "Тесты, которые падают или дают ошибку в ПОСЛЕДНЕМ прогоне каждого "
+        + "dag·task — то, что сломано прямо сейчас, а не сумма за всю историю: тест исчезает "
+        + "отсюда, как только новый прогон проходит успешно. В отличие от «Прогонов» и "
+        + "«Успешных прогонов», сужается при выборе группы. Нажмите на карточку, чтобы "
+        + "увидеть их в разбивке по dag·task.",
+      slowInfoTitle: "Замедления",
+      slowInfoBody: "Тесты, которые заметно замедлились: их среднее время по свежей половине "
+        + "прогонов минимум в 1.3 раза больше, чем по старой, И при этом хуже минимум на 0.5 с "
+        + "(оба порога настраиваются: AIRFLOW_PYTEST_SLOW_FACTOR и AIRFLOW_PYTEST_SLOW_MIN_DELTA). "
+        + "Абсолютный порог отсекает быстрые тесты с дрожащим временем. Нужно минимум 4 прогона, "
+        + "а если тест снова ускорился — он уходит из списка. Нажмите на карточку, чтобы "
+        + "посмотреть регрессии и самые медленные тесты.",
+      coverageInfoTitle: "Покрытие",
+      coverageInfoBody: "Доля строк кода, покрытых этим прогоном; измеряет pytest-cov. "
+        + "Значение сохраняется вместе с отчётом, если у парсера включён coverage=True, иначе "
+        + "читается из XCom оператора. Зелёное — на пороге или выше, красное — ниже; порог "
+        + "берётся закреплённый за этой суитой, иначе AIRFLOW_PYTEST_SUCCESS_COVERAGE (по "
+        + "умолчанию 85%). Недобор до порога только красит карточку — прогон он не проваливает.",
       kRuns: "Прогонов", kPassingRuns: "Успешных прогонов", kTests: "Уникальные тесты", kFailures: "Падений",
       kAll: "все", kAllTip: "Считает все прогоны в поле зрения — не сужается выбором группы",
       chartInfoAl: "О диаграмме прогонов", flakyInfoAl: "О нестабильных тестах",
@@ -1463,15 +1544,29 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     catch (e) {}
     return null;
   }
-  function detectLocale() {
-    var loc = null, p = parentWin();
+  // Language signals, MOST authoritative first. Airflow's i18next persists the user's
+  // chosen language in localStorage under "i18nextLng"; the parent's <html lang> is only
+  // as fresh as whoever last wrote it -- on a served index.html it is often a hardcoded
+  // "en" that never changes when the user switches language. Reading the attribute first
+  // therefore pinned the plugin to English on a Russian stand, so the stored choice wins
+  // and the attribute is just a fallback.
+  function localeSignals() {
+    var out = [], p = parentWin();
     if (p) {
-      try { loc = p.document.documentElement.getAttribute("lang"); } catch (e) {}
-      if (!loc) { try { loc = p.localStorage.getItem("i18nextLng"); } catch (e) {} }
+      try { out.push(p.localStorage.getItem("i18nextLng")); } catch (e) {}
+      try { out.push(p.document.documentElement.getAttribute("lang")); } catch (e) {}
     }
-    if (!loc) { try { loc = localStorage.getItem("i18nextLng"); } catch (e) {} }
-    if (!loc) loc = navigator.language || navigator.userLanguage || "en";
-    return String(loc).toLowerCase().indexOf("ru") === 0 ? "ru" : "en";
+    try { out.push(localStorage.getItem("i18nextLng")); } catch (e) {}
+    out.push(navigator.language || navigator.userLanguage || "en");
+    return out;
+  }
+  function detectLocale() {
+    var sigs = localeSignals();
+    for (var i = 0; i < sigs.length; i++) {
+      var v = sigs[i];
+      if (v) return String(v).toLowerCase().indexOf("ru") === 0 ? "ru" : "en";
+    }
+    return "en";
   }
   var LOCALE = detectLocale();
   function t(k) { return (I18N[LOCALE] && I18N[LOCALE][k]) || I18N.en[k] || k; }
@@ -1579,6 +1674,18 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     if (loc !== LOCALE) { LOCALE = loc; applyI18n(); renderAll(); }
   }
   applyTheme(); applyI18n();
+  // The parent may still be booting when this frame runs: Airflow's React app can write
+  // i18nextLng / set <html lang> a moment AFTER our first read. The storage event and the
+  // MutationObserver below catch later changes, but not one that lands in the gap before
+  // they are attached -- so re-check briefly, then stop (this is a startup race, not a
+  // poll loop). syncFromParent is a no-op when nothing changed.
+  (function catchLateLocale() {
+    var tries = 0;
+    var timer = setInterval(function () {
+      syncFromParent();
+      if (++tries >= 6) clearInterval(timer);  // ~3s at 500ms
+    }, 500);
+  })();
   // Airflow shows our nav icon as a plain <img> with a baked stroke colour, so (unlike
   // its own currentColor icons) it can't whiten when selected -- on the light theme the
   // picked flask blends into the highlight and vanishes. While this page is open, our
@@ -1737,23 +1844,27 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       { label: t("kRuns"), value: runs, all: true },
       { label: t("kPassingRuns"), value: ok + " / " + runs, cls: ok === runs ? "c-pass" : "", all: true },
       { label: t("kTests"), value: uniqueTests == null ? "…" : uniqueTests,
-        id: "kpi-unique", click: uniqueTests > 0 },
+        id: "kpi-unique", click: uniqueTests > 0, info: "unique" },
       { label: t("kFailures"), value: failures, cls: failures ? "c-fail" : "c-pass",
-        id: "kpi-failures", click: failures > 0, tip: t("kFailuresTip") },
+        id: "kpi-failures", click: failures > 0, tip: t("kFailuresTip"), info: "failures" },
       { label: t("kSlow"), value: slowShown == null ? (slowFailed ? "—" : "…") : slowShown,
-        cls: slowShown ? "c-fail" : "", id: "kpi-slow", click: true, tip: t("slowKpiTip") },
+        cls: slowShown ? "c-fail" : "", id: "kpi-slow", click: true, tip: t("slowKpiTip"),
+        info: "slow" },
     ];
     kpisEl.hidden = false;
     kpisEl.innerHTML = cards.map(function (c) {
       var attrs = (c.id ? ' id="' + c.id + '"' : "")
         + (c.tip ? ' title="' + esc(c.tip) + '"' : "")
         + (c.click ? ' role="button" tabindex="0"' : "");
-      var allChip = c.all ? ' <span class="kpi-all" title="' + esc(t("kAllTip")) + '">'
+      var allChip = c.all ? '<span class="kpi-all" title="' + esc(t("kAllTip")) + '">'
         + esc(t("kAll")) + "</span>" : "";
       return '<div class="kpi' + (c.click ? " clickable" : "") + '"' + attrs
-        + '><div class="label">' + esc(c.label) + allChip + '</div>'
+        + '><div class="label"><span class="label-text">' + esc(c.label) + "</span>"
+        + allChip + infoBtnHtml(c.info) + '</div>'
         + '<div class="value ' + (c.cls || "") + '">' + esc(c.value) + "</div></div>";
     }).join("");
+    wireKpiInfo(kpisEl);
+    fitKpiLabels(kpisEl);
     var fk = document.getElementById("kpi-failures");
     if (fk && failures > 0) {
       fk.addEventListener("click", openFailures);
@@ -1774,6 +1885,64 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       sk.addEventListener("keydown", function (e) {
         if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openSlow(); }
       });
+    }
+  }
+
+  // ⓘ for a KPI card. `key` selects the {key}InfoTitle/{key}InfoBody translation pair, so the
+  // note follows the active language like every other string. Empty when a card has no note.
+  function infoBtnHtml(key) {
+    if (!key) return "";
+    return '<button class="kpi-info" type="button" data-info="' + esc(key) + '"'
+      + ' aria-label="' + esc(t("kpiInfoAl")) + '" title="' + esc(t("kpiInfoAl")) + '">'
+      + '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"'
+      + ' stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+      + '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg></button>';
+  }
+
+  // Shrink a KPI title until it fits on one line beside its badges. CSS alone can't do this:
+  // it has no "fit text to box" primitive, and wrapping (the default) leaves the chip floating
+  // next to a two-line block, looking detached from the words it belongs to. Steps down from
+  // the CSS size to a readable floor; below that the ellipsis takes over.
+  var KPI_LABEL_MAX = 12, KPI_LABEL_MIN = 9;
+  function fitKpiLabels(root) {
+    var texts = root.querySelectorAll(".kpi .label-text");
+    for (var i = 0; i < texts.length; i++) {
+      var el = texts[i];
+      var size = KPI_LABEL_MAX;
+      el.style.fontSize = "";
+      // No tolerance: scroll/clientWidth are rounded up, so even a 1px reported overflow
+      // means the browser is already drawing the ellipsis. Shrink one more step instead --
+      // half a point smaller beats a clipped word.
+      while (size > KPI_LABEL_MIN && el.scrollWidth > el.clientWidth) {
+        size -= 0.5;
+        el.style.fontSize = size + "px";
+      }
+    }
+  }
+  // Widths change without a re-render (window resize, Airflow's sidebar collapsing), and a
+  // title shrunk for a narrow card must grow back when there is room again -- fitKpiLabels
+  // resets to the CSS size before measuring, so re-running it is enough.
+  var refitKpiLabels = debounce(function () { fitKpiLabels(document); }, 120);
+  window.addEventListener("resize", refitKpiLabels);
+
+  // Open the note, and ONLY the note: the card underneath is itself a button (it drills into
+  // the failures / catalogue / slowdowns list), so without stopping propagation every ⓘ press
+  // would also fire that drill-down behind the popup.
+  function wireKpiInfo(root) {
+    var btns = root.querySelectorAll(".kpi-info");
+    for (var i = 0; i < btns.length; i++) {
+      (function (b) {
+        var key = b.getAttribute("data-info");
+        b.addEventListener("click", function (e) {
+          e.stopPropagation();
+          openPanelInfo(key + "InfoTitle", key + "InfoBody");
+        });
+        // Enter/Space already activate the button and fire the click above; swallowing the
+        // keydown keeps it from ALSO reaching the card's own Enter/Space handler.
+        b.addEventListener("keydown", function (e) {
+          if (e.key === "Enter" || e.key === " ") e.stopPropagation();
+        });
+      })(btns[i]);
     }
   }
 
@@ -3038,13 +3207,12 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     });
     var pct = total > 0 ? Math.round((m.passed / total) * 100) : null;
     var ofN = esc(t("ofWord")) + " " + total;
-    // Centre the number by its INK, not its em box: digits/% have no descenders, so
-    // em-box centring (dominant-baseline) leaves them visually high. Baseline 65.4 puts
-    // the measured ink centre of the 21px digits on (60,60) — pinned by a pixel-scan UI
-    // test. Holds for any value: digit ink height is constant, text-anchor centres width.
-    var center = '<text x="60" y="65.4" text-anchor="middle" class="donut-pct">'
+    // Centre the % + "of N" STACK on (60,60), not just the % ink. The label below adds
+    // visual mass, so the % is lifted a touch above the ring's midline to keep the pair
+    // symmetric (baseline pinned by a pixel-scan UI test that measures both texts).
+    var center = '<text x="60" y="63" text-anchor="middle" class="donut-pct">'
       + (pct == null ? "—" : pct + "%") + "</text>"
-      + '<text x="60" y="83" text-anchor="middle" class="donut-lbl">' + ofN + "</text>";
+      + '<text x="60" y="81.5" text-anchor="middle" class="donut-lbl">' + ofN + "</text>";
     return '<svg viewBox="0 0 120 120" class="donut" role="img" aria-label="'
       + (pct == null ? "" : pct + "% — ") + total + " " + esc(t("testsWord")) + '">'
       + ring + parts + center + "</svg>";
@@ -3330,14 +3498,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     document.getElementById("d-allure").hidden = !m.has_allure;
     document.getElementById("d-email").hidden = !emailAvailable;
 
-    var kpis = [
-      [t("kPassed"), m.passed, "c-pass"], [t("kFailed"), m.failed, "c-fail"],
-      [t("kErrors"), m.errors, "c-error"], [t("kSkipped"), m.skipped, "c-skip"],
-      [t("cDuration"), fmtDur(m.duration), ""],
-    ].map(function (k) {
-      return '<div class="kpi"><div class="label">' + esc(k[0]) + '</div>'
-        + '<div class="value ' + k[2] + '">' + esc(k[1]) + "</div></div>";
-    }).join("");
+    var kpis = kpiCardsHtml(m);
 
     var pills = ["all", "failed", "error", "skipped", "passed"].map(function (k) {
       return '<button class="pill" type="button" data-f="' + k + '" aria-pressed="'
@@ -3366,6 +3527,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     dBody.querySelectorAll(".af-link[href]").forEach(function (a) {
       a.addEventListener("click", function (ev) { ev.preventDefault(); openInAirflow(a.getAttribute("href")); });
     });
+    wireKpiInfo(dBody);
+    fitKpiLabels(dBody);
     var cmpBtn = document.getElementById("cmp-prev");
     if (cmpBtn && prev && rec) cmpBtn.addEventListener("click", function () { openCompare(prev, rec); });
     var flkBtn = document.getElementById("flk-btn");
@@ -3476,6 +3639,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       .then(function (d) {
         detail = d; detail.cases = d.cases || []; renderDetail();
         if (focusNode) focusCaseRow(focusNode);  // jump to + expand one test
+        maybePollCoverage(detail);  // fresh run may not carry coverage yet -- pick it up live
       })
       .catch(function (e) {
         dBody.innerHTML = '<div class="state c-fail">' + esc(t("reportFail") + e.message) + "</div>";
@@ -3511,12 +3675,22 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   function linkLoc() { var w = sameOriginTop(); return w ? w.location : window.location; }
   function linkHistory() { var w = sameOriginTop(); return w ? w.history : window.history; }
 
+  // Every param that can deep-link a run: the opaque token plus the short, human-readable
+  // form the task-log tracking link uses. Closing a run must drop ALL of them -- clearing
+  // only "report" would leave dag/run/task behind, and the next load() (the Refresh button,
+  // or a browser reload) would resolve them and reopen the run the user just dismissed.
+  var DEEP_LINK_PARAMS = ["report", "dag", "run", "task", "try", "map"];
+
   function setReportParam(id) {
     try {
       var loc = linkLoc();
       // Preserve other params Airflow keeps on the parent URL.
       var qs = new URLSearchParams(loc.search);
-      if (id) qs.set("report", id); else qs.delete("report");
+      if (id) {
+        qs.set("report", id);
+      } else {
+        for (var i = 0; i < DEEP_LINK_PARAMS.length; i++) qs.delete(DEEP_LINK_PARAMS[i]);
+      }
       var s = qs.toString();
       linkHistory().replaceState(null, "", loc.pathname + (s ? "?" + s : ""));
     } catch (e) {}
@@ -3717,6 +3891,80 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   // After a manual send the run's stored history has a fresh entry (delivered OR
   // failed). Re-pull the detail and refresh the ✉ bench in place, so the user sees
   // the updated split without reopening the run.
+  // The KPI cards (passed/failed/errors/skipped/duration + optional coverage).
+  // Factored out so the coverage poller can re-render just this block in place
+  // when coverage arrives after the run opened.
+  function kpiCardsHtml(m) {
+    var kpiRows = [
+      [t("kPassed"), m.passed, "c-pass"], [t("kFailed"), m.failed, "c-fail"],
+      [t("kErrors"), m.errors, "c-error"], [t("kSkipped"), m.skipped, "c-skip"],
+      [t("cDuration"), fmtDur(m.duration), ""],
+    ];
+    // Coverage bench next to Duration -- present when the run carries coverage: baked
+    // into meta.json at archive time (parser coverage=True), or pulled from the
+    // operator's XCom for older reports. A number in [0,1] -> percent; absent -> no card.
+    // Pass/fail is measured against AIRFLOW_PYTEST_SUCCESS_COVERAGE (echoed as
+    // coverage_threshold; 0.85 when unset). Presentational ONLY -- falling short paints the
+    // card red but never fails the run; enforcing coverage is the operator's cov_fail_under.
+    // The tint is BACKED BY WORDS ("below target 85%"): colour alone would be invisible to
+    // colour-blind readers and in high-contrast modes, and it also names the bar in force.
+    if (typeof m.coverage === "number") {
+      var covBar = typeof m.coverage_threshold === "number" ? m.coverage_threshold : 0.85;
+      var covOk = m.coverage >= covBar;
+      kpiRows.push([t("cCoverage"), Math.round(m.coverage * 100) + "%",
+        covOk ? "c-pass" : "c-fail",
+        (covOk ? t("covPass") : t("covFail")) + " " + Math.round(covBar * 100) + "%",
+        "coverage"]);
+    }
+    return kpiRows.map(function (k) {
+      // k = [label, value, valueClass, optional note, optional ⓘ key]
+      return '<div class="kpi"><div class="label"><span class="label-text">'
+        + esc(k[0]) + "</span>" + infoBtnHtml(k[4]) + "</div>"
+        + '<div class="value ' + k[2] + '">' + esc(k[1]) + "</div>"
+        + (k[3] ? '<div class="note">' + esc(k[3]) + "</div>" : "")
+        + "</div>";
+    }).join("");
+  }
+  // Fallback for reports archived WITHOUT the parser's coverage=True: those still get
+  // their value from the operator's XCom, which is only pushed at task end -- so a run
+  // opened right after it finishes may not carry coverage yet. With coverage=True the
+  // value is already in meta.json at archive time and this poller never engages.
+  // The reader caches XCom coverage on read, so re-fetching a *fresh* run a few
+  // times lets the bench appear on its own -- no email/reopen needed. Bounded to
+  // recent runs (older ones either already have it or never will) and a few tries.
+  var COV_POLL_MAX_AGE_MS = 15 * 60 * 1000;
+  var COV_POLL_TRIES = 3;
+  function maybePollCoverage(m) {
+    if (!m || typeof m.coverage === "number" || !m.created_at) return;
+    // Age from the run's server timestamp. A negative age just means the browser clock
+    // lags the server (clock skew) -- the run is brand new, so poll it; only skip runs
+    // genuinely older than the window (coverage is already baked in, or was never measured).
+    var age = Date.now() - new Date(m.created_at).getTime();
+    if (isNaN(age) || age > COV_POLL_MAX_AGE_MS) return;
+    pollCoverage(currentId, 0);
+  }
+  function pollCoverage(forId, attempt) {
+    if (attempt >= COV_POLL_TRIES) return;
+    setTimeout(function () {
+      if (currentId !== forId || !detail || typeof detail.coverage === "number") return;
+      fetch(API + "reports/" + encodeURIComponent(forId))
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (d) {
+          if (!d || currentId !== forId || !detail) return;
+          if (typeof d.coverage === "number") {
+            detail.coverage = d.coverage;
+            var box = dBody.querySelector(".kpis");
+            if (box) {
+              box.innerHTML = kpiCardsHtml(detail);
+              wireKpiInfo(box); fitKpiLabels(box);
+            }
+          } else {
+            pollCoverage(forId, attempt + 1);
+          }
+        })
+        .catch(function () { pollCoverage(forId, attempt + 1); });
+    }, 2000 + attempt * 2500);  // ~2s, 4.5s, 7s
+  }
   function refreshAlertsBench() {
     var forId = currentId;
     if (!forId) return;

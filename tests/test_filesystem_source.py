@@ -599,3 +599,111 @@ def test_base_source_optional_capabilities_default_none():
     assert m.allure_archive(ref) is None
     assert m.test_outcomes(ref) is None
     assert m.report_size(ref) == 0  # size policy stays inert for such sources
+
+
+def test_record_coverage_bakes_into_report_and_reads_back(reports_root):
+    # record_coverage persists the fraction into meta.json so get_detail returns it as
+    # a stable report field (no XCom needed on later views).
+    from airflow_pytest_plugin.sources import FileSystemReportSource
+
+    write_report(reports_root, ReportRef("d", "r1", "t", 1), passed=3)
+    src = FileSystemReportSource(report_root=reports_root)
+    ref = ReportRef("d", "r1", "t", 1, -1)
+
+    assert src.get_detail(ref).coverage is None  # not measured yet
+    assert src.record_coverage(ref, 0.8734) is True
+    assert src.get_detail(ref).coverage == 0.8734  # baked in, read back
+    # to_dict surfaces it for the API payload.
+    assert src.get_detail(ref).to_dict()["coverage"] == 0.8734
+
+
+def test_record_coverage_missing_run_is_false(reports_root):
+    from airflow_pytest_plugin.sources import FileSystemReportSource
+
+    src = FileSystemReportSource(report_root=reports_root)
+    assert src.record_coverage(ReportRef("nope", "r", "t", 1, -1), 0.5) is False
+
+
+def test_base_record_coverage_default_false():
+    from airflow_pytest_plugin.sources.base import ReportSource
+
+    class _Min(ReportSource):
+        def list_summaries(self, **_k):
+            return []
+
+        def get_detail(self, _ref):
+            return None
+
+        def delete(self, _ref):
+            return False
+
+    assert _Min().record_coverage(ReportRef("d", "r", "t", 1), 0.9) is False
+
+
+def test_record_coverage_refuses_traversal_token(tmp_path):
+    # record_coverage is a WRITE triggered by a GET on an attacker-controlled token; its
+    # _safe_dir guard must refuse a `..`/`.` traversal and write nothing outside the root.
+    root = tmp_path / "reports"
+    root.mkdir()
+    outside = tmp_path / "t1"
+    outside.mkdir()
+    (outside / META_FILENAME).write_text('{"summary": {}}', encoding="utf-8")
+    src = FileSystemReportSource(report_root=str(root))
+    ref = ReportRef(dag_id="..", run_id=".", task_id=".", try_number=1)
+    assert src.record_coverage(ref, 0.5) is False
+    # The out-of-root meta must be byte-for-byte untouched (no coverage injected).
+    assert (outside / META_FILENAME).read_text(encoding="utf-8") == '{"summary": {}}'
+
+
+def test_coverage_from_meta_filters_bad_and_accepts_bounds():
+    # _coverage_from_meta is the sanitiser on the read path: record_coverage does float()
+    # with no range check, so a bad/hand-edited meta value must be filtered here, and the
+    # inclusive [0,1] endpoints must pass.
+    from airflow_pytest_plugin.sources.filesystem import _coverage_from_meta
+
+    for bad in (
+        {"coverage": 1.5},  # over 1.0
+        {"coverage": -0.1},  # negative
+        {"coverage": True},  # bool is not coverage
+        {"coverage": False},
+        {"coverage": "0.9"},  # wrong type
+        {"coverage": None},  # unmeasured
+        {},  # key absent
+        None,  # no meta at all
+    ):
+        assert _coverage_from_meta(bad) is None, bad
+    for frac in (0.0, 0.5, 1.0):
+        assert _coverage_from_meta({"coverage": frac}) == frac
+
+
+def test_record_coverage_write_failure_returns_false(reports_root, monkeypatch):
+    # An OSError from the atomic replace must be swallowed (best-effort): record_coverage
+    # returns False and never lets the exception escape into the GET route, and the run's
+    # meta is left as-is (coverage not baked).
+    write_report(reports_root, ReportRef("d", "r1", "t", 1), passed=1)
+    src = FileSystemReportSource(report_root=reports_root)
+    ref = ReportRef("d", "r1", "t", 1, -1)
+
+    def _boom(*_a, **_k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("os.replace", _boom)
+    assert src.record_coverage(ref, 0.5) is False
+    assert src.get_detail(ref).coverage is None  # nothing baked
+
+
+def test_record_coverage_overwrites_in_place(reports_root):
+    # Idempotent: re-recording replaces the value (no torn/duplicate key), sidecar stays
+    # valid single-object JSON with exactly one coverage entry.
+    write_report(reports_root, ReportRef("d", "r1", "t", 1), passed=1)
+    src = FileSystemReportSource(report_root=reports_root)
+    ref = ReportRef("d", "r1", "t", 1, -1)
+
+    assert src.record_coverage(ref, 0.4) is True
+    assert src.record_coverage(ref, 0.9) is True
+    assert src.get_detail(ref).coverage == 0.9
+    meta_path = ReportLayout().dir_for(reports_root, ref) + "/" + META_FILENAME
+    meta = json.loads(
+        open(meta_path, encoding="utf-8").read()
+    )  # still valid JSON object
+    assert meta["coverage"] == 0.9

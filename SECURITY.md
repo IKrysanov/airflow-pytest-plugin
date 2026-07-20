@@ -10,9 +10,9 @@ Security fixes are released only for the **current minor version**. The project
 is pre-1.0; upgrade to the latest release to receive security fixes.
 
 | Version | Status |
-|---------|--------|
-| 0.1.x   | ✅ Supported |
-| < 0.1   | ❌ Not supported — please upgrade |
+|--------|--------|
+| 0.6.x  | ✅ Supported |
+| < 0.6  | ❌ Not supported — please upgrade |
 
 ## Reporting a vulnerability
 

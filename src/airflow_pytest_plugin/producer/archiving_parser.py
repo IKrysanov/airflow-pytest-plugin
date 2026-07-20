@@ -30,7 +30,13 @@ from airflow_pytest_operator import JUnitResultParser, ReportRequest, TestRunRes
 
 from ..compat import get_conf_value, get_current_context
 from ..config import get_reports_root
-from ..layout import ALLURE_DIRNAME, META_FILENAME, REPORT_FILENAME, ReportLayout
+from ..layout import (
+    ALLURE_DIRNAME,
+    COVERAGE_FILENAME,
+    META_FILENAME,
+    REPORT_FILENAME,
+    ReportLayout,
+)
 from ..models import ReportRef
 
 _log = logging.getLogger(__name__)
@@ -52,6 +58,9 @@ class ArchivingResultParser(JUnitResultParser):  # type: ignore[misc, unused-ign
         report_root: str | None = None,
         layout: ReportLayout | None = None,
         allure: bool = False,
+        coverage: bool = False,
+        coverage_source: str | None = None,
+        coverage_threshold: float | None = None,
         email: bool = False,
         email_only_fail: bool = False,
     ) -> None:
@@ -62,6 +71,28 @@ class ArchivingResultParser(JUnitResultParser):  # type: ignore[misc, unused-ign
         # worker, else pytest errors on the unknown arg) so raw Allure results land
         # beside junit.xml for TestOps export.
         self._allure = allure
+        # When True, turn coverage on for this task and archive it: pytest gets ``--cov``
+        # plus a JSON report inside the archive dir, which is read at ARCHIVE time and
+        # baked into meta.json. Self-contained -- the operator's own ``coverage=True`` is
+        # NOT required (the runner appends these flags after the operator has already
+        # decided its own, so neither side disturbs the other; setting both is harmless,
+        # a duplicate ``--cov`` measures the same thing once). Needs pytest-cov on the
+        # worker, else pytest aborts on the unrecognized flag. Unlike the XCom route this
+        # also survives a FAILED run: the parser runs before the operator raises.
+        self._coverage = coverage
+        # Scope for the measurement, i.e. ``--cov=<source>``. Leave unset for a bare
+        # ``--cov`` (measure everything, matching what the operator itself splices). Set it
+        # when the project already narrows coverage -- e.g. ``addopts = "--cov=src"`` -- since
+        # adding a bare ``--cov`` on top would WIDEN the scope (pytest-cov unions them) and
+        # silently change the reported percentage, typically by pulling the tests in too.
+        self._coverage_source = (coverage_source or "").strip() or None
+        # Optional per-task coverage bar (0-1) pinned to every run this parser archives.
+        # It travels in meta.json and OUTRANKS the reader's AIRFLOW_PYTEST_SUCCESS_COVERAGE,
+        # because "what good coverage looks like" is a property of the suite, not of the
+        # viewer -- a core library and a legacy smoke suite deserve different bars, which a
+        # single reader-side env var cannot express. Presentational only: like the env var
+        # it tints the card and never fails a run (that is the operator's cov_fail_under).
+        self._coverage_threshold = _unit_fraction_or_none(coverage_threshold)
         # Per-task switches for automatic email (both need
         # ``AIRFLOW_PYTEST_ALERTS_EMAIL_TO`` recipients + a mail transport):
         #   email=True           -> mail after EVERY run (styled by outcome).
@@ -101,6 +132,23 @@ class ArchivingResultParser(JUnitResultParser):  # type: ignore[misc, unused-ign
             req = dataclasses.replace(
                 req, pytest_args=(*req.pytest_args, f"--alluredir={allure_dir}")
             )
+        if self._coverage and req.report_path:
+            # ``--cov`` switches measurement on; the JSON report is an EXTRA --cov-report,
+            # and pytest-cov accepts several, so the operator's own ``term-missing`` (which
+            # it parses for its XCom value and the cov_fail_under gate) keeps working. The
+            # runner appends these AFTER the operator built its own args, so our ``--cov``
+            # is invisible to its `has_flag` check and cannot make it skip its own splice.
+            cov_flag = (
+                f"--cov={self._coverage_source}" if self._coverage_source else "--cov"
+            )
+            req = dataclasses.replace(
+                req,
+                pytest_args=(
+                    *req.pytest_args,
+                    cov_flag,
+                    f"--cov-report=json:{self._coverage_path(req.report_path)}",
+                ),
+            )
         return req
 
     def parse(self, report_path: str, *, exit_code: int = 0) -> TestRunResult:
@@ -127,6 +175,33 @@ class ArchivingResultParser(JUnitResultParser):  # type: ignore[misc, unused-ign
         return result
 
     # -- internals -------------------------------------------------------
+
+    @staticmethod
+    def _coverage_path(report_path: str) -> str:
+        """Where pytest-cov should write the run's JSON coverage report."""
+        return os.path.join(os.path.dirname(report_path), COVERAGE_FILENAME)
+
+    def _read_coverage(self, report_path: str) -> float | None:
+        """The run's overall line-coverage fraction (0-1) from the archived JSON report.
+
+        ``None`` when coverage wasn't requested, pytest-cov wrote nothing (no ``--cov`` on
+        the command line, or the run died before reporting), or the file is unreadable /
+        out of range -- the reader then falls back to the operator's XCom value.
+        """
+        if not self._coverage:
+            return None
+        path = self._coverage_path(report_path)
+        try:
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+            percent = data["totals"]["percent_covered"]
+        except (OSError, ValueError, KeyError, TypeError):
+            _log.debug("No readable coverage report at %s", path, exc_info=True)
+            return None
+        if isinstance(percent, bool) or not isinstance(percent, (int, float)):
+            return None
+        fraction = float(percent) / 100.0
+        return fraction if 0.0 <= fraction <= 1.0 else None
 
     def _log_tracking_url(self) -> None:
         """Log a deep link to the archived run in the Pytest Reports viewer.
@@ -228,6 +303,13 @@ class ArchivingResultParser(JUnitResultParser):  # type: ignore[misc, unused-ign
             "created_at": datetime.now(timezone.utc).isoformat(),
             "report_file": REPORT_FILENAME,
             "allure": self._archive_allure(out_dir, ref),
+            # Baked in at archive time when coverage=True. Survives a failed run (the
+            # operator raises AFTER parsing, so its XCom never lands), and spares the
+            # reader an Airflow metadata-DB round-trip on first view.
+            "coverage": self._read_coverage(report_path),
+            # Only written when the task pinned one; absent -> the reader applies its
+            # AIRFLOW_PYTEST_SUCCESS_COVERAGE default.
+            "coverage_threshold": self._coverage_threshold,
             "summary": result.to_xcom(),
             # Compact [node_id, outcome, duration] rows so cross-run views
             # (compare/flaky/history) need not re-parse junit.xml.
@@ -280,6 +362,26 @@ def _executor_json(ref: ReportRef) -> dict[str, Any]:
             f"/tasks/{quote(ref.task_id, safe='')}"
         )
     return data
+
+
+def _unit_fraction_or_none(value: float | None) -> float | None:
+    """A 0-1 fraction, or ``None`` when unset / not a number / out of range.
+
+    Rejects rather than clamps, and warns: a task that meant ``0.9`` but wrote ``90``
+    should fall back to the configured default, not silently pin an absurd bar.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        _log.warning("ignoring non-numeric coverage_threshold %r", value)
+        return None
+    if not 0.0 <= value <= 1.0:
+        _log.warning(
+            "ignoring out-of-range coverage_threshold %r (expected a 0-1 fraction)",
+            value,
+        )
+        return None
+    return float(value)
 
 
 def _first_str(*values: Any, default: str) -> str:

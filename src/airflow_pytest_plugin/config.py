@@ -208,6 +208,21 @@ def get_success_threshold() -> float:
     )
 
 
+#: Line-coverage fraction (0–1) at/above which a run's coverage counts as passing. Purely
+#: PRESENTATIONAL: it decides how the viewer labels and tints the coverage card and nothing
+#: else. Coverage below it never fails a run or a task -- enforcing a coverage gate is the
+#: operator's job (``cov_fail_under``), which this deliberately does not duplicate.
+SUCCESS_COVERAGE_ENV = "AIRFLOW_PYTEST_SUCCESS_COVERAGE"
+DEFAULT_SUCCESS_COVERAGE = 0.85
+
+
+def get_success_coverage() -> float:
+    """Coverage fraction (0–1) at/above which a run's coverage is shown as passing."""
+    return _unit_float_setting(
+        SUCCESS_COVERAGE_ENV, "success_coverage", DEFAULT_SUCCESS_COVERAGE
+    )
+
+
 #: Opt-in bearer token for the Prometheus ``/api/metrics`` endpoint. Secure-by-default:
 #: unset = endpoint DISABLED (404); when set, a scrape must send
 #: ``Authorization: Bearer <token>``. Reads the env var, then the cfg key.

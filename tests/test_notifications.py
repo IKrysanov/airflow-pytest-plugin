@@ -273,6 +273,13 @@ def test_is_valid_email_rejects_garbage_and_abuse():
         "a@x..io",  # empty domain label
         "x" * 65 + "@x.io",  # local part > 64
         "a@" + "x" * 250 + ".io",  # total > 254
+        # TLD must be alphabetic and 2-63 chars: an IP-literal-ish or digit TLD would
+        # otherwise sail through into a mail header.
+        "a@x.123",  # numeric TLD
+        "a@x.i",  # TLD too short
+        "a@x." + "t" * 64,  # TLD too long
+        "a@x.i-o",  # hyphen in TLD
+        "a@127.0.0.1",  # bare IP, no alphabetic TLD
     ):
         assert not is_valid_email(addr), addr
 
@@ -609,6 +616,62 @@ def test_smtp_mailer_sends_multipart_text_and_html(monkeypatch):
     assert "text/plain" in types and "text/html" in types
 
 
+def test_smtp_mailer_delivers_attachment_as_zip_part(monkeypatch):
+    # The Allure zip must actually ride along on the real transport (the spy-based tests
+    # only prove the orchestrator hands it over), as a separate application/zip part with
+    # the filename basename-d so a crafted name can't smuggle a path.
+    from airflow_pytest_plugin import notifications as notif
+
+    seen: dict = {}
+
+    class FakeSMTP:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def send_message(self, msg):
+            seen["msg"] = msg
+
+    monkeypatch.setattr("smtplib.SMTP", FakeSMTP)
+    notif.SmtpMailer(notif.SmtpConfig(host="mail", starttls=False)).send(
+        subject="subj",
+        body="plain",
+        html="<b>rich</b>",
+        recipients=["a@b.c"],
+        attachments=[("../../evil/allure-results.zip", b"PK\x03\x04payload")],
+    )
+    parts = {p.get_content_type(): p for p in seen["msg"].walk()}
+    assert "application/zip" in parts
+    zip_part = parts["application/zip"]
+    assert zip_part.get_filename() == "allure-results.zip"  # path stripped
+    assert zip_part.get_payload(decode=True) == b"PK\x03\x04payload"
+
+
+def test_record_sent_alert_swallows_source_failure(reports_root):
+    # The send already happened -- a failing history write must never turn into an error
+    # for the caller (it is informational only).
+    from airflow_pytest_plugin.notifications import record_sent_alert
+
+    class BoomSource:
+        def record_alert(self, ref, entry):
+            raise OSError("read-only filesystem")
+
+    alert = Alert("failed", "dag", "suite", "subj", "body", "<b>html</b>")
+    record_sent_alert(
+        BoomSource(),
+        ReportRef("dag", "r0", "suite", 1, -1),
+        alert,
+        ["a@b.c"],
+        ok=True,
+        manual=False,
+    )  # must not raise
+
+
 def test_smtp_mailer_strips_header_injection(monkeypatch):
     from airflow_pytest_plugin import notifications as notif
 
@@ -735,10 +798,13 @@ def test_oversized_allure_archive_is_skipped(reports_root, monkeypatch):
 
     _write_run(reports_root, "dag", "suite", "r0", [("b", "failed")], _WHEN)
     src = FileSystemReportSource(report_root=reports_root, scan_cache_ttl=0)
+    # The stub MUST accept ``max_bytes``: allure_attachment passes it, and a stub without it
+    # would raise TypeError and be swallowed by the error guard -- passing the assertion below
+    # without ever reaching the compressed-size check this test is about.
     monkeypatch.setattr(
         type(src),
         "allure_archive",
-        lambda self, ref: b"x" * (notif._MAX_ATTACHMENT_BYTES + 1),
+        lambda self, ref, *, max_bytes=None: b"x" * (notif._MAX_ATTACHMENT_BYTES + 1),
     )
     spy = SpyMailer()
     out = notify_for_run(

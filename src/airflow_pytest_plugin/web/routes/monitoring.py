@@ -27,7 +27,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from ...compat import airflow_auth_available
+from ...compat import airflow_auth_available, airflow_available
 from ...config import get_metrics_token
 from ...version import __version__
 from .common import RouteDeps, ok
@@ -51,6 +51,21 @@ _metrics_bearer = HTTPBearer(
     scheme_name="MetricsToken",
     description="The AIRFLOW_PYTEST_METRICS_TOKEN value (the 'Bearer ' prefix is added for you).",
 )
+
+
+def _auth_mode() -> str:
+    """How the data routes are gated right now -- must mirror ``create_app``'s wiring.
+
+    ``airflow`` -- Airflow's RBAC is consulted per request.
+    ``open``    -- no Airflow at all (the standalone dev server): everything is served.
+    ``denied``  -- Airflow IS present but its auth API is unreachable, so the reader fails
+                   closed and refuses every report. Reporting this as ``open`` (the old
+                   two-state check did) would tell an operator the exact opposite of what
+                   is happening, which is worse than saying nothing.
+    """
+    if airflow_auth_available():
+        return "airflow"
+    return "denied" if airflow_available() else "open"
 
 
 def _esc_label(value: str) -> str:
@@ -249,8 +264,9 @@ def build_router(deps: RouteDeps) -> APIRouter:
           is readable; ``ready`` is ``false`` when the reader can't see its store.
         - ``reports_root`` — where the producer writes and the reader reads (``null`` for
           a non-filesystem source).
-        - ``auth`` — ``"airflow"`` when Airflow RBAC gates the data routes, else ``"open"``
-          (standalone / allow-all).
+        - ``auth`` — ``"airflow"`` when Airflow RBAC gates the data routes, ``"open"``
+          standalone (no Airflow, allow-all), or ``"denied"`` when Airflow is present but
+          its auth API is unreachable, so every report is refused (fail-closed).
         - ``secure_xml`` — whether JUnit XML uses the hardened ``defusedxml`` parser (vs
           the stdlib fallback).
 
@@ -266,7 +282,7 @@ def build_router(deps: RouteDeps) -> APIRouter:
                 "ready": exists,
                 "reports_root": root,
                 "reports_root_exists": exists,
-                "auth": "airflow" if airflow_auth_available() else "open",
+                "auth": _auth_mode(),
                 "secure_xml": getattr(src, "secure_xml", None),
             }
         )

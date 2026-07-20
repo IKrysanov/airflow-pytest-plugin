@@ -243,3 +243,125 @@ def test_send_airflow_email_lets_other_deprecations_through(monkeypatch, recwarn
 
     compat.send_airflow_email(to=["a@x.io"], subject="S", html_content="h")
     assert any("something unrelated" in str(r.message) for r in recwarn)
+
+
+_NO_ROW = object()
+
+
+def _inject_xcom(monkeypatch, *, value, capture=None):
+    """Fake the DB-backed XComModel + create_session (the server-side read path).
+
+    ``value`` is what ``deserialize_value`` yields (the run summary); ``_NO_ROW`` means
+    the query found no XCom row (``session.scalar`` returns ``None``).
+    """
+
+    class FakeXComModel:
+        @staticmethod
+        def get_many(*, run_id, key, task_ids, dag_ids, map_indexes, limit=None):
+            if capture is not None:
+                capture.update(
+                    run_id=run_id,
+                    key=key,
+                    task_ids=task_ids,
+                    dag_ids=dag_ids,
+                    map_indexes=map_indexes,
+                    limit=limit,
+                )
+            return "STMT"
+
+        @staticmethod
+        def deserialize_value(row):
+            return row  # the row already IS the summary in this fake
+
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def scalar(self, stmt):
+            assert stmt == "STMT"
+            return None if value is _NO_ROW else value
+
+    xcom_mod = types.ModuleType("airflow.models.xcom")
+    xcom_mod.XComModel = FakeXComModel
+    _inject_module(monkeypatch, "airflow.models.xcom", xcom_mod)
+    session_mod = types.ModuleType("airflow.utils.session")
+    session_mod.create_session = lambda: FakeSession()
+    _inject_module(monkeypatch, "airflow.utils.session", session_mod)
+
+
+def test_get_run_coverage_reads_xcom_fraction(monkeypatch):
+    # Operator >=0.6 pushes a coverage fraction (0-1) into the return_value XCom summary;
+    # the reader pulls it via the DB-backed XComModel (NOT the Task-SDK XCom.get_one).
+    calls: dict = {}
+    _inject_xcom(monkeypatch, value={"total": 10, "coverage": 0.8525}, capture=calls)
+    assert compat.get_run_coverage("dag", "run1", "task", 3) == 0.8525
+    assert calls == {
+        "run_id": "run1",
+        "key": "return_value",
+        "task_ids": "task",
+        "dag_ids": "dag",
+        "map_indexes": 3,
+        "limit": 1,
+    }
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        {"total": 5},  # coverage key absent (no --cov run)
+        {"coverage": None},  # requested but unavailable
+        {"coverage": 1.5},  # over 1.0 -> reject
+        {"coverage": -0.1},  # negative -> reject
+        {"coverage": True},  # bool is not a coverage number
+        {"coverage": False},  # bool (even 0-valued) is not a coverage number
+        {"coverage": "0.9"},  # wrong type
+        "not-a-dict",  # unexpected XCom value
+        _NO_ROW,  # no XCom row at all (task with no return_value)
+    ],
+)
+def test_get_run_coverage_none_on_missing_or_bad_value(monkeypatch, value):
+    _inject_xcom(monkeypatch, value=value)
+    assert compat.get_run_coverage("dag", "r", "t", -1) is None
+
+
+@pytest.mark.parametrize("frac", [0.0, 0.5, 1.0])
+def test_get_run_coverage_accepts_inclusive_bounds(monkeypatch, frac):
+    # The whole [0, 1] range is valid coverage, boundaries included (0% and 100%).
+    _inject_xcom(monkeypatch, value={"coverage": frac})
+    assert compat.get_run_coverage("dag", "r", "t", -1) == frac
+
+
+def test_get_run_coverage_none_when_xcom_read_raises(monkeypatch):
+    # Any DB/session error while reading XCom degrades to None (bench hidden), never
+    # propagates into the detail request. Force create_session() to raise.
+    import types as _t
+
+    xcom_mod = _t.ModuleType("airflow.models.xcom")
+
+    class _Boom:
+        @staticmethod
+        def get_many(**_):
+            return "STMT"
+
+        @staticmethod
+        def deserialize_value(row):  # pragma: no cover - never reached
+            return row
+
+    xcom_mod.XComModel = _Boom
+    _inject_module(monkeypatch, "airflow.models.xcom", xcom_mod)
+    session_mod = _t.ModuleType("airflow.utils.session")
+
+    def _raise():
+        raise RuntimeError("database is locked")
+
+    session_mod.create_session = _raise
+    _inject_module(monkeypatch, "airflow.utils.session", session_mod)
+    assert compat.get_run_coverage("dag", "r", "t", -1) is None
+
+
+@pytest.mark.skipif(_airflow_present(), reason="exercises the Airflow-absent path")
+def test_get_run_coverage_none_without_airflow():
+    assert compat.get_run_coverage("dag", "r", "t", -1) is None

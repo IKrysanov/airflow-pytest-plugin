@@ -554,8 +554,11 @@ def test_short_deep_link_opens_the_run(page, base_url):
     # not the long opaque token — the viewer resolves it against the loaded list.
     page.goto(base_url + "/?dag=alpha&run=r005&task=suite&try=1")
     expect(page.locator("dialog#detail")).to_be_visible(timeout=20000)
-    header = page.locator("dialog#detail").inner_text()
-    assert "alpha" in header and "suite" in header
+    # Assert on the resolved title, not a snapshot of the dialog text: the modal becomes
+    # visible immediately showing "Loading…" and fills in once the detail fetch lands, so
+    # reading inner_text() right after the visibility check races the request.
+    expect(page.locator("#d-title")).to_contain_text("alpha", timeout=20000)
+    expect(page.locator("#d-title")).to_contain_text("suite")
 
 
 def test_alerts_bench_absent_without_history(dash):
@@ -789,9 +792,9 @@ def test_chart_bar_hover_does_not_change_fill(dash):
     assert st["shadow"] not in ("none", ""), "bar hover should show a ring"
 
 
-def test_donut_pct_label_is_dead_centre(dash):
-    # The % number must be centred by its INK (rendered pixels), not its em box —
-    # digits have no descenders, so em-box centring leaves them visually high.
+def test_donut_pct_label_lifted_for_stack_balance(dash):
+    # The % is centred by its INK (rendered pixels, not em box) and lifted a touch above
+    # the ring midline so the % + "of N" caption below straddle the centre symmetrically.
     # Measure: rasterize the svg with the "of N" label hidden, scan the hole area.
     page = dash.page
     page.click("tr.lgrp:has-text('alpha')")
@@ -828,8 +831,10 @@ def test_donut_pct_label_is_dead_centre(dash):
           return { cx: (left + right) / 2 / S, cy: (top + bot) / 2 / S };
         }"""
     )
+    # Horizontally dead-centre; vertically lifted a little above 60 (a subtle raise so
+    # the number + caption look balanced -- not the full em-box high, not dead-centre).
     assert abs(ink["cx"] - 60) < 1.2, f"ink off-centre horizontally: {ink['cx']}"
-    assert abs(ink["cy"] - 60) < 1.2, f"ink off-centre vertically: {ink['cy']}"
+    assert 54.5 <= ink["cy"] <= 59.0, f"% not lifted-but-balanced: cy={ink['cy']}"
 
 
 def test_donut_hover_holds_steady_from_inside(dash):
@@ -894,3 +899,237 @@ def test_donut_single_status_renders_full_circle(green_dash):
     # SVG <text>: text_content, not inner_text (Playwright: "Node is not an HTMLElement").
     assert (page.locator(".donut-pct").text_content() or "").strip() == "100%"
     assert green_dash.errors == []
+
+
+def test_coverage_bench_shows_next_to_duration_when_present(dash):
+    # Coverage rides the detail payload from XCom (absent in the dev server), so inject
+    # it via response interception and assert a 6th KPI card renders with the percent.
+    page = dash.page
+
+    def add_coverage(route):
+        resp = route.fetch()
+        data = resp.json()
+        data["coverage"] = 0.83
+        route.fulfill(response=resp, json=data)
+
+    page.route("**/api/reports/*", add_coverage)
+    page.click("tr.lgrp:has-text('alpha')")
+    page.locator("tr.clickable").first.click()
+    expect(page.locator("dialog#detail")).to_be_visible()
+    kpis = page.locator("#detail .kpis .kpi")
+    expect(kpis).to_have_count(6)  # passed/failed/errors/skipped/duration + coverage
+    assert any("83%" in tx for tx in kpis.all_inner_texts())
+    assert dash.errors == []
+
+
+def test_coverage_bench_absent_without_coverage(dash):
+    # A run with no coverage in XCom (the dev server always) -> only the 5 base cards.
+    page = dash.page
+    page.click("tr.lgrp:has-text('alpha')")
+    page.locator("tr.clickable").first.click()
+    expect(page.locator("dialog#detail")).to_be_visible()
+    expect(page.locator("#detail .kpis .kpi")).to_have_count(5)  # no coverage card
+    assert dash.errors == []
+
+
+def test_coverage_bench_appears_via_poll_for_fresh_run(dash):
+    # A just-finished run may not carry coverage on first open: the operator archives
+    # the report mid-task but pushes coverage to XCom only at task end. The viewer
+    # polls a *fresh* run a few times and the bench appears on its own -- no email or
+    # reopen. Simulate: the first detail fetch has no coverage, a later one does; the
+    # payload's created_at is "now" so the recency gate lets the poll run.
+    from datetime import datetime, timezone
+
+    page = dash.page
+    fresh = datetime.now(timezone.utc).isoformat()
+    state = {"n": 0}
+
+    def route_detail(route):
+        resp = route.fetch()
+        data = resp.json()
+        if (
+            isinstance(data, dict) and "cases" in data
+        ):  # single-report detail, not the list
+            data["created_at"] = fresh
+            state["n"] += 1
+            if state["n"] >= 2:  # 2nd+ fetch: XCom coverage is now available
+                data["coverage"] = 0.77
+            else:
+                data.pop("coverage", None)  # first open: not yet
+        route.fulfill(response=resp, json=data)
+
+    page.route("**/api/reports/*", route_detail)
+    page.click("tr.lgrp:has-text('alpha')")
+    page.locator("tr.clickable").first.click()
+    expect(page.locator("dialog#detail")).to_be_visible()
+    expect(page.locator("#detail .kpis .kpi")).to_have_count(
+        5
+    )  # first render: no coverage yet
+    # The poller re-fetches within a few seconds and the 6th card appears in place.
+    expect(page.locator("#detail .kpis .kpi")).to_have_count(6, timeout=8000)
+    assert any(
+        "77%" in tx for tx in page.locator("#detail .kpis .kpi").all_inner_texts()
+    )
+    assert dash.errors == []
+
+
+def test_coverage_card_tint_bands(dash):
+    # Coverage now reads against a configurable bar (coverage_threshold, echoed per run;
+    # AIRFLOW_PYTEST_SUCCESS_COVERAGE / 0.85 by default) rather than fixed 0.8/0.5 bands:
+    # at or above it green (c-pass), below it red (c-fail). The boundary itself must count
+    # as passing -- a `>` instead of `>=` would paint an exactly-on-target run red.
+    page = dash.page
+    cov = {"v": 0.45, "bar": 0.85}
+
+    def add_coverage(route):
+        resp = route.fetch()
+        data = resp.json()
+        if isinstance(data, dict) and "cases" in data:
+            data["coverage"] = cov["v"]
+            data["coverage_threshold"] = cov["bar"]
+        route.fulfill(response=resp, json=data)
+
+    page.route("**/api/reports/*", add_coverage)
+    page.click("tr.lgrp:has-text('alpha')")  # expand the group once
+    row = page.locator("tr.clickable").first
+
+    def open_value_class():
+        row.click()
+        expect(page.locator("dialog#detail")).to_be_visible()
+        cls = (
+            page.locator("#detail .kpis .kpi")
+            .last.locator(".value")
+            .get_attribute("class")
+        )
+        page.keyboard.press("Escape")
+        expect(page.locator("dialog#detail")).to_be_hidden()
+        return cls or ""
+
+    cov["v"] = 0.45
+    assert "c-fail" in open_value_class()  # below the bar -> red
+    cov["v"] = 0.65
+    assert (
+        "c-fail" in open_value_class()
+    )  # still below 0.85 -> red, no "neutral" band now
+    cov["v"] = 0.85
+    assert "c-pass" in open_value_class()  # exactly on the bar counts as meeting it
+    cov["v"] = 0.9
+    assert "c-pass" in open_value_class()
+    # A run that pins a gentler bar of its own passes where the default would fail it.
+    cov["v"], cov["bar"] = 0.6, 0.5
+    assert "c-pass" in open_value_class()
+    assert dash.errors == []
+
+
+def test_coverage_poll_skipped_for_old_run(dash):
+    # Old runs (created_at far in the past) must NOT trigger the coverage poll -- they
+    # either already carry coverage or never will, so polling would only waste requests.
+    page = dash.page
+    calls = {"n": 0}
+
+    def count_detail(route):
+        resp = route.fetch()
+        data = resp.json()
+        if isinstance(data, dict) and "cases" in data:
+            calls["n"] += 1
+            data["created_at"] = (
+                "2020-01-01T00:00:00+00:00"  # ancient -> outside the poll window
+            )
+            data.pop("coverage", None)
+        route.fulfill(response=resp, json=data)
+
+    page.route("**/api/reports/*", count_detail)
+    page.click("tr.lgrp:has-text('alpha')")
+    page.locator("tr.clickable").first.click()
+    expect(page.locator("dialog#detail")).to_be_visible()
+    expect(page.locator("#detail .kpis .kpi")).to_have_count(5)
+    page.wait_for_timeout(3000)  # longer than the first poll delay (~2s)
+    assert calls["n"] == 1  # only the initial open fetched detail; no poll fetch fired
+    assert dash.errors == []
+
+
+def test_kpi_title_shrinks_instead_of_wrapping_or_clipping(dash):
+    # A long localised title must SHRINK to stay on one line beside its chip. It must not
+    # wrap (which strands the chip next to a two-line block, reading as unrelated) and it
+    # must not clip to an ellipsis (which eats the word). Both were real regressions.
+    page = dash.page
+    for width in (1440, 1280, 900, 768, 600, 480, 420, 375, 320):
+        page.set_viewport_size({"width": width, "height": 900})
+        page.wait_for_timeout(250)
+        state = page.evaluate(
+            """() => {
+                const wrapped = [], clipped = [], stray = [];
+                document.querySelectorAll('.kpi').forEach(k => {
+                  const text = k.querySelector('.label-text');
+                  if (!text) return;
+                  const lh = parseFloat(getComputedStyle(text).lineHeight);
+                  const name = text.textContent.trim();
+                  if (Math.round(text.getBoundingClientRect().height / lh) > 1) wrapped.push(name);
+                  if (text.scrollWidth > text.clientWidth) clipped.push(name);
+                  const badge = k.querySelector('.kpi-all') || k.querySelector('.kpi-info');
+                  if (badge) {
+                    const t = text.getBoundingClientRect(), b = badge.getBoundingClientRect();
+                    if (!(b.top < t.bottom && b.bottom > t.top)) stray.push(name);
+                  }
+                });
+                return { wrapped, clipped, stray };
+            }"""
+        )
+        assert state["wrapped"] == [], f"title wrapped at {width}px: {state['wrapped']}"
+        assert state["clipped"] == [], f"title clipped at {width}px: {state['clipped']}"
+        assert state["stray"] == [], (
+            f"badge left the title line at {width}px: {state['stray']}"
+        )
+    assert dash.errors == []
+
+
+def test_kpi_title_returns_to_full_size_when_there_is_room(dash):
+    # Shrinking is per-measurement, not sticky: a title squeezed on a narrow card must go
+    # back to the CSS size once the window is wide again.
+    page = dash.page
+    page.set_viewport_size({"width": 420, "height": 900})
+    page.wait_for_timeout(250)
+    narrow = page.evaluate(
+        "() => Math.min(...[...document.querySelectorAll('.kpi .label-text')]"
+        ".map(e => parseFloat(getComputedStyle(e).fontSize)))"
+    )
+    page.set_viewport_size({"width": 1600, "height": 900})
+    page.wait_for_timeout(400)
+    wide = page.evaluate(
+        "() => Math.min(...[...document.querySelectorAll('.kpi .label-text')]"
+        ".map(e => parseFloat(getComputedStyle(e).fontSize)))"
+    )
+    assert narrow <= wide, f"title did not grow back: {narrow} -> {wide}"
+    assert wide == 12, f"expected the CSS size at 1600px, got {wide}"
+    assert dash.errors == []
+
+
+def test_kpi_info_popup_opens_without_triggering_the_card(dash):
+    # The ⓘ sits on a card that is itself a button: pressing it must open the note only,
+    # never also the card's drill-down modal behind it.
+    page = dash.page
+    page.set_viewport_size({"width": 1280, "height": 900})
+    page.locator("#kpi-slow .kpi-info").click()
+    page.wait_for_timeout(300)
+    expect(page.locator("#panel-info")).to_be_visible()
+    assert page.locator("#slow[open]").count() == 0, "the card's own modal also opened"
+    assert page.locator("#panel-info-body").inner_text().strip() != ""
+    assert dash.errors == []
+
+
+def test_locale_follows_the_parent_choice_over_a_stale_lang_attribute(page, base_url):
+    # Mirrors the real stand: same-origin parent whose <html lang> says "en" while the
+    # user's stored i18next choice is Russian. The plugin must render Russian.
+    page.goto(base_url)
+    page.evaluate(
+        """() => {
+            document.documentElement.setAttribute('lang', 'en');
+            localStorage.setItem('i18nextLng', 'ru');
+        }"""
+    )
+    page.reload()
+    page.wait_for_selector(".kpi .label-text")
+    assert page.evaluate("document.documentElement.getAttribute('lang')") == "ru"
+    labels = page.locator(".kpi .label-text").all_inner_texts()
+    assert any("ПРОГОНОВ" in x.upper() for x in labels), labels
+    page.evaluate("() => localStorage.removeItem('i18nextLng')")

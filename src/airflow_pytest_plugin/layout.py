@@ -27,6 +27,9 @@ REPORT_FILENAME = "junit.xml"
 META_FILENAME = "meta.json"
 #: Report subdir holding raw Allure results, for Allure TestOps export.
 ALLURE_DIRNAME = "allure-results"
+#: pytest-cov JSON report the producer asks for with ``coverage=True``, so the run's
+#: coverage travels WITH the archive instead of only through the operator's XCom.
+COVERAGE_FILENAME = "coverage.json"
 
 # Lossy on purpose: exact identity lives in meta.json / the ReportRef token,
 # never recovered from the path.

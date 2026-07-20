@@ -66,6 +66,51 @@ def get_conf_value(section: str, key: str) -> str | None:
         return None
 
 
+def get_run_coverage(
+    dag_id: str, run_id: str, task_id: str, map_index: int = -1
+) -> float | None:
+    """Overall coverage fraction (0-1) the operator pushed to XCom, or ``None``.
+
+    ``airflow-pytest-operator`` >= 0.6 run with ``coverage=True`` pushes the run's
+    overall line-coverage fraction into its ``return_value`` XCom summary under
+    ``coverage``. The reader runs in Airflow's api-server (DB access, no task context),
+    so we go through the **DB-backed** :class:`XComModel` -- NOT ``XCom.get_one``, which
+    in Airflow 3 is the Task-SDK facade routed through ``SUPERVISOR_COMMS`` and only
+    works inside a running task. Returns ``None`` off-Airflow, when the run had no
+    coverage, or on any error -- so the UI simply omits the coverage bench.
+    """
+    try:
+        from airflow.models.xcom import XComModel
+        from airflow.utils.session import create_session
+
+        stmt = XComModel.get_many(
+            run_id=run_id,
+            key="return_value",
+            task_ids=task_id,
+            dag_ids=dag_id,
+            map_indexes=map_index,
+            limit=1,
+        )
+        with create_session() as session:
+            row = session.scalar(stmt)
+            summary = XComModel.deserialize_value(row) if row is not None else None
+    except Exception:
+        _log.debug(
+            "could not read coverage from XCom for %s / %s / %s",
+            dag_id,
+            run_id,
+            task_id,
+            exc_info=True,
+        )
+        return None
+    if not isinstance(summary, dict):
+        return None
+    coverage = summary.get("coverage")
+    if isinstance(coverage, (int, float)) and not isinstance(coverage, bool):
+        return float(coverage) if 0.0 <= coverage <= 1.0 else None
+    return None
+
+
 def airflow_email_available() -> bool:
     """True if Airflow's ``send_email`` is importable (i.e. a mail transport exists)."""
     try:
@@ -125,6 +170,21 @@ def airflow_auth_available() -> bool:
     """True if Airflow 3's FastAPI auth (current-user dependency) is importable."""
     try:
         from airflow.api_fastapi.core_api.security import get_user  # noqa: F401
+
+        return True
+    except Exception:
+        return False
+
+
+def airflow_available() -> bool:
+    """True if Airflow itself is importable, regardless of whether its auth is.
+
+    Lets the app tell "running standalone, nobody to authorize against" apart from
+    "running INSIDE Airflow but its auth API moved" -- the first may safely serve
+    everything, the second must not.
+    """
+    try:
+        import airflow  # noqa: F401
 
         return True
     except Exception:

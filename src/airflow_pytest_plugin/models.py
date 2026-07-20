@@ -161,14 +161,22 @@ class ReportDetail:
 
     ``alerts``: the run's email-notification history (oldest first) from the
     ``meta.json`` sidecar; each entry has ``at``/``kind``/``recipients``/``ok``/``manual``.
+    ``coverage``: the run's overall line-coverage fraction (0-1), baked in at archive
+    time or from the operator's XCom; ``None`` when unknown.
+    ``coverage_threshold``: the bar THIS run's coverage should be read against, when the
+    producer pinned one (``ArchivingResultParser(coverage_threshold=...)``); ``None`` lets
+    the reader fall back to ``AIRFLOW_PYTEST_SUCCESS_COVERAGE``.
     """
 
     summary: ReportSummary
     cases: tuple[CaseView, ...] = field(default_factory=tuple)
     alerts: tuple[dict[str, Any], ...] = field(default_factory=tuple)
+    coverage: float | None = None
+    coverage_threshold: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         data = self.summary.to_dict()
         data["cases"] = [c.to_dict() for c in self.cases]
         data["alerts"] = list(self.alerts)
+        data["coverage"] = self.coverage
         return data

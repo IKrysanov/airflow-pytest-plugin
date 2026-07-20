@@ -16,11 +16,13 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from ..compat import (
     airflow_auth_available,
+    airflow_available,
     get_user_dependency,
     is_authorized_to_read,
     is_authorized_to_trigger,
@@ -29,6 +31,8 @@ from ..sources import FileSystemReportSource, ReportSource
 from ..version import __version__
 from .routes.common import Authorizer, RouteDeps
 from .templates import index_html
+
+_log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
@@ -111,12 +115,28 @@ def create_app(
     def _allow_all(dag_id: str, user: Any) -> bool:
         return True
 
+    def _deny_all(dag_id: str, user: Any) -> bool:
+        return False
+
     auth_on = airflow_auth_available()
+    # Without Airflow's auth there is no user to authorize, so the fallback depends on WHY
+    # it is missing. No Airflow at all = the standalone dev server, where allow-all is the
+    # point. Airflow present but its auth API not importable = we are inside a real
+    # deployment whose RBAC we cannot consult -- serving every team's runs to everyone
+    # would be the worst possible reading of "auth unavailable", so deny instead and say so.
+    _fallback: Authorizer = _allow_all
+    if not auth_on and airflow_available():
+        _log.error(
+            "Airflow is installed but its auth API could not be imported: refusing all "
+            "report access. The plugin cannot verify DAG permissions, so it fails closed "
+            "rather than exposing every DAG's runs. Check the Airflow version."
+        )
+        _fallback = _deny_all
     read_auth: Authorizer = read_authorizer or (
-        is_authorized_to_read if auth_on else _allow_all
+        is_authorized_to_read if auth_on else _fallback
     )
     delete_auth: Authorizer = authorizer or (
-        is_authorized_to_trigger if auth_on else _allow_all
+        is_authorized_to_trigger if auth_on else _fallback
     )
     # Depends keeps the user out of the annotations, so future-annotations can't
     # break dependency resolution.

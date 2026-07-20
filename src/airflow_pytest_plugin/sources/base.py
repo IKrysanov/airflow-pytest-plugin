@@ -79,3 +79,12 @@ class ReportSource(ABC):
         ``False``. Must be best-effort: never raise on ordinary storage problems.
         """
         return False
+
+    def record_coverage(self, ref: ReportRef, coverage: float) -> bool:
+        """Persist a run's overall coverage fraction (0-1) into the report.
+
+        Lets the reader bake the operator's XCom coverage into the run so it becomes a
+        stable part of the report (:attr:`~..models.ReportDetail.coverage`). Optional;
+        default returns ``False``. Best-effort: never raise on ordinary storage problems.
+        """
+        return False

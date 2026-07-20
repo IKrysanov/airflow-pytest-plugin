@@ -1664,3 +1664,578 @@ def test_common_all_declares_its_cross_module_exports():
     # No dangling name in __all__ (every export must resolve).
     for name in common.__all__:
         assert hasattr(common, name), f"__all__ lists undefined {name!r}"
+
+
+def _fresh_iso() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat()
+
+
+def test_detail_bakes_coverage_from_xcom_then_serves_without_reread(
+    reports_root, monkeypatch
+):
+    # A just-finished run's coverage lands in XCom slightly after the report is archived,
+    # so the detail route probes XCom, bakes the value into the report, and thereafter
+    # serves it from the report (no further XCom round-trip). Fresh run -> keeps probing
+    # until coverage appears.
+    write_report(
+        reports_root, ReportRef("dag", "run", "task", 1), created_at=_fresh_iso()
+    )
+    c = TestClient(make_app(reports_root))
+    tok = ReportRef("dag", "run", "task", 1, -1).token
+
+    # Not committed yet -> null (bench hidden); a fresh run is NOT negative-cached.
+    monkeypatch.setattr(
+        "airflow_pytest_plugin.web.routes.reports.get_run_coverage",
+        lambda *a: None,
+    )
+    assert c.get(f"/api/reports/{tok}").json()["coverage"] is None
+
+    # Operator committed 0.83 -> surfaced verbatim AND baked into the report.
+    xcom_calls = []
+    monkeypatch.setattr(
+        "airflow_pytest_plugin.web.routes.reports.get_run_coverage",
+        lambda dag, run, task, mi: (xcom_calls.append(1), 0.83)[1],
+    )
+    assert c.get(f"/api/reports/{tok}").json()["coverage"] == 0.83
+    assert len(xcom_calls) == 1  # XCom read once
+
+    # Now XCom raises if touched -> coverage still 0.83, served from the report (baked in),
+    # and XCom is NOT queried again (it's part of the report now).
+    monkeypatch.setattr(
+        "airflow_pytest_plugin.web.routes.reports.get_run_coverage",
+        lambda *a: (_ for _ in ()).throw(AssertionError("XCom must not be re-read")),
+    )
+    assert c.get(f"/api/reports/{tok}").json()["coverage"] == 0.83
+
+
+def test_detail_negative_cache_stops_reprobing_settled_run(reports_root, monkeypatch):
+    # A run old enough to have settled (default fixed created_at is well in the past) with
+    # no XCom coverage never will -- the route probes ONCE, then serves null from an
+    # in-process negative cache without hammering the shared metadata DB on every view.
+    write_report(reports_root, ReportRef("dag", "old", "task", 1))
+    c = TestClient(make_app(reports_root))
+    tok = ReportRef("dag", "old", "task", 1, -1).token
+
+    probes = []
+    monkeypatch.setattr(
+        "airflow_pytest_plugin.web.routes.reports.get_run_coverage",
+        lambda *a: (probes.append(1), None)[1],
+    )
+    assert c.get(f"/api/reports/{tok}").json()["coverage"] is None
+    assert c.get(f"/api/reports/{tok}").json()["coverage"] is None
+    assert c.get(f"/api/reports/{tok}").json()["coverage"] is None
+    assert len(probes) == 1  # probed once, then negative-cached
+
+
+def test_detail_fresh_run_keeps_probing_until_coverage_arrives(
+    reports_root, monkeypatch
+):
+    # A fresh run (coverage may still be committing) is NOT negative-cached: each view
+    # re-probes so late-arriving coverage is not permanently missed.
+    write_report(
+        reports_root, ReportRef("dag", "new", "task", 1), created_at=_fresh_iso()
+    )
+    c = TestClient(make_app(reports_root))
+    tok = ReportRef("dag", "new", "task", 1, -1).token
+
+    probes = []
+    monkeypatch.setattr(
+        "airflow_pytest_plugin.web.routes.reports.get_run_coverage",
+        lambda *a: (probes.append(1), None)[1],
+    )
+    assert c.get(f"/api/reports/{tok}").json()["coverage"] is None
+    assert c.get(f"/api/reports/{tok}").json()["coverage"] is None
+    assert len(probes) == 2  # re-probed, not suppressed
+
+
+def test_detail_coverage_not_probed_when_read_denied(reports_root, monkeypatch):
+    # The XCom read AND the write-on-GET (record_coverage) sit AFTER the RBAC read gate.
+    # A caller who may not read the run must never trigger either. Guards against a
+    # regression that reorders the coverage block above the authz check.
+    from airflow_pytest_plugin.sources.filesystem import FileSystemReportSource
+
+    write_report(
+        reports_root, ReportRef("dag", "run", "task", 1), created_at=_fresh_iso()
+    )
+    c = TestClient(make_app(reports_root, read_authorizer=lambda dag_id, user: False))
+    tok = ReportRef("dag", "run", "task", 1, -1).token
+
+    def _boom(*a, **k):
+        raise AssertionError("coverage path must not run when read is denied")
+
+    monkeypatch.setattr(
+        "airflow_pytest_plugin.web.routes.reports.get_run_coverage", _boom
+    )
+    monkeypatch.setattr(FileSystemReportSource, "record_coverage", _boom)
+    assert c.get(f"/api/reports/{tok}").status_code == 403
+
+
+def test_detail_records_coverage_once_with_map_index_and_tolerates_write_failure(
+    reports_root, monkeypatch
+):
+    # The route must (a) pass the run's map_index through to the XCom read, (b) invoke
+    # record_coverage exactly once with the decoded ref + value, and (c) still serve the
+    # coverage even if that best-effort write fails (a write error must not break the GET).
+    from airflow_pytest_plugin.sources.filesystem import FileSystemReportSource
+
+    write_report(
+        reports_root, ReportRef("dag", "run", "task", 1, 2), created_at=_fresh_iso()
+    )
+    tok = ReportRef("dag", "run", "task", 1, 2).token
+
+    seen = {}
+    monkeypatch.setattr(
+        "airflow_pytest_plugin.web.routes.reports.get_run_coverage",
+        lambda dag, run, task, mi: (seen.update(mi=mi), 0.5)[1],
+    )
+    baked = []
+    monkeypatch.setattr(
+        FileSystemReportSource,
+        "record_coverage",
+        lambda self, ref, cov: (baked.append((ref.map_index, cov)), True)[1],
+    )
+    c = TestClient(make_app(reports_root))
+    assert c.get(f"/api/reports/{tok}").json()["coverage"] == 0.5
+    assert seen["mi"] == 2  # decoded map_index reaches the XCom read
+    assert baked == [(2, 0.5)]  # record_coverage called once with the ref + value
+
+    # A write failure (record_coverage returns False) must not drop the value or 500.
+    monkeypatch.setattr(
+        FileSystemReportSource, "record_coverage", lambda self, ref, cov: False
+    )
+    r = c.get(f"/api/reports/{tok}")
+    assert r.status_code == 200
+    assert r.json()["coverage"] == 0.5
+
+
+def test_detail_serves_archive_baked_coverage_without_touching_xcom(
+    reports_root, monkeypatch
+):
+    # Producer-side coverage (parser coverage=True) writes the fraction into meta.json at
+    # archive time, so the reader must serve it straight from the report -- never querying
+    # the shared Airflow metadata DB, even for a brand-new run.
+    from airflow_pytest_plugin.layout import ReportLayout
+
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref, created_at=_fresh_iso())
+    meta_path = ReportLayout().meta_path(reports_root, ref)
+    with open(meta_path, encoding="utf-8") as fh:
+        meta = json.load(fh)
+    meta["coverage"] = 0.77
+    with open(meta_path, "w", encoding="utf-8") as fh:
+        json.dump(meta, fh)
+
+    def boom(*a):  # any XCom probe is a regression
+        raise AssertionError("XCom must not be queried when coverage is in the archive")
+
+    monkeypatch.setattr(
+        "airflow_pytest_plugin.web.routes.reports.get_run_coverage", boom
+    )
+    c = TestClient(make_app(reports_root))
+    tok = ReportRef("dag", "run", "task", 1, -1).token
+    assert c.get(f"/api/reports/{tok}").json()["coverage"] == 0.77
+
+
+def test_detail_echoes_the_coverage_threshold(reports_root, monkeypatch):
+    # The viewer needs the configured bar to label the card; it rides on the detail
+    # payload so the UI never has to guess (or hardcode) it.
+    monkeypatch.setenv("AIRFLOW_PYTEST_SUCCESS_COVERAGE", "0.6")
+    write_report(reports_root, ReportRef("dag", "run", "task", 1))
+    c = TestClient(make_app(reports_root))
+    tok = ReportRef("dag", "run", "task", 1, -1).token
+    assert c.get(f"/api/reports/{tok}").json()["coverage_threshold"] == 0.6
+
+
+def test_low_coverage_does_not_fail_the_run(reports_root, monkeypatch):
+    # Coverage is presentational: a run far below the bar is STILL a successful run.
+    # Enforcing coverage is the operator's cov_fail_under gate, not this viewer's job.
+    monkeypatch.setenv("AIRFLOW_PYTEST_SUCCESS_COVERAGE", "0.9")
+    from airflow_pytest_plugin.layout import ReportLayout
+
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref, passed=3, failed=0)
+    meta_path = ReportLayout().meta_path(reports_root, ref)
+    with open(meta_path, encoding="utf-8") as fh:
+        meta = json.load(fh)
+    meta["coverage"] = 0.10  # way below the 0.9 bar
+    with open(meta_path, "w", encoding="utf-8") as fh:
+        json.dump(meta, fh)
+
+    c = TestClient(make_app(reports_root))
+    tok = ReportRef("dag", "run", "task", 1, -1).token
+    body = c.get(f"/api/reports/{tok}").json()
+    assert body["coverage"] == 0.10 and body["coverage_threshold"] == 0.9
+    assert body["success"] is True  # unaffected by the coverage shortfall
+    listed = c.get("/api/reports").json()["reports"]
+    assert [r["success"] for r in listed] == [True]
+
+
+def test_run_pinned_coverage_threshold_outranks_the_env_var(reports_root, monkeypatch):
+    # The suite's own bar wins over the global reader setting: a core library and a legacy
+    # smoke suite need different standards, which one env var cannot express.
+    monkeypatch.setenv("AIRFLOW_PYTEST_SUCCESS_COVERAGE", "0.9")
+    from airflow_pytest_plugin.layout import ReportLayout
+
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref)
+    meta_path = ReportLayout().meta_path(reports_root, ref)
+    with open(meta_path, encoding="utf-8") as fh:
+        meta = json.load(fh)
+    meta["coverage"], meta["coverage_threshold"] = 0.55, 0.5
+    with open(meta_path, "w", encoding="utf-8") as fh:
+        json.dump(meta, fh)
+
+    c = TestClient(make_app(reports_root))
+    body = c.get(f"/api/reports/{ReportRef('dag', 'run', 'task', 1, -1).token}").json()
+    # 0.55 would be RED under the 0.9 env bar, but the run pinned 0.5 -> it passes.
+    assert body["coverage_threshold"] == 0.5 and body["coverage"] == 0.55
+
+
+def test_corrupt_pinned_threshold_falls_back_to_the_env_var(reports_root, monkeypatch):
+    monkeypatch.setenv("AIRFLOW_PYTEST_SUCCESS_COVERAGE", "0.75")
+    from airflow_pytest_plugin.layout import ReportLayout
+
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref)
+    meta_path = ReportLayout().meta_path(reports_root, ref)
+    for bogus in (42, "0.5", -1, None):
+        with open(meta_path, encoding="utf-8") as fh:
+            meta = json.load(fh)
+        meta["coverage_threshold"] = bogus
+        with open(meta_path, "w", encoding="utf-8") as fh:
+            json.dump(meta, fh)
+        c = TestClient(make_app(reports_root))
+        tok = ReportRef("dag", "run", "task", 1, -1).token
+        assert c.get(f"/api/reports/{tok}").json()["coverage_threshold"] == 0.75, bogus
+
+
+def _bake(reports_root, ref, **fields):
+    """Write extra keys straight into a run's meta.json."""
+    from airflow_pytest_plugin.layout import ReportLayout
+
+    meta_path = ReportLayout().meta_path(reports_root, ref)
+    with open(meta_path, encoding="utf-8") as fh:
+        meta = json.load(fh)
+    meta.update(fields)
+    with open(meta_path, "w", encoding="utf-8") as fh:
+        json.dump(meta, fh)
+
+
+def test_zero_coverage_is_served_and_never_reprobed(reports_root, monkeypatch):
+    # 0.0 is falsy: `if not coverage` anywhere here would both hide the card and send the
+    # reader back to the metadata DB on every open of a run that already has its answer.
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref, created_at=_fresh_iso())
+    _bake(reports_root, ref, coverage=0.0)
+
+    def boom(*a):
+        raise AssertionError("XCom probed for a run whose coverage is already 0.0")
+
+    monkeypatch.setattr(
+        "airflow_pytest_plugin.web.routes.reports.get_run_coverage", boom
+    )
+    c = TestClient(make_app(reports_root))
+    tok = ReportRef("dag", "run", "task", 1, -1).token
+    body = c.get(f"/api/reports/{tok}").json()
+    assert body["coverage"] == 0.0 and body["coverage"] is not None
+
+
+def test_zero_pinned_threshold_is_honoured_not_treated_as_unset(
+    reports_root, monkeypatch
+):
+    # A pinned 0 means "never mark this suite red" -- another falsy value that must not
+    # silently fall through to the env default.
+    monkeypatch.setenv("AIRFLOW_PYTEST_SUCCESS_COVERAGE", "0.9")
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref)
+    _bake(reports_root, ref, coverage=0.05, coverage_threshold=0.0)
+    c = TestClient(make_app(reports_root))
+    tok = ReportRef("dag", "run", "task", 1, -1).token
+    assert c.get(f"/api/reports/{tok}").json()["coverage_threshold"] == 0.0
+
+
+def test_coverage_boundaries_survive_the_round_trip(reports_root, monkeypatch):
+    monkeypatch.delenv("AIRFLOW_PYTEST_SUCCESS_COVERAGE", raising=False)
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref)
+    tok = ReportRef("dag", "run", "task", 1, -1).token
+    monkeypatch.setattr(
+        "airflow_pytest_plugin.web.routes.reports.get_run_coverage", lambda *a: None
+    )
+    for value in (0.0, 0.5, 0.85, 1.0):
+        _bake(reports_root, ref, coverage=value)
+        c = TestClient(make_app(reports_root))
+        assert c.get(f"/api/reports/{tok}").json()["coverage"] == value
+
+
+def test_out_of_range_coverage_in_meta_is_dropped(reports_root, monkeypatch):
+    # A hand-edited or corrupt meta must not put an impossible percentage on the card.
+    monkeypatch.setattr(
+        "airflow_pytest_plugin.web.routes.reports.get_run_coverage", lambda *a: None
+    )
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref)
+    tok = ReportRef("dag", "run", "task", 1, -1).token
+    for bogus in (1.5, -0.1, "0.8", True, None):
+        _bake(reports_root, ref, coverage=bogus)
+        c = TestClient(make_app(reports_root))
+        assert c.get(f"/api/reports/{tok}").json()["coverage"] is None, bogus
+
+
+def test_archive_coverage_wins_over_a_disagreeing_xcom(reports_root, monkeypatch):
+    # Both routes can be active at once. The archived value is the run's own record, so it
+    # must win -- and the XCom must not be consulted to discover that.
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref, created_at=_fresh_iso())
+    _bake(reports_root, ref, coverage=0.42)
+    monkeypatch.setattr(
+        "airflow_pytest_plugin.web.routes.reports.get_run_coverage", lambda *a: 0.99
+    )
+    c = TestClient(make_app(reports_root))
+    tok = ReportRef("dag", "run", "task", 1, -1).token
+    assert c.get(f"/api/reports/{tok}").json()["coverage"] == 0.42
+
+
+def test_index_ships_kpi_info_notes_in_both_languages(client):
+    # The ⓘ notes on the KPI cards are part of the shipped page: guard the wiring, the
+    # per-KPI keys, and that every note exists in BOTH dictionaries -- a key present only
+    # in one silently falls back to English for the other locale.
+    html = client.get("/").text
+    for marker in ("kpi-info", "infoBtnHtml", "wireKpiInfo", "openPanelInfo"):
+        assert marker in html, marker
+    for key in ("unique", "failures", "slow", "coverage"):
+        assert f'"{key}"' in html or f"'{key}'" in html, key
+        assert f"{key}InfoTitle" in html and f"{key}InfoBody" in html, key
+    # Both locales define every note (each key appears at least twice: en + ru).
+    for key in ("unique", "failures", "slow", "coverage"):
+        assert html.count(f"{key}InfoTitle") >= 2, key
+        assert html.count(f"{key}InfoBody") >= 2, key
+    assert html.count("kpiInfoAl") >= 2  # the ⓘ aria-label is localised too
+
+
+def test_coverage_card_signals_state_in_words_not_only_colour(client):
+    # WCAG: the tint must never be the only carrier of "passing / failing".
+    html = client.get("/").text
+    assert "covPass" in html and "covFail" in html
+    assert "meets target" in html and "below target" in html  # en
+    assert "ниже порога" in html  # ru
+    # The card reads the run's own bar, defaulting to 0.85 if the payload omits it.
+    assert "coverage_threshold" in html and "0.85" in html
+
+
+def test_deep_link_params_are_all_cleared_on_close(client):
+    # Guard the fix: closing a run must drop every param that can re-open it, not just
+    # "report" -- otherwise the tracking link's dag/run/task reopen it on the next refresh.
+    html = client.get("/").text
+    assert "DEEP_LINK_PARAMS" in html
+    for param in ("report", "dag", "run", "task", "try", "map"):
+        assert f'"{param}"' in html, param
+
+
+# --- cross-tenant RBAC sweep ------------------------------------------------------------
+#: Every documented data route, with params that would surface the FORBIDDEN dag if the
+#: route failed to filter. Health/version/metrics are excluded: they carry no per-dag data
+#: (health/version) or run on a separate scrape-token model (metrics, covered separately).
+_READ_ROUTES = [
+    ("GET", "/api/reports", None),
+    ("GET", "/api/reports?dag_id=secret", None),
+    ("GET", "/api/groups", None),
+    ("GET", "/api/groups?dag_id=secret", None),
+    ("GET", "/api/failures", None),
+    ("GET", "/api/failure-clusters", None),
+    ("GET", "/api/flaky", None),
+    ("GET", "/api/slow", None),
+    ("GET", "/api/unique-tests?full=true", None),
+]
+
+
+def _make_two_tenant_root(reports_root):
+    """One run each for a readable dag and a forbidden one, with distinct test names.
+
+    Real reports (junit + meta) so the token-addressed routes have something to serve, with
+    the per-test rows renamed so a leak is unmistakable in any response body.
+    """
+    for dag in ("public", "secret"):
+        ref = ReportRef(dag, "r1", "task", 1)
+        write_report(reports_root, ref, passed=0, failed=1)
+        _bake(reports_root, ref, tests=[[f"tests/t.py::test_{dag}", "failed", 0.1]])
+
+
+def test_no_read_route_leaks_a_forbidden_dag(reports_root):
+    # The guarantee a shared deployment rests on: a user who may read only "public" must
+    # never see "secret" -- its dag id, its task, or its test names -- through ANY route.
+    # Swept in one place so a new endpoint added without a read_auth filter fails here.
+    _make_two_tenant_root(reports_root)
+    c = TestClient(
+        make_app(reports_root, read_authorizer=lambda dag, u: dag == "public")
+    )
+    for method, path, _ in _READ_ROUTES:
+        r = c.request(method, path)
+        assert r.status_code == 200, (path, r.status_code)
+        body = r.text
+        assert "secret" not in body, f"{path} leaked the forbidden dag: {body[:300]}"
+        assert "test_secret" not in body, f"{path} leaked a forbidden test id"
+
+    # /api/test-history is swept separately: it echoes the caller's own node_id, so a raw
+    # substring check would flag the request back at us. What matters is that the merged
+    # history carries no run from the forbidden dag.
+    hist = c.get("/api/test-history?node_id=tests/t.py::test_secret").json()
+    assert hist["history"] == [], hist
+
+
+def test_per_run_routes_refuse_a_forbidden_dag(reports_root):
+    # Token-addressed routes must 403 rather than serve, even though the token itself is
+    # guessable (it only encodes coordinates -- it is an identifier, never a capability).
+    _make_two_tenant_root(reports_root)
+    c = TestClient(
+        make_app(reports_root, read_authorizer=lambda dag, u: dag == "public")
+    )
+    tok = ReportRef("secret", "r1", "task", 1, -1).token
+    assert c.get(f"/api/reports/{tok}").status_code == 403
+    assert c.get(f"/api/reports/{tok}/allure.zip").status_code == 403
+    assert (
+        c.post(f"/api/reports/{tok}/email", json={"recipients": ["a@b.co"]}).status_code
+        == 403
+    )
+    assert c.get("/api/heatmap?dag_id=secret&task_id=task").status_code == 403
+    assert (
+        c.get("/api/test-history?node_id=x&dag_id=secret&task_id=task").status_code
+        == 403
+    )
+    # ...and the readable one still works, so the filter isn't just denying everything.
+    ok_tok = ReportRef("public", "r1", "task", 1, -1).token
+    assert c.get(f"/api/reports/{ok_tok}").status_code == 200
+
+
+def test_compare_refuses_when_either_side_is_forbidden(reports_root):
+    # A diff reads TWO runs; permission on one must not carry the other into the response.
+    _make_two_tenant_root(reports_root)
+    c = TestClient(
+        make_app(reports_root, read_authorizer=lambda dag, u: dag == "public")
+    )
+    pub = ReportRef("public", "r1", "task", 1, -1).token
+    sec = ReportRef("secret", "r1", "task", 1, -1).token
+    assert c.get(f"/api/compare?base={pub}&head={sec}").status_code == 403
+    assert c.get(f"/api/compare?base={sec}&head={pub}").status_code == 403
+
+
+def test_delete_needs_more_than_read(reports_root):
+    # Read and delete are independent axes: a reader must not be able to destroy data.
+    _make_two_tenant_root(reports_root)
+    c = TestClient(
+        make_app(
+            reports_root,
+            read_authorizer=lambda dag, u: True,  # may read everything
+            authorizer=lambda dag, u: False,  # may delete nothing
+        )
+    )
+    tok = ReportRef("public", "r1", "task", 1, -1).token
+    assert c.get(f"/api/reports/{tok}").status_code == 200
+    assert c.delete(f"/api/reports/{tok}").status_code == 403
+    assert c.get(f"/api/reports/{tok}").status_code == 200  # still there
+
+
+def _force_auth_env(monkeypatch, *, auth: bool, airflow: bool):
+    """Pin BOTH modules' view of Airflow: create_app wires the authorizers from its own
+    import, /api/health reports the mode from monitoring's. Patching only one leaves the
+    other reading the real environment -- which is why this passed without Airflow
+    installed and failed on the integration matrix."""
+    import airflow_pytest_plugin.web.app as app_mod
+    import airflow_pytest_plugin.web.routes.monitoring as mon_mod
+
+    for mod in (app_mod, mon_mod):
+        monkeypatch.setattr(mod, "airflow_auth_available", lambda: auth)
+        monkeypatch.setattr(mod, "airflow_available", lambda: airflow)
+    return app_mod
+
+
+def test_standalone_without_airflow_serves_openly(reports_root, monkeypatch):
+    # No Airflow at all = the bundled dev server: there is no user to authorize, and
+    # allow-all is the documented behaviour (health reports auth="open").
+    app_mod = _force_auth_env(monkeypatch, auth=False, airflow=False)
+    write_report(reports_root, ReportRef("dag", "run", "task", 1))
+    c = TestClient(app_mod.create_app(FileSystemReportSource(report_root=reports_root)))
+    assert len(c.get("/api/reports").json()["reports"]) == 1
+    assert c.get("/api/health").json()["auth"] == "open"
+
+
+def test_health_reports_denied_when_auth_is_unreachable(reports_root, monkeypatch):
+    # health is the documented smoke check for a shared deployment, so it must not call
+    # the fail-closed state "open" -- that would report the exact opposite of the truth.
+    app_mod = _force_auth_env(monkeypatch, auth=False, airflow=True)
+    write_report(reports_root, ReportRef("dag", "run", "task", 1))
+    c = TestClient(app_mod.create_app(FileSystemReportSource(report_root=reports_root)))
+    assert c.get("/api/health").json()["auth"] == "denied"
+    assert c.get("/api/reports").json()["reports"] == []  # and it really is denying
+
+
+def test_health_reports_airflow_when_rbac_is_live(reports_root, monkeypatch):
+    app_mod = _force_auth_env(monkeypatch, auth=True, airflow=True)
+    c = TestClient(
+        app_mod.create_app(
+            FileSystemReportSource(report_root=reports_root),
+            read_authorizer=lambda d, u: True,
+            authorizer=lambda d, u: True,
+            user_dependency=lambda: None,
+        )
+    )
+    assert c.get("/api/health").json()["auth"] == "airflow"
+
+
+def test_airflow_present_but_auth_broken_fails_closed(
+    reports_root, monkeypatch, caplog
+):
+    # The dangerous middle case: we ARE inside Airflow but cannot reach its RBAC. Serving
+    # every team's runs would be the worst reading of "auth unavailable" -- deny instead.
+    app_mod = _force_auth_env(monkeypatch, auth=False, airflow=True)
+    write_report(reports_root, ReportRef("dag", "run", "task", 1))
+    with caplog.at_level("ERROR"):
+        c = TestClient(
+            app_mod.create_app(FileSystemReportSource(report_root=reports_root))
+        )
+    assert c.get("/api/reports").json()["reports"] == []  # nothing is readable
+    tok = ReportRef("dag", "run", "task", 1, -1).token
+    assert c.get(f"/api/reports/{tok}").status_code == 403
+    assert c.delete(f"/api/reports/{tok}").status_code == 403
+    assert any("fails closed" in r.message for r in caplog.records), (
+        "must be logged loudly"
+    )
+
+
+def test_locale_prefers_the_stored_choice_over_a_static_lang_attribute(client):
+    # The stand bug: Airflow's served index.html carries a hardcoded lang="en" that never
+    # changes when the user switches language, while i18next persists the real choice in
+    # localStorage. Reading the attribute first pinned the plugin to English on a Russian
+    # stand, so localeSignals must list the stored choice BEFORE the attribute.
+    html = client.get("/").text
+    assert "localeSignals" in html
+    body = html[
+        html.index("function localeSignals") : html.index("function detectLocale")
+    ]
+    assert body.index("i18nextLng") < body.index('getAttribute("lang")'), (
+        "the stored i18next choice must outrank the parent's <html lang> attribute"
+    )
+    # And the startup race is covered: the parent may write the language after we boot.
+    assert "catchLateLocale" in html
+    assert "syncFromParent" in html and 'addEventListener("storage"' in html
+
+
+def test_kpi_title_shrinks_to_stay_on_one_line(client):
+    # The title must shrink rather than wrap: wrapping strands the "all" chip beside a
+    # two-line block and reads as unrelated content. CSS pins it to one line; fitKpiLabels
+    # scales it down to fit and re-runs on resize so it grows back when there is room.
+    html = client.get("/").text
+    assert "label-text" in html
+    css = html[html.index(".kpi .label {") : html.index(".kpi .value {")]
+    assert "display: flex" in css and "flex-wrap: nowrap" in css
+    assert "white-space: nowrap" in css  # the title itself may not wrap
+    assert (
+        "flex: 0 0 auto" in css
+    )  # badges keep their size instead of being pushed down
+    assert "fitKpiLabels" in html and "KPI_LABEL_MIN" in html
+    assert "refitKpiLabels" in html
+    assert 'addEventListener("resize", refitKpiLabels)' in html
+    # A wide enough card grid so shrinking never has to reach the floor and clip.
+    assert "minmax(190px, 1fr)" in html
