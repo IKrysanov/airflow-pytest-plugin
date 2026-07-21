@@ -242,6 +242,43 @@ def test_inline_script_is_syntactically_valid(client, tmp_path):
         assert result.returncode == 0, f"script #{i}: {result.stderr}"
 
 
+def test_i18n_locales_have_identical_keys(client, tmp_path):
+    # Every EN string must have an RU counterpart and vice-versa: a key present in one
+    # locale but not the other renders as a raw key (or blank) for half the users. Node
+    # evaluates the real I18N object rather than regex-scraping it, so multi-key lines and
+    # punctuation in values can't skew the comparison. Guards adds/removals of any string.
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node unavailable to evaluate the I18N object")
+    html = client.get("/").text
+    i = html.index("{", html.index("var I18N = "))
+    depth = 0
+    end = None
+    for j in range(i, len(html)):
+        if html[j] == "{":
+            depth += 1
+        elif html[j] == "}":
+            depth -= 1
+            if depth == 0:
+                end = j + 1
+                break
+    assert end is not None, "could not brace-match the I18N object"
+    script = tmp_path / "i18n.js"
+    script.write_text(
+        "const I18N = " + html[i:end] + ";\n"
+        "const en = Object.keys(I18N.en), ru = Object.keys(I18N.ru);\n"
+        "console.log(JSON.stringify({"
+        "  missing_in_ru: en.filter(k => !(k in I18N.ru)),"
+        "  missing_in_en: ru.filter(k => !(k in I18N.en))}));\n",
+        encoding="utf-8",
+    )
+    result = subprocess.run([node, str(script)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    diff = json.loads(result.stdout)
+    assert diff["missing_in_ru"] == [], f"EN keys with no RU: {diff['missing_in_ru']}"
+    assert diff["missing_in_en"] == [], f"RU keys with no EN: {diff['missing_in_en']}"
+
+
 def test_openapi_and_docs_serve(client):
     # The header's docs link opens these; future annotations once 500'd the schema.
     assert client.get("/api/docs").status_code == 200

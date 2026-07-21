@@ -65,9 +65,10 @@ class ReportSource(ABC):
     ) -> Iterator[bytes] | None:
         """The same zip as :meth:`allure_archive`, yielded in chunks, or ``None``.
 
-        For serving downloads: the archive is buffered to disk rather than held in RAM, so
-        peak memory stays flat no matter how large the results are or how many downloads
-        run at once. Optional; default unsupported.
+        For serving downloads: the zip is compressed straight into the response and
+        drained a chunk at a time -- never staged whole, on disk or in RAM -- so peak
+        memory stays flat no matter how large the results are or how many downloads run at
+        once. Optional; default unsupported.
         """
         return None
 

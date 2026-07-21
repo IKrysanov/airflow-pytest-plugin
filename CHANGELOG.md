@@ -22,8 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Allure downloads are streamed, not buffered in memory** — the endpoint built the whole zip
   in RAM per request, so a few concurrent downloads of a large results tree could exhaust the
   Airflow api-server the plugin runs inside. Measured on a 286 MB results dir: three parallel
-  downloads peaked at **1237 MB** before, **56 MB** after. The archive is now buffered to a temp
-  file and yielded in chunks (cleaned up even if the client disconnects mid-download).
+  downloads peaked at **1237 MB** before, **56 MB** after. The archive is now compressed straight
+  into the response and yielded in chunks — never staged whole, on disk or in RAM — and its open
+  file handles are released even if the client disconnects mid-download.
 
 ### Added
 - **Dashboard settings** — a ⚙ button in the header opens a panel picker for the main board:

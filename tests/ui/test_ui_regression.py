@@ -1155,6 +1155,21 @@ def _toggle(page, panel: str):
     page.wait_for_timeout(150)
 
 
+def test_settings_dialog_raises_the_shared_dim(dash):
+    # The settings modal must lift the one shared full-screen overlay, like every other
+    # dialog -- else, embedded in Airflow, the iframe is never raised and clicks on the
+    # switches fall THROUGH onto the Airflow chrome. Regression: #settings was missing from
+    # updateParentDim()'s open-dialog list.
+    page = dash.page
+    expect(page.locator("#apx-local-dim")).to_have_count(0)
+    _open_settings(page)
+    expect(page.locator("#apx-local-dim")).to_have_count(1)  # settings raised the dim
+    page.click("#settings-close")
+    expect(page.locator("dialog#settings")).to_be_hidden()
+    expect(page.locator("#apx-local-dim")).to_have_count(0)  # and released it on close
+    assert dash.errors == []
+
+
 def test_settings_dialog_defaults_to_every_panel_on(dash):
     page = dash.page
     _open_settings(page)

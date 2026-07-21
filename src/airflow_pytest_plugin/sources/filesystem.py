@@ -459,13 +459,14 @@ class FileSystemReportSource(ReportSource):
     def allure_stream(
         self, ref: ReportRef, *, chunk_size: int = 65536
     ) -> Iterator[bytes] | None:
-        """Stream the run's Allure zip, buffering to a temp FILE instead of RAM.
+        """Stream the run's Allure zip, compressed straight into the response, not built in RAM.
 
         The in-memory :meth:`allure_archive` holds the whole archive per request, so a few
         concurrent downloads of a large results tree multiply into gigabytes inside the
-        Airflow api-server -- which serves the rest of Airflow too. Building on disk and
-        yielding chunks keeps peak memory flat and independent of both the archive size and
-        the number of downloads in flight.
+        Airflow api-server -- which serves the rest of Airflow too. Compressing into a
+        drained sink and yielding chunks (never a temp file -- see :meth:`_zip_chunks`) keeps
+        peak memory flat and independent of both the archive size and the number of downloads
+        in flight.
         """
         report_dir = self._safe_dir(ref)
         if report_dir is None:

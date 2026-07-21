@@ -1356,7 +1356,6 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       settingsChart: "Recent runs", settingsRel: "Reliability", settingsFlaky: "Flaky tests",
       settingsOn: "shown", settingsOff: "hidden",
       settingsAllOff: "Every panel is hidden — the run list is still below.",
-      settingsClose: "Done",
       kpiInfoAl: "How this is computed",
       uniqueInfoTitle: "Unique tests",
       uniqueInfoBody: "Distinct pytest node ids across the runs currently in view, so the "
@@ -1513,7 +1512,6 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       settingsFlaky: "Нестабильные тесты",
       settingsOn: "показана", settingsOff: "скрыта",
       settingsAllOff: "Все панели скрыты — список прогонов ниже остаётся.",
-      settingsClose: "Готово",
       kpiInfoAl: "Как это считается",
       uniqueInfoTitle: "Уникальные тесты",
       uniqueInfoBody: "Различные node id тестов среди прогонов, попавших в текущую выборку: "
@@ -4011,13 +4009,17 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     }
   }
   function updateParentDim() {
+    // The settings dialog is wired inside its own IIFE, so its local is out of scope here --
+    // read it fresh by id. A modal missing from this list won't lift the iframe when embedded
+    // in Airflow, and clicks then fall THROUGH the un-lifted iframe onto the Airflow chrome.
+    var settingsDlg = document.getElementById("settings");
     var anyOpen = (dlg && dlg.open) || (confirmDlg && confirmDlg.open)
       || (failuresDlg && failuresDlg.open) || (compareDlg && compareDlg.open)
       || (flakyDlg && flakyDlg.open) || (historyDlg && historyDlg.open)
       || (uniqueDlg && uniqueDlg.open) || (slowDlg && slowDlg.open)
       || (heatmapDlg && heatmapDlg.open) || (relInfoDlg && relInfoDlg.open)
       || (panelInfoDlg && panelInfoDlg.open) || (emailDlg && emailDlg.open)
-      || (alertsDlg && alertsDlg.open);
+      || (alertsDlg && alertsDlg.open) || (settingsDlg && settingsDlg.open);
     setLocalDim(anyOpen);   // dim our own page/iframe once
     setParentDim(anyOpen);  // and, embedded, the Airflow chrome around the iframe
   }
