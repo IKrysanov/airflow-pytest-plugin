@@ -22,6 +22,12 @@ results in the **Airflow 3** web UI.
 | [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff) | Linted & formatted with Ruff |
 | [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/IKrysanov/airflow-pytest-plugin/badge)](https://scorecard.dev/viewer/?uri=github.com/IKrysanov/airflow-pytest-plugin) | OpenSSF supply-chain security score |
 
+![Trigger two pytest DAGs in Airflow, then browse their results in the Pytest Reports plugin](https://raw.githubusercontent.com/IKrysanov/airflow-pytest-plugin/main/docs/demo.webp)
+
+*Trigger two suites from Airflow, then open **Pytest Reports** in the same sidebar: the runs
+you just started are at the top of the list, next to their history — with per-test detail,
+flaky tests, a test×run heatmap and failures clustered by error.*
+
 The operator runs a `pytest` suite as an Airflow task and parses the JUnit
 report into a structured result. This plugin archives each of those reports —
 keyed by `dag_id / run_id / task_id / try` — and serves a small web UI to browse
@@ -63,9 +69,17 @@ search and a quarantined-only toggle), KPI cards (including a clickable **unique
 tests** count), and Airflow-matched colours and font. The run list is **grouped by
 dag·task** by default (a checkbox toggles the flat list) — collapsible groups with
 run count, pass-rate, average duration and last status, each sortable on its own;
-select a whole group to chart its trend:
+select a whole group to chart its trend. The ⚙ button in the header opens **dashboard
+settings**, where each main-board panel (*Recent runs*, *Reliability*, *Flaky tests*) can be
+switched off — it is then not rendered at all, and the choice is remembered in your browser
+across reloads. Everything is on by default and the run list is never affected:
 
 ![Pytest Reports — overview](https://raw.githubusercontent.com/IKrysanov/airflow-pytest-plugin/main/docs/screenshots/overview.png)
+
+**Dashboard settings** — switch any main-board panel off and it is not rendered at all; the
+choice is remembered in your browser across reloads:
+
+![Pytest Reports — dashboard settings](https://raw.githubusercontent.com/IKrysanov/airflow-pytest-plugin/main/docs/screenshots/settings.png)
 
 **A single run** — a clickable success donut (pass-rate over the test count;
 click a slice to filter by status), a **coverage** card next to the duration (when the

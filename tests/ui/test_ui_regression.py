@@ -1133,3 +1133,283 @@ def test_locale_follows_the_parent_choice_over_a_stale_lang_attribute(page, base
     labels = page.locator(".kpi .label-text").all_inner_texts()
     assert any("ПРОГОНОВ" in x.upper() for x in labels), labels
     page.evaluate("() => localStorage.removeItem('i18nextLng')")
+
+
+# --- dashboard settings: per-panel visibility ---------------------------------------------
+_PANEL_CARD = {
+    "chart": "#chart-card",
+    "reliability": "#pentagon-card",
+    "flaky": "#flaky-card",
+}
+
+
+def _open_settings(page):
+    page.click("#settings-btn")
+    expect(page.locator("dialog#settings")).to_be_visible()
+
+
+def _toggle(page, panel: str):
+    # Click the ROW, not the input: the checkbox is visually replaced by the drawn track,
+    # so the <label> row is both the real hit area (>=44px) and what a user actually presses.
+    page.locator(f'#settings .set-row:has(input[data-panel="{panel}"])').click()
+    page.wait_for_timeout(150)
+
+
+def test_settings_dialog_raises_the_shared_dim(dash):
+    # The settings modal must lift the one shared full-screen overlay, like every other
+    # dialog -- else, embedded in Airflow, the iframe is never raised and clicks on the
+    # switches fall THROUGH onto the Airflow chrome. Regression: #settings was missing from
+    # updateParentDim()'s open-dialog list.
+    page = dash.page
+    expect(page.locator("#apx-local-dim")).to_have_count(0)
+    _open_settings(page)
+    expect(page.locator("#apx-local-dim")).to_have_count(1)  # settings raised the dim
+    page.click("#settings-close")
+    expect(page.locator("dialog#settings")).to_be_hidden()
+    expect(page.locator("#apx-local-dim")).to_have_count(0)  # and released it on close
+    assert dash.errors == []
+
+
+def test_settings_dialog_defaults_to_every_panel_on(dash):
+    page = dash.page
+    _open_settings(page)
+    boxes = page.locator("#settings input[data-panel]")
+    assert boxes.count() == 3
+    for i in range(3):
+        assert boxes.nth(i).is_checked(), (
+            "a panel is off before the user touched anything"
+        )
+        assert boxes.nth(i).get_attribute("role") == "switch"
+    # Every panel really is on the board.
+    for sel in _PANEL_CARD.values():
+        expect(page.locator(sel)).to_be_visible()
+    assert dash.errors == []
+
+
+def test_turning_a_panel_off_removes_it_from_the_board(dash):
+    page = dash.page
+    _open_settings(page)
+    for panel, sel in _PANEL_CARD.items():
+        _toggle(page, panel)
+        expect(page.locator(sel)).to_be_hidden()
+    # Both rows collapse so no empty gap is left where the panels were...
+    expect(page.locator("#board")).to_be_hidden()
+    expect(page.locator("#board2")).to_be_hidden()
+    # ...and the run list below is untouched, so the page is still useful.
+    expect(page.locator("#list tr").first).to_be_visible()
+    assert dash.errors == []
+
+
+def test_settings_card_is_titled_settings_with_a_dashboard_subsection(dash):
+    # The card is "Settings" (it used to be titled "Dashboard"); the board panels now live
+    # under a Dashboard *subsection*, leaving room for further settings areas beside it.
+    page = dash.page
+    _open_settings(page)
+    assert (page.locator("#settings-title").inner_text() or "").strip() == "Settings"
+    assert (page.locator("#set-dash-lbl").inner_text() or "").strip() == "Dashboard"
+    # The panels group and its switches are nested inside that section, not loose in the body.
+    expect(page.locator("#settings .set-section #set-panels-lbl")).to_have_count(1)
+    expect(page.locator("#settings .set-section input[data-panel]")).to_have_count(3)
+    assert dash.errors == []
+
+
+def test_settings_info_opens_over_the_settings_card(dash):
+    # An ⓘ beside the title explains what settings are; it opens ON TOP of the (modal)
+    # settings card, and closing it returns to that card rather than dismissing both.
+    page = dash.page
+    _open_settings(page)
+    page.click("#settings-info")
+    expect(page.locator("dialog#panel-info")).to_be_visible()
+    assert (page.locator("#panel-info-title").inner_text() or "").strip() == "Settings"
+    body = (page.locator("#panel-info-body").inner_text() or "").lower()
+    assert "browser" in body  # says it is a per-browser preference, not a permission
+    page.click("#panel-info-close")
+    expect(page.locator("dialog#panel-info")).to_be_hidden()
+    expect(
+        page.locator("dialog#settings")
+    ).to_be_visible()  # settings still open underneath
+    assert dash.errors == []
+
+
+def test_hidden_panels_stay_hidden_across_every_list_page(large_dash):
+    # The seed is 40 dags x 80 runs = 3200 runs. Ungrouped that is 32 pages of 100, so this
+    # exercises the real question: does an off switch hold on EVERY page? Paging re-renders
+    # the list, and the async flaky fetch lands mid-session -- neither may resurrect a panel.
+    page = large_dash.page
+    page.uncheck("#list-grp")  # flat list -> real pagination over 3200 runs
+    page.wait_for_timeout(200)
+    _open_settings(page)
+    for panel in ("chart", "reliability", "flaky"):
+        _toggle(page, panel)
+    page.click("#settings-close")
+    expect(page.locator("dialog#settings")).to_be_hidden()
+    for sel in _PANEL_CARD.values():
+        expect(page.locator(sel)).to_be_hidden()
+
+    pages_walked = 0
+    for _ in range(8):
+        nxt = page.locator("#pg-next")
+        if nxt.count() == 0 or nxt.is_disabled():
+            break
+        nxt.click()
+        page.wait_for_timeout(150)
+        pages_walked += 1
+        for sel in _PANEL_CARD.values():
+            expect(page.locator(sel)).to_be_hidden()
+        # The rows that held them collapse too, so no empty gap rides along page to page.
+        expect(page.locator("#board")).to_be_hidden()
+        expect(page.locator("#board2")).to_be_hidden()
+        expect(page.locator("#list tr").first).to_be_visible()  # list still rendering
+    assert pages_walked >= 5, (
+        f"expected to page through the list, walked {pages_walked}"
+    )
+    assert large_dash.errors == []
+
+
+def test_hidden_panels_stay_hidden_after_a_reload(dash):
+    # The whole point of the setting: a reload must not bring a dismissed panel back.
+    page = dash.page
+    _open_settings(page)
+    _toggle(page, "chart")
+    _toggle(page, "flaky")
+    page.reload()
+    page.wait_for_selector("#kpis .kpi")
+    page.wait_for_timeout(400)
+    expect(page.locator("#chart-card")).to_be_hidden()
+    expect(page.locator("#flaky-card")).to_be_hidden()
+    expect(
+        page.locator("#pentagon-card")
+    ).to_be_visible()  # untouched panel is unaffected
+    # The switches reopen reflecting the stored state, not the defaults.
+    _open_settings(page)
+    assert page.locator('#settings input[data-panel="chart"]').is_checked() is False
+    assert page.locator('#settings input[data-panel="flaky"]').is_checked() is False
+    assert (
+        page.locator('#settings input[data-panel="reliability"]').is_checked() is True
+    )
+
+
+def test_turning_a_panel_back_on_restores_it(dash):
+    # A veto-only pass could hide but never restore; switching back must bring the panel back.
+    page = dash.page
+    _open_settings(page)
+    _toggle(page, "chart")
+    expect(page.locator("#chart-card")).to_be_hidden()
+    _toggle(page, "chart")
+    expect(page.locator("#chart-card")).to_be_visible()
+    expect(page.locator("#board")).to_be_visible()
+    expect(
+        page.locator(".chart-bars .bar").first
+    ).to_be_visible()  # and it really redrew
+    assert dash.errors == []
+
+
+def test_settings_switch_is_keyboard_operable(dash):
+    # The switch is a real checkbox behind the drawn track, so Space must toggle it.
+    page = dash.page
+    _open_settings(page)
+    box = page.locator('#settings input[data-panel="reliability"]')
+    box.focus()
+    page.keyboard.press(" ")
+    page.wait_for_timeout(200)
+    assert box.is_checked() is False
+    expect(page.locator("#pentagon-card")).to_be_hidden()
+    page.keyboard.press(" ")
+    page.wait_for_timeout(200)
+    expect(page.locator("#pentagon-card")).to_be_visible()
+    assert dash.errors == []
+
+
+def test_settings_state_is_spelled_out_next_to_each_switch(dash):
+    # Knob position + colour alone would encode the state visually only; a word makes it
+    # readable for colour-blind users and gives AT something concrete to announce.
+    page = dash.page
+    _open_settings(page)
+    first = page.locator("#settings .set-row").first
+    shown = first.locator(".set-state").inner_text().strip()
+    assert shown != ""
+    _toggle(page, "chart")
+    hidden = first.locator(".set-state").inner_text().strip()
+    assert hidden != shown, "the state word did not change with the switch"
+
+
+def test_corrupt_stored_prefs_fall_back_to_everything_on(dash):
+    # A hand-edited or truncated value must not leave the board blank.
+    page = dash.page
+    page.evaluate("() => localStorage.setItem('apx.panels', '{not json')")
+    page.reload()
+    page.wait_for_selector("#kpis .kpi")
+    page.wait_for_timeout(400)
+    for sel in _PANEL_CARD.values():
+        expect(page.locator(sel)).to_be_visible()
+    page.evaluate("() => localStorage.removeItem('apx.panels')")
+
+
+def test_settings_hold_up_on_a_large_board(large_dash):
+    # 3200 runs / 40 groups: the switches must behave the same as on a small board, and the
+    # heavy chart must actually come back intact after being switched off and on.
+    page = large_dash.page
+    _open_settings(page)
+    for panel, sel in _PANEL_CARD.items():
+        _toggle(page, panel)
+        expect(page.locator(sel)).to_be_hidden()
+    expect(page.locator("#board")).to_be_hidden()
+    expect(page.locator("#board2")).to_be_hidden()
+    expect(page.locator("#list tr").first).to_be_visible()  # the list still works
+    for panel, sel in _PANEL_CARD.items():
+        _toggle(page, panel)
+        expect(page.locator(sel)).to_be_visible()
+    page.wait_for_timeout(500)
+    assert page.locator(".chart-bars .bar").count() > 100, (
+        "the chart did not redraw in full"
+    )
+    assert large_dash.errors == []
+
+
+def test_a_switched_off_panel_costs_nothing_to_render(large_dash):
+    # Hiding the card alone would still pay to build it on every re-render -- exactly what
+    # someone turning a panel off on a heavy board is trying to avoid. Off must mean the
+    # DOM is released, not merely invisible.
+    page = large_dash.page
+    page.wait_for_timeout(600)
+    before = page.evaluate(
+        "() => ({chart: document.querySelectorAll('#chart *').length,"
+        " radar: document.querySelectorAll('#pentagon *').length,"
+        " flaky: document.querySelectorAll('#flaky-list *').length})"
+    )
+    assert before["chart"] > 500, f"expected a heavy chart to begin with, got {before}"
+
+    _open_settings(page)
+    for panel in _PANEL_CARD:
+        _toggle(page, panel)
+    page.wait_for_timeout(600)
+    after = page.evaluate(
+        "() => ({chart: document.querySelectorAll('#chart *').length,"
+        " radar: document.querySelectorAll('#pentagon *').length,"
+        " flaky: document.querySelectorAll('#flaky-list *').length,"
+        " body: document.querySelectorAll('body *').length})"
+    )
+    assert after["chart"] == 0 and after["radar"] == 0 and after["flaky"] == 0, after
+    # And re-rendering (a filter change) must not quietly rebuild them again.
+    page.fill("#f-dag", "d0")
+    page.wait_for_timeout(600)
+    still = page.evaluate("() => document.querySelectorAll('#chart *').length")
+    assert still == 0, f"the chart was rebuilt for a hidden panel: {still} nodes"
+    assert large_dash.errors == []
+
+
+def test_panel_prefs_follow_a_change_made_in_another_tab(dash, base_url):
+    # localStorage is shared across this origin's tabs, so a change in one must not leave
+    # another dashboard showing panels it no longer has.
+    page = dash.page
+    expect(page.locator("#chart-card")).to_be_visible()
+    other = page.context.new_page()
+    try:
+        other.goto(base_url)
+        other.wait_for_selector("#kpis .kpi")
+        other.click("#settings-btn")
+        other.locator('#settings .set-row:has(input[data-panel="chart"])').click()
+        other.wait_for_timeout(300)
+        expect(page.locator("#chart-card")).to_be_hidden(timeout=5000)
+    finally:
+        other.close()

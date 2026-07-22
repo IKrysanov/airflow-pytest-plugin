@@ -33,14 +33,14 @@ with DAG(
     schedule=None,
     start_date=pendulum.datetime(2026, 1, 1, tz="UTC"),
     catchup=False,
-    tags=["pytest", "example"],
+    tags=["pytest", "example", "plugin"],
 ):
     PytestOperator(
         task_id="run_tests",
         test_path="tests/",
         # report_root defaults to AIRFLOW_PYTEST_REPORTS_ROOT / the
         # [pytest_reports] reports_root config / /opt/airflow/pytest-reports.
-        parser=ArchivingResultParser(allure=False, email=True),
+        parser=ArchivingResultParser(allure=False, email=True, coverage=True),
         # Tests failing should not abort the pipeline here; the outcome is in
         # XCom and in the reports UI either way.
         fail_on_test_failure=False,

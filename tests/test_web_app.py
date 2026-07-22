@@ -242,6 +242,43 @@ def test_inline_script_is_syntactically_valid(client, tmp_path):
         assert result.returncode == 0, f"script #{i}: {result.stderr}"
 
 
+def test_i18n_locales_have_identical_keys(client, tmp_path):
+    # Every EN string must have an RU counterpart and vice-versa: a key present in one
+    # locale but not the other renders as a raw key (or blank) for half the users. Node
+    # evaluates the real I18N object rather than regex-scraping it, so multi-key lines and
+    # punctuation in values can't skew the comparison. Guards adds/removals of any string.
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node unavailable to evaluate the I18N object")
+    html = client.get("/").text
+    i = html.index("{", html.index("var I18N = "))
+    depth = 0
+    end = None
+    for j in range(i, len(html)):
+        if html[j] == "{":
+            depth += 1
+        elif html[j] == "}":
+            depth -= 1
+            if depth == 0:
+                end = j + 1
+                break
+    assert end is not None, "could not brace-match the I18N object"
+    script = tmp_path / "i18n.js"
+    script.write_text(
+        "const I18N = " + html[i:end] + ";\n"
+        "const en = Object.keys(I18N.en), ru = Object.keys(I18N.ru);\n"
+        "console.log(JSON.stringify({"
+        "  missing_in_ru: en.filter(k => !(k in I18N.ru)),"
+        "  missing_in_en: ru.filter(k => !(k in I18N.en))}));\n",
+        encoding="utf-8",
+    )
+    result = subprocess.run([node, str(script)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    diff = json.loads(result.stdout)
+    assert diff["missing_in_ru"] == [], f"EN keys with no RU: {diff['missing_in_ru']}"
+    assert diff["missing_in_en"] == [], f"RU keys with no EN: {diff['missing_in_en']}"
+
+
 def test_openapi_and_docs_serve(client):
     # The header's docs link opens these; future annotations once 500'd the schema.
     assert client.get("/api/docs").status_code == 200
@@ -2239,3 +2276,75 @@ def test_kpi_title_shrinks_to_stay_on_one_line(client):
     assert 'addEventListener("resize", refitKpiLabels)' in html
     # A wide enough card grid so shrinking never has to reach the floor and clip.
     assert "minmax(190px, 1fr)" in html
+
+
+def test_index_ships_the_dashboard_settings(client):
+    # The settings live entirely in the shipped page: guard the entry point, the three
+    # switches, the persistence key, and that every string exists in BOTH dictionaries.
+    html = client.get("/").text
+    assert 'id="settings-btn"' in html and 'id="settings"' in html
+    for panel in ("chart", "reliability", "flaky"):
+        assert f'data-panel="{panel}"' in html, panel
+    assert 'role="switch"' in html  # real switch semantics, not a styled div
+    assert (
+        "apx.panels" in html and "loadPanelPrefs" in html and "savePanelPrefs" in html
+    )
+    # Defaults are on, and a corrupt value must not blank the board.
+    assert "{ chart: true, reliability: true, flaky: true }" in html
+    for key in (
+        "settingsTitle",
+        "settingsChart",
+        "settingsRel",
+        "settingsFlaky",
+        "settingsOn",
+        "settingsOff",
+        "settingsAl",
+    ):
+        assert html.count(key) >= 2, f"{key} is missing from one of the locales"
+
+
+def test_allure_download_is_streamed_not_buffered(reports_root):
+    # The plugin runs inside Airflow's api-server, so holding a whole archive per request
+    # let a few concurrent downloads of a large results tree exhaust the process that
+    # serves the rest of Airflow. The route must stream.
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref)
+    write_allure(reports_root, ref, {f"r{i}-result.json": "{}" for i in range(30)})
+    c = TestClient(make_app(reports_root))
+    tok = ReportRef("dag", "run", "task", 1, -1).token
+    r = c.get(f"/api/reports/{tok}/allure.zip")
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "application/zip"
+    assert "allure-results.zip" in r.headers["content-disposition"]
+    # Streamed responses carry no precomputed Content-Length (the body was never fully
+    # materialised); a buffered Response would have set one.
+    assert "content-length" not in {k.lower() for k in r.headers}
+    import io
+    import zipfile
+
+    zf = zipfile.ZipFile(io.BytesIO(r.content))
+    assert zf.testzip() is None and len(zf.namelist()) == 30
+
+
+def test_allure_download_falls_back_for_a_source_without_streaming(reports_root):
+    # allure_stream is optional on ReportSource; a custom source that only implements the
+    # in-memory archive must still serve downloads.
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref)
+    write_allure(reports_root, ref)
+
+    class NoStream(FileSystemReportSource):
+        def allure_stream(self, ref, *, chunk_size=65536):
+            return None
+
+    c = TestClient(
+        create_app(
+            NoStream(report_root=reports_root),
+            authorizer=lambda d, u: True,
+            read_authorizer=lambda d, u: True,
+            user_dependency=lambda: _TEST_USER,
+        )
+    )
+    tok = ReportRef("dag", "run", "task", 1, -1).token
+    r = c.get(f"/api/reports/{tok}/allure.zip")
+    assert r.status_code == 200 and r.content[:2] == b"PK"

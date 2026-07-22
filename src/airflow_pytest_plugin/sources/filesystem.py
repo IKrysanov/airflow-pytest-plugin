@@ -22,12 +22,14 @@ import logging
 import math
 import os
 import shutil
+import stat
 import threading
 import time
 import uuid
 import zipfile
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 from airflow_pytest_operator import JUnitResultParser
 
@@ -55,6 +57,81 @@ _log = logging.getLogger(__name__)
 
 #: Cap one case's captured output so a pathological report can't bloat a response.
 _MAX_OUTPUT = 16000
+
+
+class _ZipSink:
+    """A write-only file-like ``zipfile`` can target, drained as it fills.
+
+    Has no ``tell``/``seek``, so ``zipfile`` treats it as a non-seekable stream and emits
+    data descriptors instead of rewriting sizes into the local headers -- which is what
+    lets the archive be produced and sent without ever existing in full.
+    """
+
+    def __init__(self) -> None:
+        self.buf = bytearray()
+
+    def write(self, data: bytes) -> int:
+        self.buf += data
+        return len(data)
+
+    def flush(self) -> None:  # zipfile calls this on close
+        return None
+
+    def close(self) -> None:
+        # Nothing to release: the buffer is drained by the generator, and closing must not
+        # discard bytes zipfile has already written (the central directory lands here).
+        return None
+
+
+def _safe_allure_files(allure_dir: str) -> list[str]:
+    """Candidate entries under ``allure_dir``. Safety is enforced when each is OPENED.
+
+    Listing alone can't be trusted: results are written on the worker by arbitrary pytest
+    code, which can swap an entry between the check and the read. :func:`_open_allure_file`
+    is therefore the authority -- this only enumerates. ``os.walk`` does not descend into
+    symlinked directories, so a linked tree contributes nothing either way.
+    """
+    return [
+        os.path.join(base, name)
+        for base, _dirs, names in os.walk(allure_dir)
+        for name in names
+    ]
+
+
+def _open_allure_file(path: str) -> IO[bytes] | None:
+    """Open one Allure result for reading, or ``None`` if it isn't safe to.
+
+    Three hazards, all closed atomically at ``open`` rather than by a prior check that an
+    attacker could invalidate in between:
+
+    * ``O_NOFOLLOW`` -- a symlink is never followed, so a test cannot point an entry at the
+      Fernet key or ``/etc/passwd`` and have the reader package it up. This also removes the
+      swap-after-validation race entirely: there is no window to swap into.
+    * ``O_NONBLOCK`` + ``S_ISREG`` -- a FIFO would otherwise block ``open`` FOREVER waiting
+      for a writer, pinning a server thread per download; devices and sockets are refused
+      for the same reason. Non-blocking has no effect on the regular files we keep.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError:  # symlink (ELOOP), vanished, or unreadable
+        _log.warning(
+            "skipping Allure entry that is a link or unreadable: %s",
+            " ".join(str(path).split())[:200],
+        )
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            _log.warning(
+                "skipping non-regular Allure entry (fifo/device/socket): %s",
+                " ".join(str(path).split())[:200],
+            )
+            os.close(fd)
+            return None
+        return os.fdopen(fd, "rb")
+    except OSError:
+        os.close(fd)
+        return None
 
 
 class FileSystemReportSource(ReportSource):
@@ -351,11 +428,7 @@ class FileSystemReportSource(ReportSource):
         if report_dir is None:
             return None
         allure_dir = os.path.join(report_dir, ALLURE_DIRNAME)
-        files = [
-            os.path.join(base, name)
-            for base, _dirs, names in os.walk(allure_dir)
-            for name in names
-        ]
+        files = _safe_allure_files(allure_dir)
         if not files:
             return None
         # ``max_bytes`` (the email path) bounds peak memory: if raw results exceed the
@@ -364,7 +437,9 @@ class FileSystemReportSource(ReportSource):
             raw = 0
             for full in files:
                 try:
-                    raw += os.path.getsize(full)
+                    # lstat, not getsize: a symlink's own size, never its target's, so a
+                    # link to a huge file can't slip past the budget.
+                    raw += os.lstat(full).st_size
                 except OSError:  # a file vanished mid-walk; ignore it
                     continue
                 if raw > max_bytes:
@@ -372,8 +447,74 @@ class FileSystemReportSource(ReportSource):
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
             for full in files:
-                zf.write(full, os.path.relpath(full, allure_dir))
+                # Same guarantees as the streamed path: never follow a link, never open a
+                # fifo/device. zf.write() would do both, so read through our own handle.
+                src = _open_allure_file(full)
+                if src is None:
+                    continue
+                with src, zf.open(os.path.relpath(full, allure_dir), "w") as dest:
+                    shutil.copyfileobj(src, dest, 65536)
         return buf.getvalue()
+
+    def allure_stream(
+        self, ref: ReportRef, *, chunk_size: int = 65536
+    ) -> Iterator[bytes] | None:
+        """Stream the run's Allure zip, compressed straight into the response, not built in RAM.
+
+        The in-memory :meth:`allure_archive` holds the whole archive per request, so a few
+        concurrent downloads of a large results tree multiply into gigabytes inside the
+        Airflow api-server -- which serves the rest of Airflow too. Compressing into a
+        drained sink and yielding chunks (never a temp file -- see :meth:`_zip_chunks`) keeps
+        peak memory flat and independent of both the archive size and the number of downloads
+        in flight.
+        """
+        report_dir = self._safe_dir(ref)
+        if report_dir is None:
+            return None
+        allure_dir = os.path.join(report_dir, ALLURE_DIRNAME)
+        files = _safe_allure_files(allure_dir)
+        if not files:
+            return None
+        return self._zip_chunks(files, allure_dir, chunk_size)
+
+    @staticmethod
+    def _zip_chunks(
+        files: list[str], allure_dir: str, chunk_size: int
+    ) -> Iterator[bytes]:
+        """Compress straight into the response, holding at most a chunk or two at a time.
+
+        Deliberately NOT staged through a temp file: ``/tmp`` is a RAM-backed tmpfs on many
+        container images (and on a Kubernetes ``emptyDir: {medium: Memory}``), which would
+        quietly put the archive back in memory -- the very thing this avoids. ``zipfile``
+        accepts a write-only sink and switches to data descriptors for it, which every
+        mainstream unzip reads.
+        """
+        sink = _ZipSink()
+
+        def drain(final: bool = False) -> Iterator[bytes]:
+            while len(sink.buf) >= chunk_size or (final and sink.buf):
+                out = bytes(sink.buf[:chunk_size])
+                del sink.buf[:chunk_size]
+                yield out
+
+        with zipfile.ZipFile(sink, "w", zipfile.ZIP_DEFLATED) as zf:
+            for full in files:
+                arcname = os.path.relpath(full, allure_dir)
+                src = _open_allure_file(full)
+                if src is None:  # link, fifo/device, vanished mid-walk: skip it
+                    continue
+                # force_zip64: the member size is unknown when the header goes out, so
+                # zipfile would otherwise decide "no zip64" and then raise past ~2 GiB --
+                # mid-stream, after bytes are already on the wire. Costs 20 bytes/entry.
+                with src, zf.open(arcname, "w", force_zip64=True) as dest:
+                    while True:
+                        piece = src.read(chunk_size)
+                        if not piece:
+                            break
+                        dest.write(piece)
+                        yield from drain()  # keep the sink from growing with the file
+                yield from drain()
+        yield from drain(final=True)  # the central directory written on close
 
     @staticmethod
     def _prune_empty_parents(start: str, root: str) -> None:

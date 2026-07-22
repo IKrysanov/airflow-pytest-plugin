@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
 from typing import Any
 
 from ..models import ReportDetail, ReportRef, ReportSummary
@@ -53,6 +54,21 @@ class ReportSource(ABC):
         ``max_bytes`` bounds peak memory: when set, a raw-results tree larger than the
         budget yields ``None`` instead of building a huge zip in RAM (the email path uses
         this). Optional; default unsupported. Feeds export to Allure TestOps.
+
+        Prefer :meth:`allure_stream` for downloads -- this one holds the whole archive in
+        memory, which does not scale to several concurrent requests.
+        """
+        return None
+
+    def allure_stream(
+        self, ref: ReportRef, *, chunk_size: int = 65536
+    ) -> Iterator[bytes] | None:
+        """The same zip as :meth:`allure_archive`, yielded in chunks, or ``None``.
+
+        For serving downloads: the zip is compressed straight into the response and
+        drained a chunk at a time -- never staged whole, on disk or in RAM -- so peak
+        memory stays flat no matter how large the results are or how many downloads run at
+        once. Optional; default unsupported.
         """
         return None
 

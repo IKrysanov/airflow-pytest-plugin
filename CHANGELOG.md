@@ -5,7 +5,44 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.6.2] - 2026-07-23
+
+### Changed
+- **Settings** — the card is now titled *Settings* (was *Dashboard*) with the board switches
+  under a **Dashboard** subsection, an ⓘ beside the title explaining what settings do and that
+  they are per-browser, and the header's icon buttons take the same 36px height as their
+  neighbours instead of sitting 4px shorter.
+
+### Security
+- **Allure archives only ever read regular files, and never follow a link** — results are
+  written on the worker by arbitrary pytest code, so a test could drop
+  `allure-results/x-result.json -> /opt/airflow/airflow.cfg` and have the reader package it up
+  for anyone allowed to download the run, or mail it as an attachment. Entries are now opened
+  with `O_NOFOLLOW` and must be regular files, which closes three failure modes at once:
+  symlink escape, swapping an entry for a link *after* it was checked (there is no window
+  left), and a **named pipe, whose `open()` blocks forever** and would pin a server thread per
+  download. Skipped entries are logged. Applies to the download and the email attachment alike.
+- **A member larger than ~2 GiB no longer breaks the download mid-stream** — the size is
+  unknown when its header goes out, so `zipfile` assumed "no ZIP64" and then raised past the
+  limit, after bytes were already on the wire. Entries are written ZIP64-ready.
+- **Allure downloads are streamed, not buffered in memory** — the endpoint built the whole zip
+  in RAM per request, so a few concurrent downloads of a large results tree could exhaust the
+  Airflow api-server the plugin runs inside. Measured on a 286 MB results dir: three parallel
+  downloads peaked at **1237 MB** before, **56 MB** after. The archive is now compressed straight
+  into the response and yielded in chunks — never staged whole, on disk or in RAM — and its open
+  file handles are released even if the client disconnects mid-download.
+
+### Added
+- **Dashboard settings** — a ⚙ button in the header opens a panel picker for the main board:
+  *Recent runs*, *Reliability* and *Flaky tests* each get a switch. A panel switched off is not
+  rendered at all (not merely collapsed), its row closes up so no gap is left, and the choice is
+  remembered in the browser — a reload will not bring a dismissed panel back. Everything is on by
+  default, the run list below is never affected, and a corrupt stored value falls back to all-on
+  rather than a blank board. Switches are real checkboxes (keyboard- and screen-reader-operable)
+  and each spells its state out in words next to the track. **Off costs nothing:** the panel's
+  DOM is released rather than merely hidden, so it is not rebuilt on every filter change — on a
+  3200-run board that takes the page from ~8700 nodes to ~1500. A change made in another tab is
+  picked up here too, so two open dashboards don't disagree about which panels exist.
 
 ## [0.6.1] - 2026-07-20
 
@@ -444,7 +481,8 @@ the Airflow 3 web UI.
 - CI/CD: lint, type-check, unit (py3.10–3.13) + Airflow 3 integration matrices,
   CodeQL, OpenSSF Scorecard, DCO, and Trusted-Publishing release workflows.
 
-[Unreleased]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.6.2...HEAD
+[0.6.2]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.4.0...v0.5.0

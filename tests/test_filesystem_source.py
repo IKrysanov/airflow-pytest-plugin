@@ -640,6 +640,83 @@ def test_base_record_coverage_default_false():
     assert _Min().record_coverage(ReportRef("d", "r", "t", 1), 0.9) is False
 
 
+def _big_junit(n_cases: int, out_bytes: int = 0) -> str:
+    """A JUnit document with ``n_cases`` failing cases, each carrying ``out_bytes`` of log."""
+    blob = "X" * out_bytes
+    body = "".join(
+        f'<testcase classname="m.mod{i % 20}" name="test_{i:05d}" time="0.01">'
+        f'<failure message="boom {i}">trace {i}</failure>'
+        f"<system-out>{blob}</system-out></testcase>"
+        for i in range(n_cases)
+    )
+    return f'<testsuite tests="{n_cases}" failures="{n_cases}">{body}</testsuite>'
+
+
+def test_case_outputs_reads_every_junit_shape(reports_root):
+    # The streamed reader replaced a tree walk that had a dedicated branch for the
+    # <testsuites> wrapper. Pin the shapes pytest actually emits so the rewrite can't quietly
+    # start missing cases: multi-suite, a <properties> block before the cases, an empty suite,
+    # every outcome element, both captured streams, truncation, and whitespace-only bodies.
+    from airflow_pytest_plugin.sources.filesystem import _MAX_OUTPUT
+
+    def outputs_for(name, xml):
+        ref = ReportRef("d", name, "t", 1, -1)
+        write_report_xml(reports_root, ref, xml)
+        return FileSystemReportSource._case_outputs(
+            ReportLayout().report_path(reports_root, ref)
+        )
+
+    single = outputs_for(
+        "single",
+        '<testsuite><testcase classname="a" name="p"/>'
+        '<testcase classname="a" name="f"><failure message="MF">TF</failure></testcase>'
+        '<testcase classname="a" name="e"><error message="ME">TE</error></testcase>'
+        '<testcase classname="a" name="s"><skipped message="MS"/></testcase>'
+        '<testcase classname="a" name="o"><system-out>OUT</system-out>'
+        "<system-err>ERR</system-err></testcase></testsuite>",
+    )
+    assert ("a", "p") not in single  # a clean pass carries no output
+    assert single[("a", "f")] == "MF\nTF"
+    assert single[("a", "e")] == "ME\nTE"
+    assert single[("a", "s")] == "MS"
+    assert single[("a", "o")] == (
+        "--- Captured stdout / log ---\nOUT\n\n--- Captured stderr ---\nERR"
+    )
+
+    multi = outputs_for(
+        "multi",
+        '<testsuites><testsuite name="s1"><properties>'
+        '<property name="x" value="1"/></properties>'
+        '<testcase classname="p1" name="t1"><failure message="F1">B1</failure></testcase>'
+        '</testsuite><testsuite name="s2">'
+        '<testcase classname="p2" name="t2"><system-out>O2</system-out></testcase>'
+        "</testsuite></testsuites>",
+    )
+    assert multi == {
+        ("p1", "t1"): "F1\nB1",
+        ("p2", "t2"): "--- Captured stdout / log ---\nO2",
+    }
+
+    assert outputs_for("empty", "<testsuite/>") == {}
+    # Whitespace-only bodies are not output at all (they'd render as a blank panel).
+    assert (
+        outputs_for(
+            "blank",
+            '<testsuite><testcase classname="c" name="w">'
+            '<failure message="  ">   </failure></testcase></testsuite>',
+        )
+        == {}
+    )
+    big = outputs_for(
+        "big",
+        '<testsuite><testcase classname="c" name="b"><system-out>'
+        + ("Z" * (_MAX_OUTPUT + 500))
+        + "</system-out></testcase></testsuite>",
+    )
+    assert big[("c", "b")].endswith("…(truncated)")
+    assert len(big[("c", "b")]) < _MAX_OUTPUT + 100  # one case can't flood the response
+
+
 def test_record_coverage_refuses_traversal_token(tmp_path):
     # record_coverage is a WRITE triggered by a GET on an attacker-controlled token; its
     # _safe_dir guard must refuse a `..`/`.` traversal and write nothing outside the root.
@@ -707,3 +784,273 @@ def test_record_coverage_overwrites_in_place(reports_root):
         open(meta_path, encoding="utf-8").read()
     )  # still valid JSON object
     assert meta["coverage"] == 0.9
+
+
+# --- streamed Allure download ------------------------------------------------------------
+def test_allure_stream_matches_the_in_memory_archive(reports_root):
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref)
+    allure_dir = write_allure(reports_root, ref, {"a-result.json": '{"x":1}'})
+    # A sub-directory too: Allure writes attachments alongside results, and the archive
+    # must keep that structure rather than flattening it.
+    os.makedirs(os.path.join(allure_dir, "nested"), exist_ok=True)
+    with open(
+        os.path.join(allure_dir, "nested", "b.json"), "w", encoding="utf-8"
+    ) as fh:
+        fh.write("{}")
+    src = FileSystemReportSource(report_root=reports_root)
+
+    streamed = b"".join(src.allure_stream(ref))
+    import io
+    import zipfile
+
+    zf = zipfile.ZipFile(io.BytesIO(streamed))
+    assert zf.testzip() is None
+    names = set(zf.namelist())
+    assert "a-result.json" in names
+    assert any(n.endswith("b.json") for n in names)  # nested entries survive
+    # Same content as the in-memory path (zip metadata may differ, the payload may not).
+    mem = zipfile.ZipFile(io.BytesIO(src.allure_archive(ref)))
+    assert {n: mem.read(n) for n in mem.namelist()} == {n: zf.read(n) for n in names}
+
+
+def test_allure_stream_is_none_without_results(reports_root):
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref)
+    src = FileSystemReportSource(report_root=reports_root)
+    assert src.allure_stream(ref) is None
+
+
+def test_allure_stream_uses_no_temp_file_at_all(reports_root, tmp_path, monkeypatch):
+    # Staging through a temp file would be a trap: /tmp is a RAM-backed tmpfs on many
+    # container images and on a Kubernetes emptyDir{medium: Memory}, which would put the
+    # archive right back in memory. Nothing may be written to the temp dir.
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    monkeypatch.setenv("TMPDIR", str(scratch))
+    import tempfile
+
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref)
+    write_allure(reports_root, ref, {f"r{i}.json": "{}" * 500 for i in range(20)})
+    src = FileSystemReportSource(report_root=reports_root)
+
+    for chunk in src.allure_stream(ref):
+        assert list(scratch.iterdir()) == [], "the archive was staged to the temp dir"
+        assert chunk  # no empty chunks
+    assert list(scratch.iterdir()) == []
+
+    gen = src.allure_stream(ref)  # a cancelled download must leave nothing either
+    next(gen)
+    gen.close()
+    assert list(scratch.iterdir()) == []
+
+
+def test_allure_stream_never_holds_the_whole_archive(reports_root):
+    # The point of streaming: peak buffering stays near the chunk size, not the archive
+    # size. Several ~1 MB members with a 64 KB chunk must arrive incrementally.
+    import random
+    import string
+
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref)
+    # Incompressible payload, so the zip can't collapse to a single small chunk.
+    payload = "".join(random.choice(string.ascii_letters) for _ in range(1_000_000))
+    write_allure(reports_root, ref, {f"big{i}.json": payload for i in range(5)})
+    src = FileSystemReportSource(report_root=reports_root)
+
+    sizes = [len(c) for c in src.allure_stream(ref, chunk_size=65536)]
+    assert len(sizes) > 20, f"expected many chunks, got {len(sizes)}"
+    # A buffered build would emit one lump; no yield may exceed the chunk size.
+    assert max(sizes) <= 65536, f"a chunk exceeded the chunk size: {max(sizes)}"
+
+
+def test_allure_stream_skips_a_file_that_vanishes(reports_root):
+    # Retention or a rerun can delete a result between the directory walk and the read.
+    # Reproduced exactly: allure_stream lists the files eagerly, so deleting one before the
+    # generator is consumed lands in that window. It must degrade to a smaller archive
+    # rather than fail the download.
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref)
+    allure_dir = write_allure(reports_root, ref, {"keep.json": "{}", "gone.json": "{}"})
+    src = FileSystemReportSource(report_root=reports_root)
+
+    stream = src.allure_stream(ref)  # file list captured here...
+    os.remove(os.path.join(allure_dir, "gone.json"))  # ...deleted before the first read
+
+    import io
+    import zipfile
+
+    zf = zipfile.ZipFile(io.BytesIO(b"".join(stream)))
+    assert zf.testzip() is None
+    assert "keep.json" in zf.namelist() and "gone.json" not in zf.namelist()
+
+
+def test_allure_stream_survives_being_abandoned_midway(reports_root):
+    # A cancelled download closes the generator at a yield. That unwinds through the open
+    # ZipFile, whose close() writes the central directory into the sink -- it must not
+    # raise or leave the generator complaining about an ignored GeneratorExit.
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref)
+    write_allure(reports_root, ref, {f"r{i}.json": "x" * 20000 for i in range(30)})
+    src = FileSystemReportSource(report_root=reports_root)
+
+    gen = src.allure_stream(ref, chunk_size=1024)
+    next(gen)
+    next(gen)
+    gen.close()  # must be silent
+    # A fresh stream right after still produces a complete, valid archive.
+    import io
+    import zipfile
+
+    zf = zipfile.ZipFile(io.BytesIO(b"".join(src.allure_stream(ref))))
+    assert zf.testzip() is None and len(zf.namelist()) == 30
+
+
+def test_allure_stream_handles_a_directory_of_many_small_files(reports_root):
+    # The central directory is written in one go on close; with thousands of members it
+    # must still come out through the final drain rather than being dropped or truncated.
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref)
+    write_allure(
+        reports_root, ref, {f"t-{i:04d}.json": f'{{"i":{i}}}' for i in range(2000)}
+    )
+    src = FileSystemReportSource(report_root=reports_root)
+
+    import io
+    import zipfile
+
+    zf = zipfile.ZipFile(io.BytesIO(b"".join(src.allure_stream(ref, chunk_size=4096))))
+    assert zf.testzip() is None
+    assert len(zf.namelist()) == 2000
+    assert json.loads(zf.read("t-1999.json")) == {"i": 1999}
+
+
+def test_allure_refuses_every_symlink(reports_root, tmp_path):
+    # Allure results are written ON THE WORKER by arbitrary pytest code. A test that drops a
+    # symlink into its own allure-results could otherwise exfiltrate whatever the READER
+    # process can read (airflow.cfg, the Fernet key, ssh keys) to anyone allowed to download
+    # the run, or by email attachment. Links are refused outright -- Allure never emits them,
+    # and allowing "links that stay inside" would leave a swap-after-check window open.
+    secret = tmp_path / "fernet.key"
+    secret.write_text("AIRFLOW__CORE__FERNET_KEY=super-secret")
+
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref)
+    allure_dir = write_allure(reports_root, ref, {"real-result.json": '{"ok":true}'})
+    os.symlink(secret, os.path.join(allure_dir, "escape-result.json"))
+    os.symlink(
+        os.path.join(allure_dir, "real-result.json"),
+        os.path.join(allure_dir, "inside-result.json"),
+    )
+
+    src = FileSystemReportSource(report_root=reports_root)
+    import io
+    import zipfile
+
+    for data in (b"".join(src.allure_stream(ref)), src.allure_archive(ref)):
+        zf = zipfile.ZipFile(io.BytesIO(data))
+        names = set(zf.namelist())
+        assert names == {"real-result.json"}, f"a symlink was archived: {names}"
+        assert not any(b"super-secret" in zf.read(n) for n in names)
+
+
+def test_allure_skips_a_fifo_instead_of_hanging(reports_root):
+    # A named pipe passes any path-based check, and open() on it BLOCKS FOREVER waiting for
+    # a writer -- pinning a server thread per download until the process is restarted. It
+    # must be refused by file type, not by path.
+    import threading
+
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref)
+    allure_dir = write_allure(reports_root, ref, {"real-result.json": "{}"})
+    os.mkfifo(os.path.join(allure_dir, "pipe-result.json"))
+
+    src = FileSystemReportSource(report_root=reports_root)
+    done: list = []
+
+    def build():
+        done.append(b"".join(src.allure_stream(ref)))
+
+    t = threading.Thread(target=build, daemon=True)
+    t.start()
+    t.join(timeout=20)
+    assert not t.is_alive(), "the archive build blocked on a FIFO"
+
+    import io
+    import zipfile
+
+    assert zipfile.ZipFile(io.BytesIO(done[0])).namelist() == ["real-result.json"]
+
+
+def test_allure_survives_a_symlink_swapped_in_mid_stream(reports_root, tmp_path):
+    # The swap-after-check race: entries are listed up front, so an attacker controlling the
+    # directory can replace one with a symlink before it is read. Opening with O_NOFOLLOW
+    # closes the window -- the read either gets the real file or nothing.
+    secret = tmp_path / "secret.txt"
+    secret.write_text("leak-me")
+
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref)
+    allure_dir = write_allure(
+        reports_root, ref, {f"f{i}-result.json": "{}" for i in range(20)}
+    )
+    src = FileSystemReportSource(report_root=reports_root)
+
+    stream = src.allure_stream(ref, chunk_size=512)  # listing happens here
+    for i in range(20):  # ...swap every entry before a byte is read
+        p = os.path.join(allure_dir, f"f{i}-result.json")
+        os.remove(p)
+        os.symlink(secret, p)
+
+    import io
+    import zipfile
+
+    zf = zipfile.ZipFile(io.BytesIO(b"".join(stream)))
+    assert zf.testzip() is None
+    assert not any(b"leak-me" in zf.read(n) for n in zf.namelist()), "secret leaked"
+
+
+def test_allure_members_are_written_zip64_ready(reports_root):
+    # The member size is unknown when its header goes out, so zipfile would decide "no
+    # zip64" and then raise past ~2 GiB -- mid-stream, with bytes already on the wire.
+    # force_zip64 avoids that; guard it by shrinking the limit rather than writing 2 GiB.
+    import io
+    import zipfile
+
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref)
+    write_allure(reports_root, ref, {"big-result.json": "x" * 50_000})
+    src = FileSystemReportSource(report_root=reports_root)
+
+    real_limit = zipfile.ZIP64_LIMIT
+    zipfile.ZIP64_LIMIT = 1000  # stand in for the 2 GiB boundary
+    try:
+        data = b"".join(src.allure_stream(ref))  # must not raise
+    finally:
+        zipfile.ZIP64_LIMIT = real_limit
+    zf = zipfile.ZipFile(io.BytesIO(data))
+    assert zf.testzip() is None
+    assert zf.getinfo("big-result.json").file_size == 50_000
+
+
+def test_allure_ignores_a_symlinked_directory(reports_root, tmp_path):
+    # os.walk does not descend into symlinked directories, so a linked tree contributes
+    # nothing -- guard that this stays true rather than relying on a default.
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "leak.json").write_text('{"secret":"nope"}')
+
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref)
+    allure_dir = write_allure(reports_root, ref, {"real-result.json": "{}"})
+    os.symlink(outside, os.path.join(allure_dir, "linked"))
+
+    src = FileSystemReportSource(report_root=reports_root)
+    import io
+    import zipfile
+
+    zf = zipfile.ZipFile(io.BytesIO(b"".join(src.allure_stream(ref))))
+    assert zf.namelist() == ["real-result.json"]
