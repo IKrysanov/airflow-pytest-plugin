@@ -640,6 +640,83 @@ def test_base_record_coverage_default_false():
     assert _Min().record_coverage(ReportRef("d", "r", "t", 1), 0.9) is False
 
 
+def _big_junit(n_cases: int, out_bytes: int = 0) -> str:
+    """A JUnit document with ``n_cases`` failing cases, each carrying ``out_bytes`` of log."""
+    blob = "X" * out_bytes
+    body = "".join(
+        f'<testcase classname="m.mod{i % 20}" name="test_{i:05d}" time="0.01">'
+        f'<failure message="boom {i}">trace {i}</failure>'
+        f"<system-out>{blob}</system-out></testcase>"
+        for i in range(n_cases)
+    )
+    return f'<testsuite tests="{n_cases}" failures="{n_cases}">{body}</testsuite>'
+
+
+def test_case_outputs_reads_every_junit_shape(reports_root):
+    # The streamed reader replaced a tree walk that had a dedicated branch for the
+    # <testsuites> wrapper. Pin the shapes pytest actually emits so the rewrite can't quietly
+    # start missing cases: multi-suite, a <properties> block before the cases, an empty suite,
+    # every outcome element, both captured streams, truncation, and whitespace-only bodies.
+    from airflow_pytest_plugin.sources.filesystem import _MAX_OUTPUT
+
+    def outputs_for(name, xml):
+        ref = ReportRef("d", name, "t", 1, -1)
+        write_report_xml(reports_root, ref, xml)
+        return FileSystemReportSource._case_outputs(
+            ReportLayout().report_path(reports_root, ref)
+        )
+
+    single = outputs_for(
+        "single",
+        '<testsuite><testcase classname="a" name="p"/>'
+        '<testcase classname="a" name="f"><failure message="MF">TF</failure></testcase>'
+        '<testcase classname="a" name="e"><error message="ME">TE</error></testcase>'
+        '<testcase classname="a" name="s"><skipped message="MS"/></testcase>'
+        '<testcase classname="a" name="o"><system-out>OUT</system-out>'
+        "<system-err>ERR</system-err></testcase></testsuite>",
+    )
+    assert ("a", "p") not in single  # a clean pass carries no output
+    assert single[("a", "f")] == "MF\nTF"
+    assert single[("a", "e")] == "ME\nTE"
+    assert single[("a", "s")] == "MS"
+    assert single[("a", "o")] == (
+        "--- Captured stdout / log ---\nOUT\n\n--- Captured stderr ---\nERR"
+    )
+
+    multi = outputs_for(
+        "multi",
+        '<testsuites><testsuite name="s1"><properties>'
+        '<property name="x" value="1"/></properties>'
+        '<testcase classname="p1" name="t1"><failure message="F1">B1</failure></testcase>'
+        '</testsuite><testsuite name="s2">'
+        '<testcase classname="p2" name="t2"><system-out>O2</system-out></testcase>'
+        "</testsuite></testsuites>",
+    )
+    assert multi == {
+        ("p1", "t1"): "F1\nB1",
+        ("p2", "t2"): "--- Captured stdout / log ---\nO2",
+    }
+
+    assert outputs_for("empty", "<testsuite/>") == {}
+    # Whitespace-only bodies are not output at all (they'd render as a blank panel).
+    assert (
+        outputs_for(
+            "blank",
+            '<testsuite><testcase classname="c" name="w">'
+            '<failure message="  ">   </failure></testcase></testsuite>',
+        )
+        == {}
+    )
+    big = outputs_for(
+        "big",
+        '<testsuite><testcase classname="c" name="b"><system-out>'
+        + ("Z" * (_MAX_OUTPUT + 500))
+        + "</system-out></testcase></testsuite>",
+    )
+    assert big[("c", "b")].endswith("…(truncated)")
+    assert len(big[("c", "b")]) < _MAX_OUTPUT + 100  # one case can't flood the response
+
+
 def test_record_coverage_refuses_traversal_token(tmp_path):
     # record_coverage is a WRITE triggered by a GET on an attacker-controlled token; its
     # _safe_dir guard must refuse a `..`/`.` traversal and write nothing outside the root.

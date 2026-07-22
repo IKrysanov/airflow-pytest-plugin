@@ -123,6 +123,32 @@ for _ in range(80):
     except Exception:
         time.sleep(0.3)
 
+# /api/health answers without auth, so a 200 there does NOT mean the board will have data.
+# If Airflow is importable, the reader (correctly) switches auth on and every data endpoint
+# 401s for the standalone dev server -- the page then renders empty and Playwright times out
+# 30s later on a selector, which says nothing about the cause. Fail here instead, loudly.
+try:
+    with urllib.request.urlopen(base_url + "/api/reports", timeout=5) as probe:
+        probe.read()
+except Exception as exc:
+    proc.terminate()
+    shutil.rmtree(root, ignore_errors=True)
+    airflow_here = ""
+    try:
+        import airflow  # noqa: F401
+
+        airflow_here = (
+            "\nApache Airflow is installed in THIS interpreter, so the reader turns its auth "
+            "on and the dev server refuses unauthenticated reads."
+        )
+    except Exception:
+        pass
+    sys.exit(
+        f"Cannot read /api/reports from the dev server ({exc}).{airflow_here}\n"
+        f"Run this script from the plugin's own venv, which has no Airflow:\n"
+        f"    .venv/bin/python scripts/make_screenshots.py"
+    )
+
 
 def shot(page, name, sel=None):
     time.sleep(0.8)

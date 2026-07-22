@@ -1200,6 +1200,72 @@ def test_turning_a_panel_off_removes_it_from_the_board(dash):
     assert dash.errors == []
 
 
+def test_settings_card_is_titled_settings_with_a_dashboard_subsection(dash):
+    # The card is "Settings" (it used to be titled "Dashboard"); the board panels now live
+    # under a Dashboard *subsection*, leaving room for further settings areas beside it.
+    page = dash.page
+    _open_settings(page)
+    assert (page.locator("#settings-title").inner_text() or "").strip() == "Settings"
+    assert (page.locator("#set-dash-lbl").inner_text() or "").strip() == "Dashboard"
+    # The panels group and its switches are nested inside that section, not loose in the body.
+    expect(page.locator("#settings .set-section #set-panels-lbl")).to_have_count(1)
+    expect(page.locator("#settings .set-section input[data-panel]")).to_have_count(3)
+    assert dash.errors == []
+
+
+def test_settings_info_opens_over_the_settings_card(dash):
+    # An ⓘ beside the title explains what settings are; it opens ON TOP of the (modal)
+    # settings card, and closing it returns to that card rather than dismissing both.
+    page = dash.page
+    _open_settings(page)
+    page.click("#settings-info")
+    expect(page.locator("dialog#panel-info")).to_be_visible()
+    assert (page.locator("#panel-info-title").inner_text() or "").strip() == "Settings"
+    body = (page.locator("#panel-info-body").inner_text() or "").lower()
+    assert "browser" in body  # says it is a per-browser preference, not a permission
+    page.click("#panel-info-close")
+    expect(page.locator("dialog#panel-info")).to_be_hidden()
+    expect(
+        page.locator("dialog#settings")
+    ).to_be_visible()  # settings still open underneath
+    assert dash.errors == []
+
+
+def test_hidden_panels_stay_hidden_across_every_list_page(large_dash):
+    # The seed is 40 dags x 80 runs = 3200 runs. Ungrouped that is 32 pages of 100, so this
+    # exercises the real question: does an off switch hold on EVERY page? Paging re-renders
+    # the list, and the async flaky fetch lands mid-session -- neither may resurrect a panel.
+    page = large_dash.page
+    page.uncheck("#list-grp")  # flat list -> real pagination over 3200 runs
+    page.wait_for_timeout(200)
+    _open_settings(page)
+    for panel in ("chart", "reliability", "flaky"):
+        _toggle(page, panel)
+    page.click("#settings-close")
+    expect(page.locator("dialog#settings")).to_be_hidden()
+    for sel in _PANEL_CARD.values():
+        expect(page.locator(sel)).to_be_hidden()
+
+    pages_walked = 0
+    for _ in range(8):
+        nxt = page.locator("#pg-next")
+        if nxt.count() == 0 or nxt.is_disabled():
+            break
+        nxt.click()
+        page.wait_for_timeout(150)
+        pages_walked += 1
+        for sel in _PANEL_CARD.values():
+            expect(page.locator(sel)).to_be_hidden()
+        # The rows that held them collapse too, so no empty gap rides along page to page.
+        expect(page.locator("#board")).to_be_hidden()
+        expect(page.locator("#board2")).to_be_hidden()
+        expect(page.locator("#list tr").first).to_be_visible()  # list still rendering
+    assert pages_walked >= 5, (
+        f"expected to page through the list, walked {pages_walked}"
+    )
+    assert large_dash.errors == []
+
+
 def test_hidden_panels_stay_hidden_after_a_reload(dash):
     # The whole point of the setting: a reload must not bring a dismissed panel back.
     page = dash.page

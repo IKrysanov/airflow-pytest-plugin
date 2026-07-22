@@ -22,6 +22,12 @@ results in the **Airflow 3** web UI.
 | [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff) | Linted & formatted with Ruff |
 | [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/IKrysanov/airflow-pytest-plugin/badge)](https://scorecard.dev/viewer/?uri=github.com/IKrysanov/airflow-pytest-plugin) | OpenSSF supply-chain security score |
 
+![Trigger two pytest DAGs in Airflow, then browse their results in the Pytest Reports plugin](https://raw.githubusercontent.com/IKrysanov/airflow-pytest-plugin/main/docs/demo.webp)
+
+*Trigger two suites from Airflow, then open **Pytest Reports** in the same sidebar: the runs
+you just started are at the top of the list, next to their history — with per-test detail,
+flaky tests, a test×run heatmap and failures clustered by error.*
+
 The operator runs a `pytest` suite as an Airflow task and parses the JUnit
 report into a structured result. This plugin archives each of those reports —
 keyed by `dag_id / run_id / task_id / try` — and serves a small web UI to browse

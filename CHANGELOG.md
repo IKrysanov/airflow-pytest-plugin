@@ -5,7 +5,13 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.6.2] - 2026-07-23
+
+### Changed
+- **Settings** — the card is now titled *Settings* (was *Dashboard*) with the board switches
+  under a **Dashboard** subsection, an ⓘ beside the title explaining what settings do and that
+  they are per-browser, and the header's icon buttons take the same 36px height as their
+  neighbours instead of sitting 4px shorter.
 
 ### Security
 - **Allure archives only ever read regular files, and never follow a link** — results are
@@ -475,7 +481,8 @@ the Airflow 3 web UI.
 - CI/CD: lint, type-check, unit (py3.10–3.13) + Airflow 3 integration matrices,
   CodeQL, OpenSSF Scorecard, DCO, and Trusted-Publishing release workflows.
 
-[Unreleased]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.6.2...HEAD
+[0.6.2]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.4.0...v0.5.0

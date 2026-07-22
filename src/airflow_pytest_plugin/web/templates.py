@@ -132,6 +132,12 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .btn.primary { background: var(--primary); border-color: var(--primary); color: var(--on-primary); }
   .btn.primary:hover { filter: brightness(1.08); }
   .icon-btn { height: auto; padding: 7px; }
+  /* In the header an icon button sits shoulder to shoulder with the text buttons, so it
+     takes the SAME 36px height and goes square -- "height: auto" above left it at 32px and
+     it read as slightly sunken next to Refresh. Scoped to the header on purpose: inside a
+     dialog head the icon buttons keep their deliberate 32px (see #d-allure). Tied to the
+     same 36px as .btn, so the row stays aligned at every width. */
+  header .icon-btn { height: 36px; width: 36px; padding: 0; justify-content: center; }
   /* Allure button: matches the neighbouring icon buttons' 32px height, just wider. */
   #d-allure { height: 32px; padding: 0 10px; gap: 6px; font-size: 12.5px; }
 
@@ -170,7 +176,13 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .kpi-info:hover { color: var(--primary); }
   .kpi-info:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px;
     border-radius: 50%; }
-  /* -- Dashboard settings: one switch per main-board panel. --------------------------- */
+  /* -- Settings: grouped by area (Dashboard, ...), one switch per main-board panel. ---- */
+  /* Three levels: dialog title (Settings) > area heading (Dashboard) > group (Panels). */
+  .set-section + .set-section { margin-top: 22px; padding-top: 18px;
+    border-top: 1px solid var(--border); }
+  .set-section-lbl { font-size: 14px; font-weight: 650; color: var(--fg); margin: 0 0 12px; }
+  /* The info icon belongs to the title word, so pull it in tighter than the head's gap. */
+  .dlg-head .rel-info-btn { margin-left: -4px; }
   .set-group-lbl { font-size: 12px; color: var(--muted); text-transform: uppercase;
     letter-spacing: .04em; margin-bottom: 8px; }
   /* The whole row is the label, so the tap target is the row (>=44px tall), not the switch. */
@@ -1243,7 +1255,13 @@ _INDEX_HTML = r"""<!DOCTYPE html>
 
 <dialog id="settings" aria-labelledby="settings-title">
   <div class="dlg-head">
-    <h2 id="settings-title" data-i18n="settingsTitle">Dashboard</h2>
+    <h2 id="settings-title" data-i18n="settingsTitle">Settings</h2>
+    <button id="settings-info" class="rel-info-btn" type="button" data-i18n-al="settingsInfoAl"
+      title="About settings">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+        stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
+    </button>
     <span class="grow" style="flex:1"></span>
     <button id="settings-close" class="btn icon-btn" type="button" data-i18n-al="closeReport">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -1253,6 +1271,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     </button>
   </div>
   <div class="dlg-body">
+   <div class="set-section" role="group" aria-labelledby="set-dash-lbl">
+    <div class="set-section-lbl" id="set-dash-lbl" data-i18n="settingsDashboard">Dashboard</div>
     <div class="set-group" role="group" aria-labelledby="set-panels-lbl">
       <div class="set-group-lbl" id="set-panels-lbl" data-i18n="settingsPanels">Panels</div>
       <label class="set-row" for="set-chart">
@@ -1273,6 +1293,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       <p class="set-hint" data-i18n="settingsHint"></p>
       <p class="set-warn" id="set-alloff" data-i18n="settingsAllOff" hidden></p>
     </div>
+   </div>
   </div>
 </dialog>
 
@@ -1350,12 +1371,21 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       cTotal: "Total", cPass: "Pass", cFail: "Fail", cErr: "Err", cSkip: "Skip",
       cDuration: "Duration", cCoverage: "Coverage", cWhen: "When", cRuns: "Runs", cPassRate: "Pass %", cAvgDur: "Avg time",
       covPass: "meets target", covFail: "below target",
-      settingsAl: "Dashboard settings", settingsTitle: "Dashboard",
+      settingsAl: "Settings", settingsTitle: "Settings",
+      settingsDashboard: "Dashboard",
       settingsPanels: "Panels on the main board",
       settingsHint: "Hidden panels stay hidden on this browser until you turn them back on.",
       settingsChart: "Recent runs", settingsRel: "Reliability", settingsFlaky: "Flaky tests",
       settingsOn: "shown", settingsOff: "hidden",
       settingsAllOff: "Every panel is hidden — the run list is still below.",
+      settingsInfoAl: "About settings",
+      settingsInfoTitle: "Settings",
+      settingsInfoBody: "Your personal view preferences for this viewer. Under Dashboard you "
+        + "choose which panels appear on the main board — turning one off hides it everywhere, "
+        + "on every page of the run list, and skips building it entirely, which keeps a board "
+        + "with thousands of runs light. Settings are saved in this browser only: they never "
+        + "touch the server, never affect anyone else, and are not a permission — the run list "
+        + "and every report stay fully available whatever you hide.",
       kpiInfoAl: "How this is computed",
       uniqueInfoTitle: "Unique tests",
       uniqueInfoBody: "Distinct pytest node ids across the runs currently in view, so the "
@@ -1505,13 +1535,22 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       cTotal: "Всего", cPass: "Усп", cFail: "Пров", cErr: "Ошиб", cSkip: "Проп",
       cDuration: "Время", cCoverage: "Покрытие", cWhen: "Когда", cRuns: "Прогоны", cPassRate: "Проход %", cAvgDur: "Ср. время",
       covPass: "норма, порог", covFail: "ниже порога",
-      settingsAl: "Настройки дашборда", settingsTitle: "Дашборд",
+      settingsAl: "Настройки", settingsTitle: "Настройки",
+      settingsDashboard: "Дашборд",
       settingsPanels: "Панели на главной",
       settingsHint: "Скрытые панели останутся скрытыми в этом браузере, пока вы их не включите.",
       settingsChart: "Последние прогоны", settingsRel: "Надёжность",
       settingsFlaky: "Нестабильные тесты",
       settingsOn: "показана", settingsOff: "скрыта",
       settingsAllOff: "Все панели скрыты — список прогонов ниже остаётся.",
+      settingsInfoAl: "О настройках",
+      settingsInfoTitle: "Настройки",
+      settingsInfoBody: "Личные настройки отображения этого вьюера. В разделе «Дашборд» вы "
+        + "выбираете, какие панели показывать на главной: выключенная панель скрыта везде и на "
+        + "всех страницах списка прогонов, а её содержимое вообще не строится — за счёт этого "
+        + "доска с тысячами прогонов остаётся лёгкой. Настройки хранятся только в этом браузере: "
+        + "они не уходят на сервер, не влияют на других и не являются правами доступа — список "
+        + "прогонов и все отчёты остаются полностью доступны, что бы вы ни скрыли.",
       kpiInfoAl: "Как это считается",
       uniqueInfoTitle: "Уникальные тесты",
       uniqueInfoBody: "Различные node id тестов среди прогонов, попавших в текущую выборку: "
@@ -3273,6 +3312,10 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     if (relInfoDlg) { relInfoDlg.addEventListener("close", updateParentDim); closeOnBackdrop(relInfoDlg, closeRelInfo); }
     var ci = document.getElementById("chart-info");
     if (ci) ci.addEventListener("click", function () { openPanelInfo("chartInfoTitle", "chartInfoBody"); });
+    // Opens on top of the (already modal) settings dialog -- <dialog> stacks, and closing the
+    // info popup returns focus to the settings card rather than dismissing both.
+    var seti = document.getElementById("settings-info");
+    if (seti) seti.addEventListener("click", function () { openPanelInfo("settingsInfoTitle", "settingsInfoBody"); });
     var fi = document.getElementById("flaky-info");
     if (fi) fi.addEventListener("click", function () { openPanelInfo("flakyInfoTitle", "flakyInfoBody"); });
     var pc = document.getElementById("panel-info-close");
