@@ -40,7 +40,15 @@ with DAG(
         test_path="tests/",
         # report_root defaults to AIRFLOW_PYTEST_REPORTS_ROOT / the
         # [pytest_reports] reports_root config / /opt/airflow/pytest-reports.
-        parser=ArchivingResultParser(allure=False, email=True, coverage=True),
+        # ``triage_provider`` needs pytest-triage (plus that provider's extra and its
+        # API key) on the worker, and gives every failed test an AI verdict in the UI.
+        # Drop it, or use ``triage=True`` alone, for the failure report without the LLM.
+        parser=ArchivingResultParser(
+            allure=False,
+            email=True,
+            coverage=True,
+            triage_provider="anthropic",
+        ),
         # Tests failing should not abort the pipeline here; the outcome is in
         # XCom and in the reports UI either way.
         fail_on_test_failure=False,

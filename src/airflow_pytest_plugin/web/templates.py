@@ -596,6 +596,136 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .c-pass { color: var(--pass); } .c-fail { color: var(--fail); }
   .c-skip { color: var(--skip); } .c-error { color: var(--error); }
 
+  /* -- AI triage (pytest-triage verdicts) ------------------------------------------- */
+  /* A semantic family of its OWN, deliberately not the outcome tokens: "regression" and
+     "failed" are different statements about the same test -- one is what happened, the
+     other is why. Every chip spells its category out, so colour only reinforces a label
+     that is already readable (colour-blind readers, forced-colours, grayscale prints).
+     Light values are the darker end of each hue, dark values the lighter end -- the pairs
+     were picked together, not inverted. Each clears 4.5:1 against its own tint at every
+     state the chip has (13% resting, 17% hover, 18% pressed), which is what pins the
+     values: a lighter cyan or amber measured fine at rest and failed once pressed. */
+  :root {
+    --tri-regression: #b91c1c; --tri-flaky: #854d0e; --tri-env: #155e75;
+    --tri-test_bug: #6d28d9; --tri-unknown: #3f3f46;
+  }
+  html[data-theme="dark"] {
+    --tri-regression: #ff8a8a; --tri-flaky: #fcd34d; --tri-env: #22d3ee;
+    --tri-test_bug: #c4b5fd; --tri-unknown: #cbd5e1;
+  }
+  /* Every triage surface derives from one --tri-c set by the caller, so a new category is
+     one custom property and one label -- never a new rule per colour. */
+  .tri-chip { display: inline-flex; align-items: center; gap: 6px; border-radius: 999px;
+    padding: 2px 9px; font-size: 11.5px; font-weight: 650; line-height: 1.65;
+    color: var(--tri-c); background: color-mix(in srgb, var(--tri-c) 13%, transparent);
+    border: 1px solid color-mix(in srgb, var(--tri-c) 32%, transparent); white-space: nowrap; }
+  .tri-chip .tri-dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor;
+    flex: 0 0 auto; }
+  .tri-chip .tri-n { font-variant-numeric: tabular-nums; opacity: .8; }
+  /* The run-level card: what the model was, what it found, and the filter into the table. */
+  .tri-card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    padding: 13px 15px 14px; box-shadow: var(--shadow); margin: 0 0 14px; }
+  .tri-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    margin-bottom: 11px; }
+  .tri-head .tri-title { font-size: 13px; font-weight: 650; display: inline-flex;
+    align-items: center; gap: 7px; }
+  .tri-head svg { width: 15px; height: 15px; color: var(--primary); flex: 0 0 auto; }
+  .tri-head .tri-meta { margin-left: auto; font-size: 12px; color: var(--muted);
+    font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+  .tri-filters { display: flex; flex-wrap: wrap; gap: 7px; }
+  /* A filter is a chip that is also a button: >=32px tall with its padding, focusable,
+     and pressed state carried by aria-pressed rather than colour alone. */
+  .tri-filters button { cursor: pointer; font-family: inherit; padding: 5px 11px;
+    font-size: 12px; transition: background .12s, border-color .12s, box-shadow .12s; }
+  .tri-filters button:hover { background: color-mix(in srgb, var(--tri-c) 17%, transparent); }
+  .tri-filters button:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
+  /* Pressed is carried by the ring, not by a heavy fill: a stronger tint would push the
+     label under 4.5:1 without saying anything the border isn't already saying. */
+  .tri-filters button[aria-pressed="true"] {
+    background: color-mix(in srgb, var(--tri-c) 18%, transparent);
+    border-color: var(--tri-c); box-shadow: inset 0 0 0 1px var(--tri-c); }
+  /* Category mix at a glance. Proportional, but every present category keeps a visible
+     sliver (min-width) so a 1-of-200 share is still findable. */
+  .tri-bar { display: flex; height: 7px; border-radius: 999px; overflow: hidden; gap: 2px;
+    margin-top: 12px; background: var(--surface-2); }
+  .tri-bar span { min-width: 5px; background: var(--tri-c); transition: opacity .12s; }
+  .tri-note { margin-top: 10px; font-size: 12px; color: var(--muted); }
+  /* The pass itself broke (rejected key, timeout, provider down). Warn colours, not a
+     category colour: this is not a verdict about any test. */
+  .tri-warn { display: flex; align-items: flex-start; gap: 8px; margin-top: 10px;
+    padding: 9px 11px; border-radius: 8px; font-size: 12.5px; line-height: 1.5;
+    color: var(--warn); background: color-mix(in srgb, var(--warn) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--warn) 32%, transparent);
+    overflow-wrap: anywhere; }
+  .tri-warn svg { width: 15px; height: 15px; flex: 0 0 auto; margin-top: 1px; }
+  /* The per-failure panel, above the traceback inside an expanded case row. Tinted by its
+     category and rail-marked on the left, so a scan down an expanded table reads as
+     "these three are environment, that one is a real regression". */
+  /* Two things fight this panel, both from the table it sits in:
+     - `td { white-space: nowrap }` (global): without `normal` the model's prose lays out on
+       ONE line and drags the whole table into horizontal scroll;
+     - a real traceback is far wider than the dialog, so the case table legitimately scrolls
+       sideways and every cell is stretched to ITS width. Left alone the panel would inherit
+       that width, wrap its sentences at ~3000px, and send the diagnosis off-screen. It is
+       therefore capped to the scroll VIEWPORT (--case-view-w, measured in fillCases) and
+       pinned to its left edge, so the analysis stays readable at any scroll position while
+       the traceback below it still scrolls freely. */
+  .tri-panel { border-left: 3px solid var(--tri-c); border-radius: 0 9px 9px 0;
+    background: color-mix(in srgb, var(--tri-c) 7%, transparent);
+    padding: 11px 13px; margin: 2px 0 12px; white-space: normal;
+    position: sticky; left: 0;
+    max-width: min(100%, calc(var(--case-view-w, 100vw) - 26px)); }
+  .tri-panel-head { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+  .tri-panel-head .tri-exc { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+  .tri-hyp { margin: 9px 0 0; font-size: 13px; line-height: 1.55; color: var(--fg);
+    overflow-wrap: anywhere; }
+  .tri-fix { display: flex; gap: 9px; margin-top: 10px; padding: 9px 11px; border-radius: 8px;
+    background: var(--surface-2); border: 1px solid var(--border); font-size: 12.5px;
+    line-height: 1.5; }
+  .tri-fix svg { width: 15px; height: 15px; flex: 0 0 auto; color: var(--primary);
+    margin-top: 1px; }
+  .tri-fix-lbl { display: block; font-size: 11px; font-weight: 650; text-transform: uppercase;
+    letter-spacing: .04em; color: var(--muted); margin-bottom: 3px; }
+  .tri-fix-body { min-width: 0; overflow-wrap: anywhere; }
+  /* Rerun line: the command is selectable text first, the copy button an extra. */
+  .tri-rerun { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+  .tri-cmd { flex: 1 1 auto; min-width: 0; overflow-x: auto; white-space: pre;
+    font-size: 12px; padding: 6px 9px; border-radius: 7px; background: var(--surface-2);
+    border: 1px solid var(--border); color: var(--fg); }
+  .tri-copy { flex: 0 0 auto; height: 30px; padding: 0 11px; font-size: 12px;
+    border-radius: 7px; border: 1px solid var(--border); background: var(--surface-2);
+    color: var(--fg); cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+  .tri-copy:hover { background: var(--border); }
+  .tri-copy:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
+  .tri-copy svg { width: 13px; height: 13px; }
+  /* Confidence: three rungs, filled to the level, WITH the word beside them -- the bars
+     alone would be a shape-only signal and unreadable to a screen reader. */
+  .tri-conf { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px;
+    color: var(--muted); }
+  .tri-conf .tri-rungs { display: inline-flex; gap: 2px; align-items: flex-end; }
+  .tri-conf i { display: block; width: 3px; border-radius: 1px; background: var(--border); }
+  .tri-conf i:nth-child(1) { height: 6px; } .tri-conf i:nth-child(2) { height: 9px; }
+  .tri-conf i:nth-child(3) { height: 12px; }
+  .tri-conf i.on { background: var(--tri-c); }
+  /* Run-list marker: this run carries an AI analysis. Icon-only, so it is labelled. */
+  .tri-mark { display: inline-flex; vertical-align: middle; margin-left: 6px;
+    color: var(--primary); }
+  .tri-mark svg { width: 13px; height: 13px; }
+  /* Three states, three tokens: the pass broke / a model judged it / report-only. Same
+     glyph throughout -- the state is spelled out in the mark's accessible name and in its
+     hover bubble, so nothing depends on telling the colours apart. */
+  .tri-broken { color: var(--fail); }
+  .tri-judged { color: var(--primary); }
+  .tri-reported { color: var(--muted); }
+  /* "Not judged": a label, not a verdict chip -- it must not read as a category. */
+  .tri-unjudged { font-size: 11.5px; font-weight: 650; color: var(--muted);
+    text-transform: uppercase; letter-spacing: .04em; }
+  /* In a case row the chip follows the test id. The cell opts out of the global
+     `td { white-space: nowrap }` so that on a narrow table the chip drops onto its own
+     line under the id instead of widening the column into horizontal scroll. */
+  .case-table tr.case > td:nth-child(2) { white-space: normal; }
+  .case-tri { margin-left: 8px; vertical-align: middle; }
+
   .state { padding: 56px 20px; text-align: center; color: var(--muted); }
   .skeleton { height: 14px; border-radius: 6px;
     background: linear-gradient(90deg, var(--surface-2) 25%, var(--border) 37%, var(--surface-2) 63%);
@@ -1434,6 +1564,29 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       noMatch: "No reports match the current filter.",
       noReports: "No reports found yet. Run a PytestOperator task with ArchivingResultParser to populate this view.",
       noCases: "No matching cases.", tryWord: "try",
+      triTitle: "AI triage",
+      triMarkJudged: "AI triage", triMarkBroken: "AI triage failed",
+      triMarkReported: "Failure report only (no AI)",
+      triAll: "All verdicts",
+      tri_regression: "Regression", tri_flaky: "Flaky", tri_env: "Environment",
+      tri_test_bug: "Test bug", tri_unknown: "Unclear",
+      triTip_regression: "The product code broke — this failure is a real bug.",
+      triTip_flaky: "The test flips between pass and fail on its own.",
+      triTip_env: "The environment failed the test, not the code (network, service, data).",
+      triTip_test_bug: "The test itself is wrong — a stale expectation or a bad fixture.",
+      triTip_unknown: "The model could not classify this failure.",
+      triConf: "confidence", triConfLow: "low", triConfMedium: "medium", triConfHigh: "high",
+      triFix: "Suggested fix",
+      triRerunAl: "Command to rerun only this test",
+      triCopy: "Copy", triCopied: "Copied",
+      triJudged: "{n} of {m} failures judged",
+      triMix: "Verdict mix",
+      triNoProvider: "Report only: {n} failures described (exception type + a command to rerun each), but no AI provider was configured, so none were judged.",
+      triBudget: "The rest were not sent to the model (--ai-budget).",
+      triIncomplete: "The AI pass did not complete:",
+      triNoFailures: "Nothing to analyse — this run had no failures.",
+      triIncompleteShort: "did not complete",
+      triUnjudged: "Not judged",
       failuresTitle: "Failures by error", noFailures: "No failed tests.",
       clBtn: "Error clusters", clBtnAl: "Error clusters in this run",
       compareTitle: "Compare", comparePrev: "Compare to previous",
@@ -1602,6 +1755,29 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       noMatch: "Нет отчётов под текущий фильтр.",
       noReports: "Отчётов пока нет. Запусти задачу PytestOperator с ArchivingResultParser, чтобы они появились здесь.",
       noCases: "Нет подходящих тестов.", tryWord: "попытка",
+      triTitle: "ИИ-триаж",
+      triMarkJudged: "ИИ-разбор", triMarkBroken: "ИИ-разбор не удался",
+      triMarkReported: "Только отчёт о падениях (без ИИ)",
+      triAll: "Все вердикты",
+      tri_regression: "Регрессия", tri_flaky: "Нестабильный", tri_env: "Окружение",
+      tri_test_bug: "Ошибка в тесте", tri_unknown: "Не ясно",
+      triTip_regression: "Сломался код продукта — это настоящий баг.",
+      triTip_flaky: "Тест сам по себе прыгает между «прошёл» и «упал».",
+      triTip_env: "Виновато окружение, а не код (сеть, сервис, данные).",
+      triTip_test_bug: "Ошибка в самом тесте — устаревшее ожидание или плохая фикстура.",
+      triTip_unknown: "Модель не смогла отнести падение к категории.",
+      triConf: "уверенность", triConfLow: "низкая", triConfMedium: "средняя", triConfHigh: "высокая",
+      triFix: "Что починить",
+      triRerunAl: "Команда для перезапуска только этого теста",
+      triCopy: "Копировать", triCopied: "Скопировано",
+      triJudged: "разобрано {n} из {m} падений",
+      triMix: "Состав вердиктов",
+      triNoProvider: "Только отчёт: описано падений — {n} (тип исключения и команда перезапуска для каждого), но ИИ-провайдер не настроен, поэтому вердиктов нет.",
+      triBudget: "Остальные в модель не отправлялись (--ai-budget).",
+      triIncomplete: "ИИ-разбор не завершился:",
+      triNoFailures: "Разбирать нечего — в прогоне нет падений.",
+      triIncompleteShort: "разбор не завершён",
+      triUnjudged: "Без вердикта",
       failuresTitle: "Падения по ошибкам", noFailures: "Проваленных тестов нет.",
       clBtn: "Кластеры ошибок", clBtnAl: "Кластеры ошибок в этом прогоне",
       compareTitle: "Сравнение", comparePrev: "Сравнить с предыдущим",
@@ -2067,6 +2243,9 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   // resets to the CSS size before measuring, so re-running it is enough.
   var refitKpiLabels = debounce(function () { fitKpiLabels(document); }, 120);
   window.addEventListener("resize", refitKpiLabels);
+  // The verdict panels are sized against the case table's visible width, which changes with
+  // the window; re-publish it on the same debounce rather than on every resize event.
+  window.addEventListener("resize", debounce(function () { measureCaseViewport(); }, 120));
 
   // Open the note, and ONLY the note: the card underneath is itself a button (it drills into
   // the failures / catalogue / slowdowns list), so without stopping propagation every ⓘ press
@@ -2485,11 +2664,70 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   }
   function sortReports() { reports.sort(runComparator(sort)); }
 
+  // Marks a run whose archive carries an AI triage. Icon-only, so it is labelled for
+  // screen readers and titled for everyone else.
+  // The state of a run's triage, in one word. Colour follows it: red = the pass broke,
+  // blue = a model judged the failures, grey = report-only (triage=True, no provider).
+  // Three states, not two, because "nothing was analysed" and "analysed and clean" look
+  // identical otherwise -- and only one of them is a problem.
+  function triState(r) {
+    if (!r.has_triage) return null;
+    var mix = r.triage || {}, counts = mix.counts || {};
+    if (mix.incomplete) return "broken";
+    // Judged means a verdict exists, NOT that the provider named itself: pytest-triage's
+    // offline provider (and any custom one) may expose no model, and such a run was reading
+    // as "report only (no AI)" while its card showed real categories. The name is extra.
+    return TRI_CATS.some(function (c) { return counts[c]; }) ? "judged" : "reported";
+  }
+  function triMarkHtml(r) {
+    var state = triState(r);
+    if (!state) return "";
+    var mix = r.triage || {}, counts = mix.counts || {};
+    var parts = TRI_CATS.filter(function (c) { return counts[c]; })
+      .map(function (c) { return triLabel(c) + " " + counts[c]; });
+    if (state === "broken") parts.push(t("triIncompleteShort"));
+    // The accessible name carries what the tooltip shows: a screen reader gets the same
+    // information without a hover it cannot perform.
+    var label = t("triMark" + state[0].toUpperCase() + state.slice(1))
+      + (state === "judged" && mix.model ? " · " + mix.model : "")
+      + (parts.length ? " — " + parts.join(", ") : "");
+    // One glyph for all three states -- the mark is the same thing in every case, only
+    // its state differs, and a second shape read as a second kind of object. The state is
+    // carried in words by the accessible name and the hover bubble, so it is never colour
+    // alone that has to be perceived.
+    return '<span class="tri-mark tri-' + state + '" role="img" aria-label="' + esc(label)
+      + '" data-tri-state="' + state + '">' + TRI_SVG + "</span>";
+  }
+  // The hover bubble, wired after the list renders. Uses the app's own tooltip rather than
+  // a native `title` so it can carry more than one line -- the model that judged the run is
+  // the thing worth naming, and it exists only in the "judged" state.
+  function wireTriMarks(root) {
+    root.querySelectorAll(".tri-mark").forEach(function (el) {
+      var row = el.closest("tr");
+      var rec = row ? reports.filter(function (x) { return x.id === row.getAttribute("data-id"); })[0] : null;
+      var mix = (rec && rec.triage) || {};
+      var state = el.getAttribute("data-tri-state");
+      bindTip(el, function () {
+        var counts = mix.counts || {};
+        var rows = TRI_CATS.filter(function (c) { return counts[c]; }).map(function (c) {
+          return '<div class="tr">' + statDot("--tri-" + c, triLabel(c), counts[c]) + "</div>";
+        }).join("");
+        var head = '<div class="tt">' + esc(t("triMark" + state[0].toUpperCase() + state.slice(1))) + "</div>";
+        // Only a judged run has a model to name -- that is what the state means.
+        var sub = state === "judged" && mix.model
+          ? '<div class="tm">' + esc(mix.model) + "</div>"
+          : (state === "broken" ? '<div class="tm wrap">' + esc(t("triIncompleteShort")) + "</div>" : "");
+        return head + sub + rows;
+      });
+    });
+  }
   function renderRows(rows) {
     return rows.map(function (r) {
       var st = statusOf(r);
       var cells = COLS.map(function (c) {
-        if (c.key === "status") return "<td>" + badge(st, statusLabel(st)) + "</td>";
+        // The AI mark rides with the status: "this run failed, and it has been analysed"
+        // is one thought, and the list has no room for a column of its own.
+        if (c.key === "status") return "<td>" + badge(st, statusLabel(st)) + triMarkHtml(r) + "</td>";
         if (c.key === "duration") return '<td class="num">' + fmtDur(r.duration) + "</td>";
         if (c.key === "created_at") return '<td class="muted">' + fmtTime(r.created_at) + "</td>";
         var v = r[c.key];
@@ -2761,6 +2999,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
         if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); }
       });
     });
+    wireTriMarks(listEl);
     listEl.querySelectorAll(".sel").forEach(function (cb) {
       cb.addEventListener("click", function (e) { e.stopPropagation(); });
       cb.addEventListener("change", function () {
@@ -3636,8 +3875,201 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     }
   }
 
+  // -- AI triage (pytest-triage verdicts baked into the archive) -----------------------
+  // Severity order, not the order the model happened to answer in: a real regression
+  // first, an unclassified failure last. Also the whitelist -- a category outside it can
+  // never reach a class name, a style attribute or a translation key.
+  var TRI_CATS = ["regression", "flaky", "env", "test_bug", "unknown"];
+  var TRI_CONF_LEVEL = { low: 1, medium: 2, high: 3 };
+  var TRI_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"'
+    + ' stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+    + '<path d="M12 3v4M12 17v4M5.6 5.6l2.8 2.8M15.6 15.6l2.8 2.8M3 12h4M17 12h4'
+    + 'M5.6 18.4l2.8-2.8M15.6 8.4l2.8-2.8"/><circle cx="12" cy="12" r="3.2"/></svg>';
+  var COPY_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"'
+    + ' stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+    + '<rect x="9" y="9" width="12" height="12" rx="2"/>'
+    + '<path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
+  var WARN_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"'
+    + ' stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+    + '<path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/>'
+    + '<path d="M12 9v4M12 17h.01"/></svg>';
+  var BULB_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"'
+    + ' stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+    + '<path d="M9 18h6M10 22h4M12 2a7 7 0 0 0-4 12.7V17h8v-2.3A7 7 0 0 0 12 2z"/></svg>';
+  // Every triage surface is coloured through ONE custom property, so adding a category is
+  // a token plus a label -- never a new rule per colour.
+  // A verdict may carry no category at all: report-only runs (and failures past the
+  // budget) describe the failure without judging it. That is NOT the model answering
+  // "unknown", so it gets no category chip -- only its exception type and rerun command.
+  function triCat(v) {
+    var c = v && v.category;
+    if (!c) return null;
+    return TRI_CATS.indexOf(c) >= 0 ? c : "unknown";
+  }
+  function triStyle(cat) { return "--tri-c:var(--tri-" + cat + ")"; }
+  // The rerun line is built to be COPIED INTO A SHELL, and its selector comes from a report
+  // file on the shared volume — written by the worker's own pytest run, not by us. Escaping
+  // it for HTML stops it becoming markup; it does not stop `x.py::t; rm -rf ~` becoming a
+  // second command once pasted. So quote it exactly as shlex.quote does: leave a plain node
+  // id alone, otherwise wrap in single quotes with embedded quotes broken out. A parametrised
+  // id with spaces or brackets then also survives the paste, which the raw form did not.
+  function shQuote(s) {
+    s = String(s == null ? "" : s);
+    return /^[A-Za-z0-9_@%+=:,./-]+$/.test(s) ? s : "'" + s.replace(/'/g, "'\\''") + "'";
+  }
+  function triLabel(cat) { return t("tri_" + cat); }
+  function triChipHtml(cat, count, opts) {
+    opts = opts || {};
+    var n = typeof count === "number" ? ' <span class="tri-n">' + count + "</span>" : "";
+    var tag = opts.button ? "button" : "span";
+    var attrs = opts.button
+      ? ' type="button" data-tri="' + esc(cat) + '" aria-pressed="' + !!opts.on + '"'
+      : "";
+    return "<" + tag + ' class="tri-chip' + (opts.cls ? " " + opts.cls : "") + '" style="'
+      + triStyle(cat) + '" title="' + esc(t("triTip_" + cat)) + '"' + attrs
+      + '><span class="tri-dot" aria-hidden="true"></span>' + esc(triLabel(cat)) + n
+      + "</" + tag + ">";
+  }
+  // Three rungs filled to the level, with the word beside them: the bars alone would be a
+  // shape-only signal, invisible to a screen reader and to a grayscale print.
+  function triConfHtml(conf) {
+    var lvl = TRI_CONF_LEVEL[conf] || 0;
+    if (!lvl) return "";
+    var rungs = "";
+    for (var i = 1; i <= 3; i++) rungs += '<i class="' + (i <= lvl ? "on" : "") + '"></i>';
+    var word = t("triConf" + conf.charAt(0).toUpperCase() + conf.slice(1));
+    return '<span class="tri-conf"><span class="tri-rungs" aria-hidden="true">' + rungs
+      + "</span>" + esc(word + " " + t("triConf")) + "</span>";
+  }
+  // The per-failure analysis, shown above the traceback in an expanded case row: what kind
+  // of failure this is, why the model thinks so, what to do, and how to rerun just it.
+  function triPanelHtml(v) {
+    var cat = triCat(v);
+    var head = '<div class="tri-panel-head">'
+      + (cat ? triChipHtml(cat) + triConfHtml(v.confidence)
+             : '<span class="tri-unjudged">' + esc(t("triUnjudged")) + "</span>")
+      + (v.exc_type ? '<span class="tri-exc mono">' + esc(v.exc_type) + "</span>" : "")
+      + "</div>";
+    var hyp = v.hypothesis ? '<p class="tri-hyp">' + esc(v.hypothesis) + "</p>" : "";
+    var fix = v.suggested_fix
+      ? '<div class="tri-fix">' + BULB_SVG + '<div class="tri-fix-body">'
+        + '<span class="tri-fix-lbl">' + esc(t("triFix")) + "</span>"
+        + esc(v.suggested_fix) + "</div></div>"
+      : "";
+    var rerun = "";
+    if (v.selector) {
+      var cmd = "pytest " + shQuote(v.selector);
+      rerun = '<div class="tri-rerun"><code class="tri-cmd mono" aria-label="'
+        + esc(t("triRerunAl")) + '">' + esc(cmd) + "</code>"
+        + '<button type="button" class="tri-copy" data-copy="' + esc(cmd) + '">'
+        + COPY_SVG + "<span>" + esc(t("triCopy")) + "</span></button></div>";
+    }
+    return '<div class="tri-panel" style="' + triStyle(cat || "unknown") + '">'
+      + head + hyp + fix + rerun + "</div>";
+  }
+  // The run-level card above the case table: which model judged this run, how the failures
+  // split by category, and a one-click filter into each group.
+  function triCardHtml(m) {
+    var tri = m.triage;
+    if (!tri) return "";
+    var counts = tri.counts || {};
+    var present = TRI_CATS.filter(function (c) { return (counts[c] || 0) > 0; });
+    var judged = present.reduce(function (a, c) { return a + counts[c]; }, 0);
+    var meta = [];
+    if (tri.model) meta.push(tri.model);
+    if (typeof tri.duration === "number" && tri.duration > 0) meta.push(fmtDur(tri.duration));
+    var head = '<div class="tri-head"><span class="tri-title">' + TRI_SVG
+      + esc(t("triTitle")) + "</span>"
+      + (meta.length ? '<span class="tri-meta">' + esc(meta.join(" · ")) + "</span>" : "")
+      + "</div>";
+    if (!present.length) {
+      // Triage ran but judged nothing. Say WHY: the pass broke (rejected key, timeout,
+      // provider down), no provider was configured, or there was simply nothing to judge.
+      // An empty card explains nothing, and "Unclear" chips would explain it wrongly.
+      var described = String(tri.total_failures || 0);
+      // Three different silences, and they must not be confused: the pass broke, there was
+      // nothing to judge at all, or nothing judged it. A green run reporting "no AI provider
+      // was configured" is simply wrong -- it had no failures to send.
+      var why = tri.incomplete ? ""
+        : !tri.total_failures ? t("triNoFailures")
+        : tri.model ? t("triJudged").replace("{n}", "0").replace("{m}", described)
+        : t("triNoProvider").replace("{n}", described);
+      return '<div class="tri-card">' + head + triIncompleteHtml(tri)
+        + (why ? '<div class="tri-note">' + esc(why) + "</div>" : "") + "</div>";
+    }
+    var chips = '<button type="button" class="tri-chip" data-tri="" style="' + triStyle("unknown") + '"'
+      + ' aria-pressed="' + (triFilter === "") + '"><span class="tri-dot" aria-hidden="true">'
+      + "</span>" + esc(t("triAll")) + ' <span class="tri-n">' + judged + "</span></button>"
+      + present.map(function (c) {
+        return triChipHtml(c, counts[c], { button: true, on: triFilter === c });
+      }).join("");
+    var mix = present.map(function (c) { return triLabel(c) + " " + counts[c]; }).join(", ");
+    var bar = '<div class="tri-bar" role="img" aria-label="' + esc(t("triMix") + ": " + mix)
+      + '">' + present.map(function (c) {
+        return '<span data-tri="' + esc(c) + '" style="flex:' + counts[c] + " 1 0;"
+          + triStyle(c) + '"></span>';
+      }).join("") + "</div>";
+    var total = tri.total_failures || judged;
+    var note = t("triJudged").replace("{n}", String(judged)).replace("{m}", String(total));
+    if (judged < total && !tri.incomplete) note += " " + t("triBudget");
+    return '<div class="tri-card">' + head + '<div class="tri-filters">' + chips + "</div>"
+      + bar + '<div class="tri-note">' + esc(note) + "</div>"
+      + triIncompleteHtml(tri) + "</div>";
+  }
+  // Why the pass produced fewer verdicts than there were failures, when the cause was the
+  // triage pass itself. pytest-triage reports these as category="unknown" verdicts, which
+  // the reader drops: a rejected API key is not a diagnosis of your test, and rendering it
+  // as one would leave a run looking analysed when nothing was. Shown once, in the model's
+  // own words ("triage provider error: 401 invalid x-api-key"), which is the sentence that
+  // actually gets the run fixed.
+  function triIncompleteHtml(tri) {
+    if (!tri.incomplete) return "";
+    return '<div class="tri-warn" role="status">' + WARN_SVG
+      + "<span>" + esc(t("triIncomplete")) + " " + esc(tri.incomplete) + "</span></div>";
+  }
+  function wireTriageCard() {
+    litTriBar();
+    dBody.querySelectorAll(".tri-filters button").forEach(function (b) {
+      b.addEventListener("click", function () { setTriageFilter(b.getAttribute("data-tri")); });
+    });
+    dBody.querySelectorAll(".tri-bar span").forEach(function (seg) {
+      var cat = seg.getAttribute("data-tri");
+      bindTip(seg, function () {
+        return '<div class="tt">' + esc(triLabel(cat)) + "</div>"
+          + '<div class="tr">' + statDot("--tri-" + cat, t("testsWord"),
+            ((detail.triage || {}).counts || {})[cat] || 0) + "</div>";
+      });
+    });
+  }
+  function markTriFilter(cat) {
+    triFilter = TRI_CATS.indexOf(cat) >= 0 ? cat : "";
+    dBody.querySelectorAll(".tri-filters button").forEach(function (b) {
+      b.setAttribute("aria-pressed", String(b.getAttribute("data-tri") === triFilter));
+    });
+    litTriBar();
+  }
+  // The mix bar answers the same question as the chips above it, so it follows the same
+  // filter: the picked category stays lit and the rest recede, exactly as the donut does
+  // for an outcome. Applied from here (not from the click handler) so it also survives a
+  // re-render of the card, and re-applied by wireTriageCard for the same reason.
+  function litTriBar() {
+    dBody.querySelectorAll(".tri-bar span").forEach(function (seg) {
+      var mine = seg.getAttribute("data-tri");
+      seg.style.opacity = !triFilter || triFilter === mine ? "1" : "0.28";
+    });
+  }
+  // The two filters compose (category AND outcome), but only a FAILED test can carry a
+  // verdict -- so the pairs that can never intersect would leave an unexplained empty
+  // table. Both setters resolve that the same way: the control just clicked wins, and the
+  // other one steps back to "all" rather than silently emptying the view.
+  function setTriageFilter(cat) {
+    markTriFilter(cat);
+    if (triFilter && (filter === "passed" || filter === "skipped")) setOutcomeFilter("all");
+    else fillCases();
+  }
+
   // Case-table state (reset per opened report).
-  var caseQuery = "", caseGroup = false, caseCollapsed = {};
+  var caseQuery = "", caseGroup = false, caseCollapsed = {}, triFilter = "";
   var HIST_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"'
     + ' stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
     + '<path d="M3 3v5h5"/><path d="M3.05 13A9 9 0 1 0 6 5.3L3 8"/><path d="M12 7v5l3 2"/></svg>';
@@ -3648,18 +4080,23 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   function caseRowHtml(c, i) {
     var kind = { passed: "pass", failed: "fail", error: "error", skipped: "skip" }[c.outcome] || "skip";
     var output = (c.message && c.message.trim()) ? c.message : t("noOutput");
+    // The verdict rides beside the test id (a word, not just a colour) and opens in full
+    // above the traceback -- the diagnosis is the first thing read, the raw output second.
+    var chip = triCat(c.verdict) ? triChipHtml(triCat(c.verdict), null, { cls: "case-tri" }) : "";
     return '<tr class="case clickable" tabindex="0" role="button" aria-expanded="false" data-exp="' + i + '">'
       + "<td>" + badge(kind, outcomeLabel(c.outcome)) + "</td>"
-      + '<td><span class="case-node mono">' + esc(c.node_id) + "</span></td>"
+      + '<td><span class="case-node mono">' + esc(c.node_id) + "</span>" + chip + "</td>"
       + '<td class="num right">' + fmtDur(c.time) + "</td>"
       + '<td class="right"><span class="chev">' + CHEV + "</span></td></tr>"
       + '<tr class="case-exp" data-row="' + i + '" hidden><td colspan="4">'
       + '<button class="case-hist" type="button" data-hist="' + esc(c.node_id) + '">'
       + HIST_ICON + esc(t("historyBtn")) + "</button>"
+      + (c.verdict ? triPanelHtml(c.verdict) : "")
       + '<pre class="tb mono">' + esc(output) + "</pre></td></tr>";
   }
   function setOutcomeFilter(k) {
     filter = k;
+    if (k === "passed" || k === "skipped") markTriFilter("");  // see setTriageFilter
     dBody.querySelectorAll(".pill").forEach(function (p) {
       p.setAttribute("aria-pressed", String(p.getAttribute("data-f") === k));
     });
@@ -3678,6 +4115,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     var sel = [];
     detail.cases.forEach(function (c, idx) {
       if ((filter === "all" || c.outcome === filter)
+          && (!triFilter || (c.verdict && triCat(c.verdict) === triFilter))
           && (!q || c.node_id.toLowerCase().indexOf(q) !== -1)) sel.push({ c: c, i: idx });
     });
     sel.sort(caseCmp);  // slowest-first by default; groups inherit the order
@@ -3706,6 +4144,20 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       tb.innerHTML = sel.map(function (o) { return caseRowHtml(o.c, o.i); }).join("");
     }
     wireCaseRows();
+    measureCaseViewport();
+  }
+  // The verdict panels are capped to the table's VISIBLE width, not to the width a wide
+  // traceback stretches the table to (see .tri-panel). CSS cannot read a scroll container's
+  // client width, so publish it as a custom property and keep it current on resize.
+  // Measured on the next frame and ignored while it reads 0: called straight after
+  // innerHTML the element exists but has not been laid out yet, and writing that 0 would
+  // collapse every panel to nothing.
+  function measureCaseViewport() {
+    requestAnimationFrame(function () {
+      var box = dBody.querySelector(".case-table");
+      if (!box || !box.clientWidth) return;
+      box.style.setProperty("--case-view-w", box.clientWidth + "px");
+    });
   }
   function wireCaseRows() {
     dBody.querySelectorAll("tr.case").forEach(function (tr) {
@@ -3725,6 +4177,23 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       b.addEventListener("click", function (e) {
         e.stopPropagation();
         openHistory(detail.dag_id, detail.task_id, b.getAttribute("data-hist"));
+      });
+    });
+    // "Copy" on a verdict's rerun command: confirm in place (the button's own label
+    // swaps for a moment) rather than with a toast that would cover the next row.
+    dBody.querySelectorAll(".tri-copy").forEach(function (b) {
+      b.addEventListener("click", function (e) {
+        e.stopPropagation();
+        var lbl = b.querySelector("span");
+        copyToClipboard(b.getAttribute("data-copy"), function () {
+          if (!lbl || lbl.dataset.reverting) return;
+          lbl.dataset.reverting = "1";
+          lbl.textContent = t("triCopied");
+          setTimeout(function () {
+            lbl.textContent = t("triCopy");
+            delete lbl.dataset.reverting;
+          }, 1600);
+        });
       });
     });
     dBody.querySelectorAll("tr.grp").forEach(function (tr) {
@@ -3796,6 +4265,9 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       + airflowLinks(m, prev)
       + '<div class="card bench-card"><div class="chart-head"><span>' + esc(t("benchTitle"))
       + '</span></div><div class="bench-scroll" id="bench"></div></div>'
+      // Above the outcome pills on purpose: "what kind of failures are these" is the
+      // question a red run raises first, and it scopes the table the pills then narrow.
+      + triCardHtml(m)
       + '<div class="pills">' + pills + "</div>"
       + '<div class="case-ctrls"><input id="case-q" class="case-q" type="text" placeholder="'
       + esc(t("caseSearch")) + '" autocomplete="off">'
@@ -3837,6 +4309,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     });
     var alertsBtn = document.getElementById("alerts-btn");
     if (alertsBtn) alertsBtn.addEventListener("click", function () { openAlertsLog(m); });
+    wireTriageCard();
     dBody.querySelectorAll(".dseg").forEach(function (seg) {
       seg.addEventListener("click", function () {
         var s = seg.getAttribute("data-status");
@@ -3910,7 +4383,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
 
   function openDetail(id, focusNode) {
     filter = "all"; currentId = id;
-    caseQuery = ""; caseGroup = false; caseCollapsed = {};
+    caseQuery = ""; caseGroup = false; caseCollapsed = {}; triFilter = "";
     caseSort = { key: "time", dir: "desc" };
     lastFocus = document.activeElement;
     document.getElementById("d-copied").hidden = true;
@@ -4079,9 +4552,14 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       c.hidden = false;
       setTimeout(function () { c.hidden = true; }, 1800);
     };
+    copyToClipboard(url, done);
+  }
+  // The async API is unavailable on an insecure origin and can be denied inside Airflow's
+  // sandboxed iframe, so a hidden-textarea copy stays as the fallback everywhere.
+  function copyToClipboard(text, done) {
     if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(url).then(done, function () { legacyCopy(url, done); });
-    } else { legacyCopy(url, done); }
+      navigator.clipboard.writeText(text).then(done, function () { legacyCopy(text, done); });
+    } else { legacyCopy(text, done); }
   }
   function legacyCopy(text, done) {
     try {
@@ -4921,13 +5399,21 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     if (!tt) return;
     var code = tt.cells[c], col = HM_COLOR[code] || "--muted";
     var label = code === "-" ? t("histDidntRun") : outcomeLabel(hmOutcome(code));
+    // The AI's reading of THIS cell, when that run was triaged: the whole point of the
+    // matrix is spotting a block of red, and "which of these are actually regressions"
+    // is the next question it raises.
+    var cat = (tt.cats || {})[String(c)];
+    var verdict = cat
+      ? '<div class="tr"><span><i style="background:var(--tri-' + esc(triCat({ category: cat }))
+        + ')"></i>' + esc(triLabel(triCat({ category: cat }))) + "</span></div>"
+      : "";
     tipShow(
       '<div class="tt">' + esc(hmShort(tt.node_id)) + "</div>"
       + '<div class="tm wrap">' + esc(tt.node_id) + "</div>"
       + '<div class="tm">#' + (c + 1)
         + (run.created_at ? " · " + esc(fmtTime(run.created_at)) : "") + "</div>"
       + '<div class="tr"><span><i style="background:var(' + col + ')"></i>'
-        + esc(label) + "</span></div>",
+        + esc(label) + "</span></div>" + verdict,
       ev,
     );
   }

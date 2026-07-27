@@ -43,6 +43,7 @@ from ...notifications import (
     is_valid_email,
     record_sent_alert,
 )
+from ...triage import canonical_node_key
 from .common import ERR_400, ERR_403, ERR_404, RouteDeps, ok, ref_from_token
 
 _log = logging.getLogger(__name__)
@@ -197,6 +198,18 @@ _EX_SUMMARY = {
     "created_at": "2026-06-10T23:00:00+00:00",
     "logical_date": None,
     "has_allure": False,
+    "has_triage": False,
+    # {"model": "claude-sonnet-5", "counts": {"regression": 1}, "incomplete": False}
+    # for a triaged run; null when the run was never analysed.
+    "triage": None,
+}
+_EX_VERDICT = {
+    "category": "regression",
+    "hypothesis": "The loader stopped de-duplicating rows after the last merge.",
+    "confidence": "high",
+    "suggested_fix": "Restore the DISTINCT clause dropped in load_rows().",
+    "exc_type": "AssertionError",
+    "selector": "tests/test_etl.py::test_load",
 }
 _EX_CASE = {
     "node_id": "tests/test_etl.py::test_load",
@@ -205,6 +218,27 @@ _EX_CASE = {
     "outcome": "failed",
     "time": 0.3,
     "message": "AssertionError: row count mismatch",
+    "verdict": _EX_VERDICT,
+}
+#: `model` is whatever the provider reports -- pytest-triage's Anthropic default here;
+#: `null` for a provider that exposes no model name (the offline `fake` one does not).
+_EX_TRIAGE = {
+    "model": "claude-sonnet-5",
+    "duration": 4.12,
+    "total_failures": 1,
+    "total_verdicts": 1,
+    "counts": {"regression": 1},
+    "incomplete": None,
+}
+#: The detail response: a run summary plus everything only a single run carries.
+_EX_DETAIL = {
+    **_EX_SUMMARY,
+    "has_triage": True,
+    "cases": [_EX_CASE],
+    "alerts": [],
+    "coverage": 0.82,
+    "coverage_threshold": 0.85,
+    "triage": _EX_TRIAGE,
 }
 _EX_GROUP = {
     "dag_id": "api_gateway",
@@ -321,10 +355,17 @@ def build_heatmap(
     """
     n = len(runs)
     rows: dict[str, list[str]] = {}
+    # Sparse {column index -> category} per test: a verdict exists only for a failing cell,
+    # and only up to the run's --ai-budget, so a dense parallel matrix would be almost all
+    # padding. Emitted only for rows that have one.
+    cats: dict[str, dict[str, str]] = {}
     for ci, r in enumerate(runs):
         for node, outcome in (r.get("outcomes") or {}).items():
             row = rows.setdefault(node, ["-"] * n)
             row[ci] = _OUTCOME_CODE.get(str(outcome), "?")
+        for node, category in (r.get("verdicts") or {}).items():
+            if node in rows and category:
+                cats.setdefault(node, {})[str(ci)] = str(category)
 
     def rank(codes: list[str]) -> tuple[int, int]:
         bad = sum(1 for c in codes if c in _FAIL_CODES)
@@ -341,7 +382,11 @@ def build_heatmap(
         rows.items(), key=lambda kv: (-ranked[kv[0]][0], -ranked[kv[0]][1], kv[0])
     )
     truncated = len(ordered) > max_rows
-    tests = [{"node_id": node, "cells": cells} for node, cells in ordered[:max_rows]]
+    tests = [
+        {"node_id": node, "cells": cells}
+        | ({"cats": cats[node]} if node in cats else {})
+        for node, cells in ordered[:max_rows]
+    ]
     return {
         "runs": [
             {"run_id": r["run_id"], "created_at": r.get("created_at")} for r in runs
@@ -530,6 +575,9 @@ def build_router(deps: RouteDeps) -> APIRouter:
                         {
                             "node_id": "tests/api.py::test_auth",
                             "cells": ["p", "f", "-", "e"],
+                            # Sparse {column index -> AI category}; absent when the run's
+                            # tests carry no verdicts.
+                            "cats": {"1": "regression", "3": "env"},
                         }
                     ],
                     "total_tests": 1,
@@ -566,17 +614,32 @@ def build_router(deps: RouteDeps) -> APIRouter:
         runs.sort(key=lambda s: s.created_at or "", reverse=True)
         runs = runs[:win]
         runs.reverse()  # oldest -> newest, so columns read left (old) to right (new)
-        rdata = [
-            {
-                "run_id": s.ref.run_id,
-                "created_at": s.created_at,
-                "outcomes": {
-                    node: info.get("outcome", "")
-                    for node, info in (src.test_outcomes(s.ref) or {}).items()
-                },
-            }
-            for s in runs
-        ]
+        rdata = []
+        for s in runs:
+            outcomes = src.test_outcomes(s.ref) or {}
+            # Only for runs that were triaged: reading a run's verdicts costs one small file
+            # (no JUnit parse), measured at +7-15 ms across a 100-run window.
+            verdicts = src.verdicts(s.ref) if s.has_triage else {}
+            rdata.append(
+                {
+                    "run_id": s.ref.run_id,
+                    "created_at": s.created_at,
+                    "outcomes": {
+                        node: info.get("outcome", "") for node, info in outcomes.items()
+                    },
+                    # Keyed by the node id the MATRIX uses, which is whatever the run's
+                    # per-test map carries -- pytest's slash form from `tests` rows, or the
+                    # parser's dotted form when that map is reconstructed from junit.xml.
+                    # Verdicts are stored canonically, so the join goes through the same
+                    # normalisation the detail view uses.
+                    "verdicts": {
+                        node: verdicts[key].category
+                        for node in outcomes
+                        if (key := canonical_node_key(node)) in verdicts
+                        and verdicts[key].category
+                    },
+                }
+            )
         body = build_heatmap(rdata, max_rows=_HEATMAP_MAX_ROWS)
         return JSONResponse(
             {"dag_id": dag_id, "task_id": task_id, "window": win, **body}
@@ -586,7 +649,7 @@ def build_router(deps: RouteDeps) -> APIRouter:
         "/api/reports/{report_id}",
         summary="Get a run",
         responses={
-            **ok({**_EX_SUMMARY, "cases": [_EX_CASE]}),
+            **ok(_EX_DETAIL),
             **ERR_400,
             **ERR_403,
             **ERR_404,
@@ -598,8 +661,10 @@ def build_router(deps: RouteDeps) -> APIRouter:
     ) -> JSONResponse:
         """Full detail for one run, addressed by its opaque ``report_id`` token.
 
-        Includes every case's outcome, duration and captured output. ``400`` malformed
-        token, ``403`` dag not readable, ``404`` missing.
+        Includes every case's outcome, duration and captured output. A run archived with
+        ``ArchivingResultParser(triage_provider=...)`` also carries the AI analysis: a
+        ``triage`` roll-up (model, category counts) and a ``verdict`` on each failed case.
+        ``400`` malformed token, ``403`` dag not readable, ``404`` missing.
         """
         ref = ref_from_token(report_id)
         if not read_auth(ref.dag_id, user):

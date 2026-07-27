@@ -46,6 +46,19 @@ fresh page (selection/scroll state resets on reload) and asserts on **stable hoo
 `data-*`, SVG geometry) rather than translatable text, so copy/locale changes don't break
 them.
 
+Several seeds share that generator, one dashboard (and dev server) each, so a test picks the
+world it needs instead of building one:
+
+| Fixture | World | What it is for |
+|:--|:--|:--|
+| `dash` | the small seed | precise assertions on every panel |
+| `large_dash` | 40 dag·tasks × 80 runs | layout at scale (carousel, long lists) |
+| `green_dash` | all-passing | the flaky UI must disappear entirely |
+| `declining_dash` | health declining over time | the run-health trend must slope down |
+| `email_dash` | server with an SMTP host | the ✉ button appears |
+| `triage_dash` | all three triage states at once: `alpha` judged by a model (its newest run's pass broke), `gamma` report-only with no provider, `beta` never triaged | `test_ui_triage.py`: the card, the category filter, the per-failure panel, and the three run-list mark states |
+| `evil_dash` | XSS payloads in test names, messages **and verdict prose**, plus a rerun selector carrying `;` | everything must render as inert text, and the copy line must be shell-quoted |
+
 ## CI
 
 The `ui` job in `.github/workflows/ci.yml` installs the `ui-test` extra + the Chromium

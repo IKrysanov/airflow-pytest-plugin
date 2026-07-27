@@ -29,18 +29,35 @@ import uuid
 import zipfile
 from collections.abc import Iterator
 from pathlib import Path
-from typing import IO, Any
+from typing import IO, Any, cast
 
 from airflow_pytest_operator import JUnitResultParser
 
 from ..config import get_reports_root, get_scan_cache_ttl, get_success_threshold
-from ..layout import ALLURE_DIRNAME, META_FILENAME, REPORT_FILENAME, ReportLayout
+from ..layout import (
+    ALLURE_DIRNAME,
+    META_FILENAME,
+    REPORT_FILENAME,
+    VERDICTS_FILENAME,
+    ReportLayout,
+)
 from ..models import (
     CaseView,
     ReportDetail,
     ReportRef,
     ReportSummary,
+    Verdict,
     run_succeeds,
+)
+from ..triage import (
+    CATEGORIES,
+    canonical_node_key,
+    triage_rollup,
+    triage_view,
+    verdicts_from_document,
+)
+from ..triage import (
+    label as triage_label,
 )
 from .base import ReportSource
 
@@ -57,6 +74,10 @@ _log = logging.getLogger(__name__)
 
 #: Cap one case's captured output so a pathological report can't bloat a response.
 _MAX_OUTPUT = 16000
+#: Cap on a run's verdicts sidecar before it is parsed. The producer's own caps put the
+#: worst case near 500KB (200 verdicts x two 1000-char fields); anything far past that was
+#: not written by us, and this parse happens inside the api-server on every detail request.
+_MAX_VERDICTS_BYTES = 4 * 1024 * 1024
 
 
 class _ZipSink:
@@ -98,40 +119,50 @@ def _safe_allure_files(allure_dir: str) -> list[str]:
     ]
 
 
-def _open_allure_file(path: str) -> IO[bytes] | None:
-    """Open one Allure result for reading, or ``None`` if it isn't safe to.
+def open_archived_file(path: str, kind: str, *, mode: str = "rb") -> IO[Any] | None:
+    """Open a file the WORKER wrote inside a run's archive, or ``None`` if it isn't safe to.
 
-    Three hazards, all closed atomically at ``open`` rather than by a prior check that an
-    attacker could invalidate in between:
+    Every one of these is named by us but created by arbitrary pytest code on the worker,
+    so the same three hazards apply to all of them -- Allure results, the verdicts sidecar,
+    anything added later. All are closed atomically at ``open`` rather than by a prior check
+    an attacker could invalidate in between:
 
     * ``O_NOFOLLOW`` -- a symlink is never followed, so a test cannot point an entry at the
-      Fernet key or ``/etc/passwd`` and have the reader package it up. This also removes the
+      Fernet key or ``/etc/passwd`` and have the reader read it out. This also removes the
       swap-after-validation race entirely: there is no window to swap into.
     * ``O_NONBLOCK`` + ``S_ISREG`` -- a FIFO would otherwise block ``open`` FOREVER waiting
-      for a writer, pinning a server thread per download; devices and sockets are refused
-      for the same reason. Non-blocking has no effect on the regular files we keep.
+      for a writer, pinning a server thread per request; devices and sockets are refused for
+      the same reason. Non-blocking has no effect on the regular files we keep.
     """
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
         fd = os.open(path, flags)
     except OSError:  # symlink (ELOOP), vanished, or unreadable
         _log.warning(
-            "skipping Allure entry that is a link or unreadable: %s",
+            "skipping %s that is a link or unreadable: %s",
+            kind,
             " ".join(str(path).split())[:200],
         )
         return None
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             _log.warning(
-                "skipping non-regular Allure entry (fifo/device/socket): %s",
+                "skipping non-regular %s (fifo/device/socket): %s",
+                kind,
                 " ".join(str(path).split())[:200],
             )
             os.close(fd)
             return None
-        return os.fdopen(fd, "rb")
+        return os.fdopen(fd, mode, encoding=None if "b" in mode else "utf-8")
     except OSError:
         os.close(fd)
         return None
+
+
+def _open_allure_file(path: str) -> IO[bytes] | None:
+    """One Allure result, opened under the archive-file guarantees above."""
+    handle = open_archived_file(path, "Allure entry")
+    return cast("IO[bytes] | None", handle)
 
 
 class FileSystemReportSource(ReportSource):
@@ -267,6 +298,11 @@ class FileSystemReportSource(ReportSource):
 
         # The parser keeps only the short message; read the XML for full per-case output.
         outputs = self._case_outputs(report_path)
+        # AI verdicts are keyed by the canonical dotted node id, which is the form the JUnit
+        # parser already reconstructs -- re-canonicalizing here costs nothing and keeps the
+        # join working for a source whose cases arrive in pytest's native slash form.
+        rollup = triage_rollup(meta)
+        verdicts = self._load_verdicts(report_dir, rollup) if rollup is not None else {}
         cases = tuple(
             CaseView(
                 node_id=c.node_id,
@@ -275,6 +311,7 @@ class FileSystemReportSource(ReportSource):
                 outcome=c.outcome,
                 time=c.time,
                 message=outputs.get((c.classname, c.name), c.message),
+                verdict=verdicts.get(canonical_node_key(c.node_id)),
             )
             for c in result.cases
         )
@@ -284,7 +321,28 @@ class FileSystemReportSource(ReportSource):
             alerts=_alerts_from_meta(meta),
             coverage=_coverage_from_meta(meta),
             coverage_threshold=_coverage_threshold_from_meta(meta),
+            # Summarised over the verdicts actually attached, so the run-level card can
+            # never advertise a category the case table has no row for.
+            triage=triage_view(rollup, [c.verdict for c in cases if c.verdict]),
         )
+
+    def verdicts(self, ref: ReportRef) -> dict[str, Verdict]:
+        report_dir = self._safe_dir(ref)
+        if report_dir is None:
+            return {}
+        # verdicts.json first, and usually last: it is self-sufficient. Reading meta.json
+        # here as well would double the parse for every run of a heatmap window -- and that
+        # file, not this one, is the expensive read (it carries a row per test). Measured at
+        # 100 runs x 300 tests: 14ms -> 26ms. Only an archive written before the split, which
+        # keeps its verdicts inline in the roll-up, pays for the meta parse -- and it is the
+        # sidecar's PRESENCE that decides, not its contents: a triaged run with nothing to
+        # judge has an empty one, and reading meta for it would put the cost right back.
+        if os.path.exists(os.path.join(report_dir, VERDICTS_FILENAME)):
+            return self._load_verdicts(report_dir, None)
+        rollup = triage_rollup(
+            self._load_meta(Path(os.path.join(report_dir, META_FILENAME)))
+        )
+        return self._load_verdicts(report_dir, rollup) if rollup else {}
 
     def test_outcomes(self, ref: ReportRef) -> dict[str, dict[str, Any]] | None:
         report_dir = self._safe_dir(ref)
@@ -571,6 +629,43 @@ class FileSystemReportSource(ReportSource):
         return out
 
     @staticmethod
+    def _load_verdicts(
+        report_dir: str, rollup: dict[str, Any] | None
+    ) -> dict[str, Verdict]:
+        """The run's per-test AI verdicts from its ``verdicts.json``.
+
+        The file is named by us but written on the worker by the tested project's own
+        process, and this parse happens per detail request inside the Airflow api-server --
+        so it is opened under the archive-file guarantees (never a symlink, never a FIFO;
+        see :func:`open_archived_file`), sized on the descriptor already held rather than on
+        the path, and parsed defensively. Falls back to verdicts stored inline in the
+        roll-up, which is where archives written before the split keep them.
+        """
+        path = os.path.join(report_dir, VERDICTS_FILENAME)
+        document: Any = None
+        handle = open_archived_file(path, VERDICTS_FILENAME, mode="r")
+        if handle is not None:
+            try:
+                with handle:
+                    size = os.fstat(handle.fileno()).st_size
+                    if size > _MAX_VERDICTS_BYTES:
+                        _log.warning(
+                            "Ignoring oversized %s (%d bytes) in %s",
+                            VERDICTS_FILENAME,
+                            size,
+                            report_dir,
+                        )
+                    else:
+                        # RecursionError, not ValueError: a nesting bomb ("[[[[…") is how
+                        # json.load fails on one, and it would otherwise 500 the endpoint.
+                        document = json.load(handle)
+            except (OSError, ValueError, RecursionError):
+                _log.debug(
+                    "No readable %s in %s", VERDICTS_FILENAME, report_dir, exc_info=True
+                )
+        return verdicts_from_document(document, fallback=rollup)
+
+    @staticmethod
     def _load_meta(meta_file: Path) -> dict[str, Any] | None:
         try:
             with meta_file.open("r", encoding="utf-8") as fh:
@@ -622,6 +717,10 @@ class FileSystemReportSource(ReportSource):
             created_at=_opt_str(meta.get("created_at")),
             logical_date=_opt_str(meta.get("logical_date")),
             has_allure=bool(meta.get("allure")),
+            # A triaged run, even one whose provider produced nothing: the list marks it so
+            # "which runs were analysed" is answerable without opening each of them.
+            has_triage=isinstance(meta.get("triage"), dict),
+            triage=_triage_mix_from_meta(meta),
         )
 
 
@@ -659,6 +758,39 @@ def _unit_fraction(value: Any) -> float | None:
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         return float(value) if 0.0 <= value <= 1.0 else None
     return None
+
+
+def _triage_mix_from_meta(meta: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The run's verdict mix for the LIST view, straight from the stored roll-up.
+
+    Deliberately tiny -- categories with a count, plus whether the pass broke. The scan
+    parses every run's meta, so anything bigger here is paid on every dashboard load.
+    """
+    rollup = triage_rollup(meta)
+    if rollup is None:
+        return None
+    raw = rollup.get("counts")
+    counts = (
+        {
+            name: int(raw[name])
+            for name in CATEGORIES
+            if isinstance(raw, dict)
+            and isinstance(raw.get(name), int)
+            and raw[name] > 0
+        }
+        if isinstance(raw, dict)
+        else {}
+    )
+    incomplete = rollup.get("incomplete")
+    # The model name distinguishes the three states the list marks: a provider judged this
+    # run (named model), the pass broke (incomplete), or it was report-only (neither).
+    # Normalised through the same clip the detail view uses -- this string is echoed once
+    # per triaged run in a response that already carries thousands of them.
+    return {
+        "model": triage_label(rollup.get("model")),
+        "counts": counts,
+        "incomplete": bool(incomplete),
+    }
 
 
 def _coverage_from_meta(meta: dict[str, Any] | None) -> float | None:

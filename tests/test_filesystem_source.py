@@ -16,11 +16,19 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+import time
 
-from airflow_pytest_plugin.layout import META_FILENAME, ReportLayout
+from airflow_pytest_plugin.layout import META_FILENAME, VERDICTS_FILENAME, ReportLayout
 from airflow_pytest_plugin.models import ReportRef
-from airflow_pytest_plugin.sources import FileSystemReportSource
-from conftest import write_allure, write_report, write_report_xml, write_tests
+from airflow_pytest_plugin.sources import FileSystemReportSource, filesystem
+from conftest import (
+    write_allure,
+    write_report,
+    write_report_xml,
+    write_tests,
+    write_triage,
+)
 
 
 def test_missing_root_lists_nothing(reports_root):
@@ -1054,3 +1062,380 @@ def test_allure_ignores_a_symlinked_directory(reports_root, tmp_path):
 
     zf = zipfile.ZipFile(io.BytesIO(b"".join(src.allure_stream(ref))))
     assert zf.namelist() == ["real-result.json"]
+
+
+# --- AI triage ------------------------------------------------------------------------
+def _verdict(category="regression", **over):
+    v = {
+        "category": category,
+        "hypothesis": "the loader stopped de-duplicating rows",
+        "confidence": "high",
+        "suggested_fix": "restore the DISTINCT clause",
+        "exc_type": "AssertionError",
+        "selector": "tests/test_x.py::test_f1",
+    }
+    v.update(over)
+    return v
+
+
+def test_detail_joins_verdicts_onto_their_cases(reports_root):
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref, passed=1, failed=1)
+    # Stored in pytest's own slash form; the JUnit cases arrive dotted. The join must
+    # bridge the two without either side guessing.
+    write_triage(reports_root, ref, {"tests/test_x.py::test_f1": _verdict("env")})
+
+    detail = FileSystemReportSource(report_root=reports_root).get_detail(ref)
+    by_node = {c.node_id: c for c in detail.cases}
+    failed = by_node["tests.test_x::test_f1"]
+    assert failed.verdict.category == "env"
+    assert failed.verdict.suggested_fix == "restore the DISTINCT clause"
+    # A passing test has no verdict, and never invents one.
+    assert by_node["tests.test_x::test_p0"].verdict is None
+
+
+def test_detail_carries_the_run_level_roll_up(reports_root):
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref, passed=1, failed=1)
+    write_triage(
+        reports_root,
+        ref,
+        {"tests.test_x::test_f1": _verdict("test_bug")},
+        model="gpt-4o-mini",
+        total_failures=3,
+    )
+
+    detail = FileSystemReportSource(report_root=reports_root).get_detail(ref)
+    assert detail.triage.model == "gpt-4o-mini"
+    assert detail.triage.counts == {"test_bug": 1}
+    # Budget-limited pass: three failed, one was judged. The gap is visible, not hidden.
+    assert detail.triage.total_failures == 3 and detail.triage.total_verdicts == 1
+    payload = detail.to_dict()
+    assert payload["triage"]["model"] == "gpt-4o-mini"
+    assert payload["cases"][1]["verdict"]["category"] == "test_bug"
+
+
+def test_an_untriaged_run_reports_no_triage(reports_root):
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref, passed=1, failed=1)
+
+    detail = FileSystemReportSource(report_root=reports_root).get_detail(ref)
+    assert detail.triage is None
+    assert all(c.verdict is None for c in detail.cases)
+    assert detail.to_dict()["triage"] is None
+
+
+def test_summaries_flag_which_runs_were_triaged(reports_root):
+    triaged = ReportRef("dag", "run1", "task", 1)
+    plain = ReportRef("dag", "run2", "task", 1)
+    write_report(reports_root, triaged, passed=1, failed=1)
+    write_report(reports_root, plain, passed=1, failed=1)
+    write_triage(reports_root, triaged, {"tests.test_x::test_f1": _verdict()})
+
+    src = FileSystemReportSource(report_root=reports_root)
+    flags = {s.ref.run_id: s.has_triage for s in src.list_summaries()}
+    assert flags == {"run1": True, "run2": False}
+
+
+def test_a_corrupt_triage_block_does_not_break_the_detail(reports_root):
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref, passed=1, failed=1)
+    out_dir = ReportLayout().dir_for(reports_root, ref)
+    meta_path = os.path.join(out_dir, META_FILENAME)
+    meta = json.load(open(meta_path, encoding="utf-8"))
+    meta["triage"] = {"model": 42, "counts": "lots", "verdicts": ["nope"]}
+    with open(meta_path, "w", encoding="utf-8") as fh:
+        json.dump(meta, fh)
+
+    detail = FileSystemReportSource(report_root=reports_root).get_detail(ref)
+    assert detail is not None and detail.summary.total == 2
+    assert detail.triage.model is None and detail.triage.counts == {}
+    assert all(c.verdict is None for c in detail.cases)
+
+
+def test_legacy_archives_with_inline_verdicts_still_read(reports_root):
+    # Verdicts used to live inside the meta roll-up. Those archives keep working: the
+    # fallback costs three lines and spares them a silently empty analysis.
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref, passed=1, failed=1)
+    write_triage(
+        reports_root, ref, {"tests.test_x::test_f1": _verdict("flaky")}, inline=True
+    )
+    assert not os.path.exists(
+        os.path.join(ReportLayout().dir_for(reports_root, ref), VERDICTS_FILENAME)
+    )
+
+    detail = FileSystemReportSource(report_root=reports_root).get_detail(ref)
+    assert detail.triage.counts == {"flaky": 1}
+    assert detail.cases[1].verdict.category == "flaky"
+
+
+def test_an_oversized_verdicts_file_is_refused_not_parsed(reports_root, monkeypatch):
+    # This parse runs inside the Airflow api-server on every detail request, over a file
+    # written on the worker by the tested project's own process.
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref, passed=1, failed=1)
+    write_triage(reports_root, ref, {"tests.test_x::test_f1": _verdict()})
+    monkeypatch.setattr(filesystem, "_MAX_VERDICTS_BYTES", 10)
+
+    detail = FileSystemReportSource(report_root=reports_root).get_detail(ref)
+    # The run still opens, and still reads as triaged -- only the per-test analysis is gone.
+    assert detail is not None and detail.triage is not None
+    assert all(c.verdict is None for c in detail.cases)
+
+
+def test_a_verdict_for_a_test_the_run_does_not_have_is_not_advertised(reports_root):
+    # Real case: a collection error names the FILE, not a test, so pytest-triage reports a
+    # node id no JUnit case matches. The card must not offer a category the table cannot show.
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref, passed=1, failed=1)
+    write_triage(
+        reports_root,
+        ref,
+        {
+            "tests.test_x::test_f1": _verdict("env"),
+            "tests.test_ghost": _verdict("regression"),
+        },
+        total_failures=2,
+    )
+
+    detail = FileSystemReportSource(report_root=reports_root).get_detail(ref)
+    assert detail.triage.counts == {"env": 1}
+    assert detail.triage.total_verdicts == 1
+    # ...while what pytest-triage actually saw stays visible as the "1 of 2 judged" gap.
+    assert detail.triage.total_failures == 2
+
+
+def test_reading_verdicts_does_not_reparse_the_run_meta(reports_root, monkeypatch):
+    # The heatmap calls this for every run in its window, right after test_outcomes has
+    # already parsed that run's meta.json. Parsing it a second time just to reach the
+    # roll-up cost +80% on the heatmap's read phase (100 runs x 300 tests: 14ms -> 26ms).
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref, passed=1, failed=1)
+    write_triage(reports_root, ref, {"tests.test_x::test_f1": _verdict("env")})
+    src = FileSystemReportSource(report_root=reports_root)
+
+    parses: list = []
+    real = FileSystemReportSource._load_meta
+    monkeypatch.setattr(
+        FileSystemReportSource,
+        "_load_meta",
+        staticmethod(lambda p: (parses.append(p), real(p))[1]),
+    )
+    verdicts = src.verdicts(ref)
+
+    assert verdicts["tests.test_x::test_f1"].category == "env"
+    assert parses == [], (
+        "verdicts.json is self-sufficient; meta.json need not be re-read"
+    )
+
+
+def test_a_legacy_archive_still_costs_one_meta_read(reports_root, monkeypatch):
+    # Verdicts stored inline in the roll-up have nowhere else to come from, so that (and
+    # only that) shape pays the meta parse.
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref, passed=1, failed=1)
+    write_triage(
+        reports_root, ref, {"tests.test_x::test_f1": _verdict("flaky")}, inline=True
+    )
+    src = FileSystemReportSource(report_root=reports_root)
+
+    parses: list = []
+    real = FileSystemReportSource._load_meta
+    monkeypatch.setattr(
+        FileSystemReportSource,
+        "_load_meta",
+        staticmethod(lambda p: (parses.append(p), real(p))[1]),
+    )
+    assert src.verdicts(ref)["tests.test_x::test_f1"].category == "flaky"
+    assert len(parses) == 1
+
+
+def test_a_runaway_model_name_cannot_bloat_the_list(reports_root):
+    # `model` from the roll-up lands in the /api/reports payload for EVERY triaged run, and
+    # meta.json is written on the worker by the tested project's own process. Unbounded, one
+    # corrupt run would put megabytes into a response that already carries thousands.
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref, passed=1, failed=1)
+    write_triage(reports_root, ref, {}, model="m" * 5000)
+
+    summary = FileSystemReportSource(report_root=reports_root).list_summaries()[0]
+    assert len(summary.triage["model"]) <= 200
+    # ...and a non-string is not stringified into the payload either.
+    write_triage(reports_root, ref, {}, model=None)
+    meta_path = os.path.join(ReportLayout().dir_for(reports_root, ref), META_FILENAME)
+    meta = json.load(open(meta_path, encoding="utf-8"))
+    meta["triage"]["model"] = {"nope": 1}
+    json.dump(meta, open(meta_path, "w"))
+    src = FileSystemReportSource(report_root=reports_root)
+    assert src.list_summaries()[0].triage["model"] is None
+
+
+# --- security: verdicts.json is written on the worker by arbitrary test code -----------
+# Same threat model as the Allure results: the reader opens a file whose name we chose but
+# whose CONTENT and inode a hostile (or merely broken) test controls, inside the Airflow
+# api-server that serves the rest of Airflow.
+
+
+def test_a_symlinked_verdicts_file_is_never_followed(reports_root):
+    # A test could drop `verdicts.json -> /opt/airflow/airflow.cfg` and have the reader
+    # open it. Nothing outside the run's own directory may be read.
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref, passed=1, failed=1)
+    write_triage(reports_root, ref, {"tests.test_x::test_f1": _verdict()})
+    run_dir = ReportLayout().dir_for(reports_root, ref)
+    secret = os.path.join(reports_root, "secret.json")
+    with open(secret, "w", encoding="utf-8") as fh:
+        json.dump(
+            {"verdicts": {"tests.test_x::test_f1": {"category": "regression"}}}, fh
+        )
+    target = os.path.join(run_dir, VERDICTS_FILENAME)
+    os.unlink(target)
+    os.symlink(secret, target)
+
+    detail = FileSystemReportSource(report_root=reports_root).get_detail(ref)
+    assert detail is not None  # the run still opens...
+    assert all(c.verdict is None for c in detail.cases), "a symlink was followed"
+
+
+def test_a_verdicts_fifo_does_not_hang_the_server(reports_root):
+    # open() on a FIFO blocks FOREVER waiting for a writer, pinning one api-server thread
+    # per request -- the cheapest denial of service there is.
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref, passed=1, failed=1)
+    write_triage(reports_root, ref, {"tests.test_x::test_f1": _verdict()})
+    target = os.path.join(ReportLayout().dir_for(reports_root, ref), VERDICTS_FILENAME)
+    os.unlink(target)
+    os.mkfifo(target)
+
+    finished = threading.Event()
+    result: list = []
+
+    def read() -> None:
+        result.append(FileSystemReportSource(report_root=reports_root).get_detail(ref))
+        finished.set()
+
+    threading.Thread(target=read, daemon=True).start()
+    assert finished.wait(timeout=10), "reading a FIFO blocked the request"
+    assert result[0] is not None
+    assert all(c.verdict is None for c in result[0].cases)
+
+
+def test_a_deeply_nested_verdicts_file_is_refused_not_crashed(reports_root):
+    # json.load raises RecursionError (not ValueError) on a nesting bomb, which would sail
+    # past an `except (OSError, ValueError)` and 500 the detail endpoint.
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref, passed=1, failed=1)
+    write_triage(reports_root, ref, {"tests.test_x::test_f1": _verdict()})
+    target = os.path.join(ReportLayout().dir_for(reports_root, ref), VERDICTS_FILENAME)
+    with open(target, "w", encoding="utf-8") as fh:
+        fh.write("[" * 100_000 + "]" * 100_000)
+
+    detail = FileSystemReportSource(report_root=reports_root).get_detail(ref)
+    assert detail is not None and all(c.verdict is None for c in detail.cases)
+
+
+def test_verdicts_are_never_read_from_outside_the_report_root(reports_root, tmp_path):
+    # A traversal TOKEN alone proves nothing -- the layout sanitises `..` away, so the path
+    # simply does not exist and any implementation "passes". The real escape is a symlinked
+    # run directory: it resolves outside the root, and only the realpath boundary stops the
+    # read. Planted with a genuine verdicts.json, so a missing boundary would be visible.
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / VERDICTS_FILENAME).write_text(
+        json.dumps({"verdicts": {"tests.test_x::test_f1": {"category": "regression"}}}),
+        encoding="utf-8",
+    )
+    ref = ReportRef("linked", "run", "task", 1)
+    run_dir = ReportLayout().dir_for(reports_root, ref)
+    os.makedirs(os.path.dirname(run_dir), exist_ok=True)
+    os.symlink(outside, run_dir)
+
+    src = FileSystemReportSource(report_root=reports_root)
+    assert src.verdicts(ref) == {}, "a symlinked run directory escaped the report root"
+    assert src.get_detail(ref) is None
+
+
+def test_an_orphan_verdicts_file_is_ignored_by_the_run_detail(reports_root):
+    # meta.json is the authority on whether a run was triaged. A verdicts.json with no
+    # roll-up beside it -- a leftover, or a write that crashed between the two files -- must
+    # not put verdicts on a run the archive says was never analysed.
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref, passed=1, failed=1)
+    run_dir = ReportLayout().dir_for(reports_root, ref)
+    with open(os.path.join(run_dir, VERDICTS_FILENAME), "w", encoding="utf-8") as fh:
+        json.dump({"verdicts": {"tests.test_x::test_f1": _verdict("regression")}}, fh)
+
+    detail = FileSystemReportSource(report_root=reports_root).get_detail(ref)
+    assert detail.triage is None
+    assert all(c.verdict is None for c in detail.cases)
+
+
+def test_a_reader_never_sees_a_half_written_verdicts_file(reports_root):
+    # The PRODUCER rewrites this file on a retry while the api-server may be reading it, so
+    # the writer under test is the parser's own, not the test helper's (which writes in
+    # place). temp + rename means a reader sees the old file or the new one, never a
+    # truncated one. Hammered from two threads to make a torn read observable at all.
+    from airflow_pytest_plugin.producer import ArchivingResultParser
+    from airflow_pytest_plugin.triage import TriageArchive
+
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref, passed=1, failed=1)
+    write_triage(reports_root, ref, {"tests.test_x::test_f1": _verdict("env")})
+    report_path = ReportLayout().report_path(reports_root, ref)
+    parser = ArchivingResultParser(report_root=reports_root)
+    src = FileSystemReportSource(report_root=reports_root)
+
+    small = TriageArchive(verdicts={"tests.test_x::test_f1": _verdict("env")})
+    big = TriageArchive(
+        verdicts={
+            f"tests.test_x::test_f{i}": _verdict("regression") for i in range(400)
+        }
+    )
+    stop = threading.Event()
+    torn: list = []
+
+    def rewrite() -> None:
+        while not stop.is_set():
+            parser._write_verdicts(report_path, big)
+            parser._write_verdicts(report_path, small)
+
+    def read() -> None:
+        while not stop.is_set():
+            if not src.verdicts(ref):  # either size is fine; empty means a torn parse
+                torn.append(1)
+
+    threads = [
+        threading.Thread(target=rewrite, daemon=True),
+        threading.Thread(target=read, daemon=True),
+    ]
+    for thread in threads:
+        thread.start()
+    time.sleep(1.5)
+    stop.set()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert torn == [], f"{len(torn)} torn reads -- the swap is not atomic"
+
+
+def test_an_empty_verdicts_file_does_not_trigger_the_legacy_meta_read(
+    reports_root, monkeypatch
+):
+    # A triaged run can legitimately have zero verdicts (report-only with nothing
+    # describable). Treating "empty" as "absent" sent it down the legacy fallback, paying a
+    # meta parse per heatmap column for a file that was right there and simply empty.
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref, passed=1, failed=1)
+    write_triage(reports_root, ref, {})
+    src = FileSystemReportSource(report_root=reports_root)
+
+    parses: list = []
+    real = FileSystemReportSource._load_meta
+    monkeypatch.setattr(
+        FileSystemReportSource,
+        "_load_meta",
+        staticmethod(lambda p: (parses.append(p), real(p))[1]),
+    )
+    assert src.verdicts(ref) == {}
+    assert parses == [], "an empty sidecar is still a sidecar -- no meta read needed"

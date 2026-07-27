@@ -53,6 +53,7 @@ It has two halves that share one on-disk layout:
 - [HTTP API](#http-api)
 - [Access control (RBAC)](#access-control-rbac)
 - [Coverage](#coverage)
+- [AI triage](#ai-triage)
 - [Configuration](#configuration)
 - [Prometheus metrics](#prometheus-metrics)
 - [Architecture (SOLID)](#architecture-solid)
@@ -86,9 +87,22 @@ click a slice to filter by status), a **coverage** card next to the duration (wh
 run was produced by [`airflow-pytest-operator`](https://github.com/IKrysanov/airflow-pytest-operator)
 `>= 0.6` with `coverage=True` — see [Coverage](#coverage); omitted when the run carries
 none), a **test-duration histogram** (10-second buckets, scrollable), case
-search / group-by-module, and every test's captured output on expand:
+search / group-by-module, and every test's captured output on expand. With
+[AI triage](#ai-triage) on, each failed test also carries its verdict — *regression /
+flaky / environment / test bug* — with the model's hypothesis, a suggested fix and a
+rerun command, plus a run-level card that filters the table by category:
 
 ![Pytest Reports — a single run](https://raw.githubusercontent.com/IKrysanov/airflow-pytest-plugin/main/docs/screenshots/detail.png)
+
+**AI triage** — with [`pytest-triage`](https://pypi.org/project/pytest-triage/) on the
+worker, every failed test answers the question a traceback does not: *is this my code, the
+test, or the environment?* Each failure carries a **category** (regression / flaky /
+environment / test bug), and expands to the model's **hypothesis**, a **suggested fix**, its
+**confidence** and a ready-to-paste rerun command. The card above the table names the model,
+shows the category mix, and filters the table to one group in a click — see
+[AI triage](#ai-triage):
+
+![Pytest Reports — AI triage](https://raw.githubusercontent.com/IKrysanov/airflow-pytest-plugin/main/docs/screenshots/triage.png)
 
 **Flaky tests & comparison** — from a run, *Flaky tests* lists the tests that
 both pass and fail across recent runs, each with a recent-outcome strip, a
@@ -138,6 +152,19 @@ pip install 'airflow-pytest-plugin[web]'   # reader side (API server)
 
 On Airflow 3 the API server already provides FastAPI, so the bare install is
 enough there too; the `[web]` extra only adds the standalone dev server.
+
+Optional extras, each for one side:
+
+| Extra | Side | What it adds |
+|:--|:--|:--|
+| `web` | reader | FastAPI + uvicorn, for the standalone dev server |
+| `secure-xml` | reader | `defusedxml`, hardened parsing of untrusted JUnit reports |
+| `triage` | **worker** | `pytest-triage` — the failure report plus its offline `fake` provider ([AI triage](#ai-triage)) |
+| `triage-anthropic` / `triage-openai` / `triage-gigachat` | **worker** | the same, with that provider's SDK, so one install covers the whole feature |
+
+The triage extras belong on the **worker**, where the tests run: the parser splices
+pytest-triage's flags onto the pytest command line. The reader needs nothing extra — it only
+reads what was archived.
 
 ## Quickstart
 
@@ -210,6 +237,12 @@ PytestOperator                      {root}/{dag}/{run}/           FastAPI app
        parse()          → meta.json     └─ meta.json                 parses junit.xml
 ```
 
+Optional flags add files beside those two, each read by exactly one consumer:
+`allure-results/` (TestOps export), `coverage.json` (folded into `meta.json` at archive
+time), and with [AI triage](#ai-triage) `verdicts.json` (the distilled judgements, opened
+only by the run detail and the heatmap — pytest-triage's own raw report is removed once it
+has been read).
+
 * `report_request()` reads the live Airflow context (`get_current_context()`,
   available because the parser runs inside the task's `execute()`), computes the
   archive directory, and hands it to the operator's JUnit parser.
@@ -231,15 +264,15 @@ runtime. Endpoints (relative to the mount):
 | Method & path | Returns |
 | --- | --- |
 | `GET /` | the single-page viewer (HTML) |
-| `GET /api/reports?dag_id=&run_id=` | summaries, newest first |
-| `GET /api/reports/{report_id}` | one report with per-case rows |
+| `GET /api/reports?dag_id=&run_id=` | summaries, newest first (each with its AI `triage` mix, when analysed) |
+| `GET /api/reports/{report_id}` | one report with per-case rows (each with its AI `verdict`, when the run was triaged) plus the run's `triage` roll-up |
 | `GET /api/groups?dag_id=&task_id=` | runs aggregated by dag·task (count, pass-rate, avg duration, last status) |
 | `GET /api/failures?dag_id=&run_id=&task_id=&latest=` | failed/errored cases — each dag·task's latest run by default (`latest=0` for full history) |
 | `GET /api/failure-clusters?dag_id=&run_id=&task_id=&latest=` | failures grouped by normalized error signature (biggest first); latest-run-only by default |
 | `GET /api/compare?base=&head=` | per-test diff between two runs (newly failed / fixed / …) |
 | `GET /api/flaky?dag_id=&task_id=&window=` | flaky tests with score, trend, and a quarantine flag |
 | `GET /api/slow?dag_id=&task_id=&window=` | duration regressions (tests whose execution time got slower) + the slowest tests by average |
-| `GET /api/heatmap?dag_id=&task_id=&window=` | test×run outcome matrix for one dag·task (rows = tests sorted most-broken first, cells = `p`/`f`/`e`/`s`/`-` aligned to recent runs) |
+| `GET /api/heatmap?dag_id=&task_id=&window=` | test×run outcome matrix for one dag·task (rows = tests sorted most-broken first, cells = `p`/`f`/`e`/`s`/`-` aligned to recent runs; `cats` marks which cells the AI judged and how) |
 | `GET /api/test-history?dag_id=&task_id=&node_id=&limit=` | one test's outcome per run |
 | `GET /api/unique-tests?dag_id=&task_id=&run_id=&full=` | distinct test count (+ when `full`, each test's runs / passed / failed / errors / skipped / avg duration) |
 | `DELETE /api/reports/{report_id}` | delete a report (RBAC-gated) |
@@ -398,6 +431,158 @@ does not depend on seeing the tint.
 > shortfall to actually **fail the task**, that is the operator's job: set `cov_fail_under`
 > on `PytestOperator`. The two are independent on purpose — you can watch coverage in the UI
 > long before you are ready to enforce it in CI.
+
+## AI triage
+
+A nightly DAG that fails at 3 a.m. gives you a traceback. Somebody still has to answer the
+only question that matters: **is this my code, the test, or the environment?**
+[`pytest-triage`](https://pypi.org/project/pytest-triage/) turns that judgement into
+structured data; this plugin archives it with the run and shows it where the failure is.
+
+### Quick start
+
+Install it on the worker, with the extra for the provider you want:
+
+```bash
+pip install 'airflow-pytest-plugin[triage-anthropic]'   # or [triage-openai] / [triage-gigachat]
+```
+
+(That is just `pytest-triage` with that provider's SDK — `pip install "pytest-triage[anthropic]"`
+does the same thing if you manage the worker's dependencies directly. Plain `[triage]` gets
+the report and the offline `fake` provider, with no LLM SDK at all.)
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...      # read by that provider's own SDK, never by us
+```
+
+```python
+PytestOperator(
+    ...,
+    result_parser=ArchivingResultParser(triage_provider="anthropic"),
+)
+```
+
+That is the whole setup. Three levels of opt-in, mirroring pytest-triage's own:
+
+| What you want | What to pass | Cost |
+|:--|:--|:--|
+| Nothing (the default) | — | none; the archive is byte-for-byte what it was |
+| Every failure described — its **exception type** and a **command that reruns just it**, no AI | `triage=True` | none: no provider, no network |
+| A verdict, hypothesis and suggested fix per failure | `triage_provider="anthropic"` | see [What a run costs](#what-a-run-costs) |
+
+Naming a provider implies the report, so one argument is enough. Try it with no key and no
+network first — `triage_provider="fake"` classifies off the exception type and is a real
+end-to-end rehearsal of the whole pipeline.
+
+### What you get in the UI
+
+| Where | What it shows |
+|:--|:--|
+| Each failed test's row | its **category** chip — `regression` (the code broke) / `flaky` / `env` (the environment, not the code) / `test_bug` / `unclear`. A failure that was reported but never judged carries no chip |
+| Expanding that row | the model's **hypothesis**, a **suggested fix**, its **confidence**, and `pytest <selector>` to rerun just that test — above the traceback, because the diagnosis is what you read first. Without a verdict the panel still gives the exception type and that rerun command, which is what `triage=True` buys |
+| Above the case table | a card with the **model**, the **category mix** as a proportional bar, and a chip per category that filters the table to it |
+| The test×run **heatmap** | a hovered cell names the AI's reading of that failure, so a block of red separates into "real regressions" and "the environment was down" without opening a single run |
+| The run list | a mark per analysed run, coloured by state — **red** the pass broke, **blue** a model judged it (hover names the model), **grey** report-only with no provider — and naming the mix it found (*Regression 2, Environment 1*) |
+
+### Configuration
+
+Every knob is a parser argument that maps to one pytest-triage flag. Unset means *its*
+default applies, so there is one source of truth for each:
+
+| Parser argument | pytest-triage flag | Default | Purpose |
+|:--|:--|:--|:--|
+| `triage=True` | `--ai-report=<archive>/triage.json` | off | write the failure report into the run's archive |
+| `triage_provider="NAME"` | `--ai-triage=on --ai-provider=NAME` | off | also run the LLM pass. Implies the report |
+| `triage_budget=N` | `--ai-budget=N` | `10` | most provider calls per run — the cost ceiling |
+| `triage_timeout=SEC` | `--ai-timeout=SEC` | `30` | wall clock per call |
+
+Providers are pytest-triage's, not ours: `anthropic`, `openai` (and any OpenAI-compatible
+endpoint — Kimi, DeepSeek, Groq, Ollama, vLLM — via `OPENAI_BASE_URL`), `gigachat`, plus the
+offline `fake`. Credentials are read by each provider's own SDK from the environment; this
+plugin never sees, logs or stores a key. Model choice is likewise theirs (`ANTHROPIC_MODEL`,
+`OPENAI_MODEL`, …) — see the [pytest-triage README](https://pypi.org/project/pytest-triage/).
+
+### What a run costs
+
+Measured, not estimated — one real Anthropic run of a suite that breaks nine ways
+(`claude-sonnet-5`, July 2026 list prices):
+
+| | Per run of 9 failures | Per failure |
+|:--|--:|--:|
+| Provider calls | 9 | 1 |
+| Input tokens | 11,882 | ~1,320 |
+| Output tokens | 2,090 | ~230 |
+| Cost | **$0.067** | ~$0.0074 |
+| Added wall time | ~40 s | ~4.4 s |
+
+Three things follow, and they are the ones that surprise people:
+
+- **The bill scales with failing tests, not with suite size.** A green run costs nothing at
+  all — there are no failures to send. `triage_budget` is the hard ceiling: past it, the
+  remaining failures are simply left unjudged, and the UI says so ("*N* of *M* failures
+  judged") instead of showing a complete-looking picture.
+- **pytest-triage's dedup cache almost never fires.** It hashes the whole traceback, and
+  pytest prints each test's arguments into that — so even two parametrised cases of one test
+  failing identically are two calls. Budget for one call per failing test.
+- **A retry pays again, in full.** The cache is in-memory, per pytest process, so try 2 of
+  the same failures re-runs the provider (measured: identical 11,882 input tokens both
+  times). Each try keeps its own analysis, which is what makes "did the retry fail
+  differently?" answerable — but a task with `retries=3` can cost 4× its budget. Verdicts
+  are not deterministic either: the same failure was called `test_bug` on one try and
+  `flaky` on the next.
+
+### When the triage pass does not complete
+
+A rejected key, a timeout, an exhausted budget or a provider that keeps failing are
+**operational failures of the pass, not diagnoses of your tests**. pytest-triage reports
+them as `unknown` verdicts; the plugin drops those and reports the reason once, at run
+level, in the provider's own words. All four modes were exercised against the real library
+— a rejected key (live `401` from the Anthropic API), a provider that times out, one that
+cannot be reached, and an exhausted budget — and each produced the warning below with
+**zero** invented verdicts:
+
+> ⚠ The AI pass did not complete: triage provider error: AuthenticationError: Error code:
+> 401 — API key is invalid.
+
+so a misconfigured run reads as *misconfigured* rather than as nine tests the AI found
+"unclear". pytest-triage stops calling a provider that has proven it will not answer (one
+timeout, or two errors in a row), so a bad key costs two calls, not your whole budget.
+
+### What is stored, and where
+
+Inside the run's archive directory, beside `junit.xml`:
+
+| File | Written by | Read by | Why |
+|:--|:--|:--|:--|
+| `verdicts.json` | the parser | the run detail, the heatmap | the distilled judgements, keyed to their tests |
+| `meta.json` → `triage` | the parser | every tree scan | a small roll-up: model, duration, category counts |
+
+pytest-triage's own `triage.json` is written into the same directory and **removed once it
+has been distilled**. It is the largest file a run produces (measured: 10.1 KB against
+`junit.xml`'s 8.5 KB), it repeats tracebacks `junit.xml` already stores, and being
+owner-only (`0600` — even a redacted traceback may hold residual secrets) the reader could
+never open it anyway. It is kept only when it could *not* be read, where it is the sole
+record of what went wrong.
+
+The split is deliberate and load-tested. Every summary endpoint parses each run's
+`meta.json` in full; verdicts kept there would be read by every dashboard load. At 3,000
+runs × 200 verdicts that made a cold scan **4.4× slower (300 ms → 1,325 ms)** and grew the
+scanned corpus from 48 MB to 1.3 GB. Keeping them beside it, the scan is unchanged and the
+cost lands only on the one request that shows them (+6 ms on a 500-test run).
+
+Like coverage, verdicts are read while archiving and stored with the run, so they **survive
+a failed run** — the operator raises *after* the parser has run, and a red suite is exactly
+what you want triaged.
+
+The `GET /api/reports` list carries each run's verdict mix straight from that roll-up —
+`triage.counts`, the `model` that judged them, and an `incomplete` flag — so a dashboard can
+show what a run found, and which of the three states it is in, without opening it.
+`GET /api/reports/{id}` adds the per-test judgements.
+
+> **Requires `pytest-triage` on the worker.** Like `allure=True` and `coverage=True`, the
+> flags are spliced onto the pytest command line, so pytest aborts with *unrecognized
+> arguments* if the package is missing. Nothing about triage can fail a run otherwise: a
+> missing, unreadable or half-written report just leaves the archive without an AI section.
 
 ## Configuration
 
@@ -600,6 +785,7 @@ Mirrors the operator's layering — each piece has one reason to change:
 | `retention` | pure `select_expired` decision + a `prune` orchestrator over any `ReportSource` |
 | `notifications` | pure `evaluate_alerts` decision + a `notify_for_run` orchestrator over any `ReportSource` + a pluggable `Mailer` |
 | `flaky_core` | web-free flaky scoring behind the `/api/flaky` route |
+| `triage` | the pytest-triage contract in one place: node-id canonicalisation, the producer's `distill_report`, the reader's `triage_from_meta` |
 | `plugin.PytestReportsPlugin` | register the app with Airflow |
 | `compat` | the only module that imports Airflow; version differences resolved once |
 | `models` | JSON-serializable view types; the web layer never sees operator types |

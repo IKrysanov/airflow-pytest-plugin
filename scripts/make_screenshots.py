@@ -44,8 +44,14 @@ sys.path.insert(0, "src")
 from playwright.sync_api import sync_playwright
 
 import conftest as c
-from airflow_pytest_plugin.layout import ALLURE_DIRNAME, META_FILENAME, ReportLayout
+from airflow_pytest_plugin.layout import (
+    ALLURE_DIRNAME,
+    META_FILENAME,
+    VERDICTS_FILENAME,
+    ReportLayout,
+)
 from airflow_pytest_plugin.models import ReportRef
+from airflow_pytest_plugin.triage import canonical_node_key
 
 OUT = pathlib.Path("docs/screenshots")
 root = tempfile.mkdtemp(prefix="shots-")
@@ -60,6 +66,45 @@ SPECS = [
     ("smoke_checks", False),
 ]
 NRUNS = 25
+# One verdict per category, cycled over each run's failures: the triage card then shows a
+# real mix rather than five copies of the same judgement.
+TRIAGE_VERDICTS = [
+    (
+        "regression",
+        "high",
+        "AssertionError",
+        "The loader stopped de-duplicating rows after the merge in load_rows(), so every "
+        "source key is now written twice.",
+        "Restore the DISTINCT clause dropped in load_rows() and cover it with a test for "
+        "repeated source keys.",
+    ),
+    (
+        "env",
+        "high",
+        "ConnectionError",
+        "The suite could not reach the payments service: it is not up in this environment, "
+        "so nothing about the code was actually measured here.",
+        "Wait for the payments healthcheck before the suite starts, or mark the test as "
+        "requiring the integration environment.",
+    ),
+    (
+        "test_bug",
+        "medium",
+        "AssertionError",
+        "The expected total (108.5) is stale and does not account for shipping being part "
+        "of the total; the code correctly computes 113.5.",
+        "Update the assertion to `assert total == 113.5`.",
+    ),
+    (
+        "flaky",
+        "low",
+        "TimeoutError",
+        "The test waits a fixed 200 ms for an async job that usually, but not always, "
+        "finishes in time.",
+        "Poll for the job's completion with a deadline instead of sleeping.",
+    ),
+    ("unknown", None, "RuntimeError", None, None),
+]
 c._seed(root, SPECS, NRUNS)
 c._add_alert_history(root, "etl_daily", f"r{NRUNS - 1:03d}")
 
@@ -91,6 +136,41 @@ for dag, _ in SPECS:
                     open(os.path.join(ad, f"{k}-result.json"), "w"),
                 )
             meta["allure"] = True
+        # AI triage on the runs that actually broke, so the verdict card and the per-failure
+        # analysis both have something to say. Believable prose, not lorem ipsum: these
+        # sentences are what an on-call engineer would read at 3 a.m.
+        broken = [r[0] for r in meta.get("tests", []) if r[1] in ("failed", "error")]
+        if broken:
+            verdicts, counts = {}, {}
+            for n, node in enumerate(broken):
+                cat, conf, exc, hyp, fix = TRIAGE_VERDICTS[
+                    (n + i) % len(TRIAGE_VERDICTS)
+                ]
+                verdicts[canonical_node_key(node)] = {
+                    "category": cat,
+                    "hypothesis": hyp,
+                    "confidence": conf,
+                    "suggested_fix": fix,
+                    "exc_type": exc,
+                    # The seed already names tests in pytest's own slash form, which is
+                    # exactly what a rerun selector is.
+                    "selector": node,
+                }
+                counts[cat] = counts.get(cat, 0) + 1
+            meta["triage"] = {
+                "schema_version": 1,
+                "model": "claude-sonnet-5",
+                "duration": round(3.4 + (i % 7) * 1.3, 2),
+                "total_failures": len(broken),
+                "total_verdicts": len(verdicts),
+                "counts": counts,
+                "incomplete": None,
+            }
+            # Beside meta.json, never inside it: the tree scan parses meta for every run.
+            json.dump(
+                {"schema_version": 1, "verdicts": verdicts},
+                open(os.path.join(d, VERDICTS_FILENAME), "w"),
+            )
         json.dump(meta, open(mp, "w"))
 
 s = socket.socket()
@@ -178,6 +258,17 @@ with sync_playwright() as p:
     pg.wait_for_selector(".donut-pct")
     pg.wait_for_timeout(900)
     shot(pg, "detail", "dialog#detail")
+
+    # AI triage: the run-level card at the top of the frame, with one failed test expanded
+    # so its verdict, hypothesis, fix and rerun command are all in the same shot.
+    if pg.locator("tr.case:has(.case-tri)").count():
+        pg.locator("tr.case:has(.case-tri)").first.click()
+        pg.evaluate(
+            "document.querySelector('.tri-card')"
+            ".scrollIntoView({block: 'start', behavior: 'instant'})"
+        )
+        pg.wait_for_timeout(700)
+        shot(pg, "triage", "dialog#detail")
 
     pg.click("#flk-btn")
     pg.wait_for_selector("#flk-list .fk-row")

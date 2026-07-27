@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -22,9 +23,16 @@ import subprocess
 import pytest
 
 from airflow_pytest_plugin.compat import airflow_auth_available
+from airflow_pytest_plugin.layout import META_FILENAME, ReportLayout
 from airflow_pytest_plugin.models import ReportRef
 from airflow_pytest_plugin.sources import FileSystemReportSource
-from conftest import write_allure, write_report, write_report_xml, write_tests
+from conftest import (
+    write_allure,
+    write_report,
+    write_report_xml,
+    write_tests,
+    write_triage,
+)
 
 fastapi = pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
@@ -2348,3 +2356,232 @@ def test_allure_download_falls_back_for_a_source_without_streaming(reports_root)
     tok = ReportRef("dag", "run", "task", 1, -1).token
     r = c.get(f"/api/reports/{tok}/allure.zip")
     assert r.status_code == 200 and r.content[:2] == b"PK"
+
+
+# --- AI triage in the API ---------------------------------------------------------------
+def _triage_verdict(category="regression"):
+    return {
+        "category": category,
+        "hypothesis": "the loader stopped de-duplicating rows",
+        "confidence": "high",
+        "suggested_fix": "restore the DISTINCT clause",
+        "exc_type": "AssertionError",
+        "selector": "tests/test_x.py::test_f1",
+    }
+
+
+def test_report_detail_carries_the_ai_analysis(reports_root):
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref, passed=1, failed=1)
+    write_triage(
+        reports_root, ref, {"tests/test_x.py::test_f1": _triage_verdict("env")}
+    )
+    client = TestClient(make_app(reports_root))
+
+    body = client.get(f"/api/reports/{ref.token}").json()
+    assert body["triage"]["model"] == "claude-sonnet-5"
+    assert body["triage"]["counts"] == {"env": 1}
+    verdicts = {c["node_id"]: c["verdict"] for c in body["cases"]}
+    assert verdicts["tests.test_x::test_f1"]["category"] == "env"
+    assert verdicts["tests.test_x::test_f1"]["selector"] == "tests/test_x.py::test_f1"
+    assert verdicts["tests.test_x::test_p0"] is None
+
+
+def test_report_detail_without_triage_says_so_explicitly(reports_root):
+    # The key is always present: the UI branches on null, not on a missing field.
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref, passed=1, failed=1)
+    client = TestClient(make_app(reports_root))
+
+    body = client.get(f"/api/reports/{ref.token}").json()
+    assert body["triage"] is None
+    assert all(c["verdict"] is None for c in body["cases"])
+
+
+def test_run_list_flags_triaged_runs(reports_root):
+    triaged = ReportRef("dag", "run1", "task", 1)
+    plain = ReportRef("dag", "run2", "task", 1)
+    write_report(reports_root, triaged, passed=1, failed=1)
+    write_report(reports_root, plain, passed=1, failed=1)
+    write_triage(reports_root, triaged, {"tests.test_x::test_f1": _triage_verdict()})
+    client = TestClient(make_app(reports_root))
+
+    flags = {
+        r["run_id"]: r["has_triage"]
+        for r in client.get("/api/reports").json()["reports"]
+    }
+    assert flags == {"run1": True, "run2": False}
+
+
+def test_the_documented_examples_match_the_real_response(reports_root):
+    # The OpenAPI examples are hand-written, so they drift: `incomplete` was added to the
+    # triage payload and the example kept the old shape until a reader noticed. Pin them to
+    # what the endpoint actually returns, key for key.
+    from airflow_pytest_plugin.web.routes import reports as reports_routes
+
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref, passed=1, failed=1)
+    write_triage(reports_root, ref, {"tests.test_x::test_f1": _triage_verdict()})
+    client = TestClient(make_app(reports_root))
+
+    body = client.get(f"/api/reports/{ref.token}").json()
+    real_case = next(c for c in body["cases"] if c["verdict"])
+    listed = client.get("/api/reports").json()["reports"][0]
+    for name, example, actual in (
+        ("triage", reports_routes._EX_TRIAGE, body["triage"]),
+        ("verdict", reports_routes._EX_VERDICT, real_case["verdict"]),
+        ("case", reports_routes._EX_CASE, real_case),
+        ("detail", reports_routes._EX_DETAIL, body),
+        ("summary", reports_routes._EX_SUMMARY, listed),
+    ):
+        missing = set(actual) - set(example)
+        extra = set(example) - set(actual)
+        assert not missing, (
+            f"{name} example is missing documented keys: {sorted(missing)}"
+        )
+        assert not extra, (
+            f"{name} example documents keys the API never returns: {sorted(extra)}"
+        )
+
+
+def test_the_run_list_carries_the_verdict_mix_not_just_a_flag(reports_root):
+    # A flag answers "was it analysed"; the list should answer "analysed into WHAT" without
+    # opening each run. Comes from the stored roll-up, so the scan pays nothing extra.
+    triaged = ReportRef("dag", "run1", "task", 1)
+    plain = ReportRef("dag", "run2", "task", 1)
+    write_report(reports_root, triaged, passed=1, failed=1)
+    write_report(reports_root, plain, passed=1, failed=1)
+    write_triage(
+        reports_root, triaged, {"tests.test_x::test_f1": _triage_verdict("env")}
+    )
+    client = TestClient(make_app(reports_root))
+
+    rows = {r["run_id"]: r for r in client.get("/api/reports").json()["reports"]}
+    assert rows["run1"]["triage"] == {
+        "model": "claude-sonnet-5",
+        "counts": {"env": 1},
+        "incomplete": False,
+    }
+    assert rows["run2"]["triage"] is None and rows["run2"]["has_triage"] is False
+
+
+def test_the_list_flags_a_run_whose_triage_pass_broke(reports_root):
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref, passed=1, failed=1)
+    write_triage(reports_root, ref, {})
+    meta_path = os.path.join(ReportLayout().dir_for(reports_root, ref), META_FILENAME)
+    meta = json.load(open(meta_path, encoding="utf-8"))
+    meta["triage"]["incomplete"] = "triage provider error: 401"
+    json.dump(meta, open(meta_path, "w"))
+    client = TestClient(make_app(reports_root))
+
+    row = client.get("/api/reports").json()["reports"][0]
+    assert row["triage"] == {
+        "model": "claude-sonnet-5",
+        "counts": {},
+        "incomplete": True,
+    }
+
+
+def test_the_heatmap_marks_which_cells_the_ai_judged(reports_root):
+    # Hovering a cell should say what KIND of failure it was, not just that it was one.
+    for i, category in enumerate(("regression", "env")):
+        ref = ReportRef("dag", f"r{i}", "task", 1)
+        write_report(
+            reports_root,
+            ref,
+            passed=1,
+            failed=1,
+            created_at=f"2026-06-2{i}T10:00:00+00:00",
+        )
+        write_triage(
+            reports_root, ref, {"tests.test_x::test_f1": _triage_verdict(category)}
+        )
+    client = TestClient(make_app(reports_root))
+
+    body = client.get("/api/heatmap?dag_id=dag&task_id=task").json()
+    rows = {t["node_id"]: t for t in body["tests"]}
+    # Columns run oldest -> newest, so the categories follow the runs in order.
+    assert rows["tests.test_x::test_f1"]["cats"] == {"0": "regression", "1": "env"}
+    # A test with no verdict carries no `cats` key at all -- the payload stays sparse.
+    assert "cats" not in rows["tests.test_x::test_p0"]
+
+
+def test_the_heatmap_of_an_untriaged_dagtask_reads_no_verdict_files(
+    reports_root, monkeypatch
+):
+    # The window can be 100 runs; an untriaged dag·task must not pay a file read per run.
+    for i in range(3):
+        write_report(
+            reports_root,
+            ReportRef("dag", f"r{i}", "task", 1),
+            passed=1,
+            failed=1,
+            created_at=f"2026-06-2{i}T10:00:00+00:00",
+        )
+    src = FileSystemReportSource(report_root=reports_root)
+    reads: list = []
+    real = src.verdicts
+    monkeypatch.setattr(
+        src, "verdicts", lambda ref: (reads.append(ref), real(ref))[1], raising=False
+    )
+    client = TestClient(
+        create_app(
+            src,
+            authorizer=lambda d, u: True,
+            read_authorizer=lambda d, u: True,
+            user_dependency=lambda: _TEST_USER,
+        )
+    )
+
+    body = client.get("/api/heatmap?dag_id=dag&task_id=task").json()
+    assert body["tests"] and reads == []
+    assert all("cats" not in t for t in body["tests"])
+
+
+def test_the_list_names_the_model_that_judged_a_run(reports_root):
+    # The list mark is coloured by state and names its model on hover, so both have to
+    # reach the summary: the model is what tells "a provider judged this" apart from
+    # "report-only, nothing was judged".
+    judged = ReportRef("dag", "run1", "task", 1)
+    reported = ReportRef("dag", "run2", "task", 1)
+    write_report(reports_root, judged, passed=1, failed=1)
+    write_report(reports_root, reported, passed=1, failed=1)
+    write_triage(
+        reports_root, judged, {"tests.test_x::test_f1": _triage_verdict("env")}
+    )
+    # Report-only: a described failure, no model, no counts.
+    write_triage(
+        reports_root,
+        reported,
+        {"tests.test_x::test_f1": {**_triage_verdict(), "category": None}},
+        model=None,
+    )
+    client = TestClient(make_app(reports_root))
+
+    rows = {
+        r["run_id"]: r["triage"] for r in client.get("/api/reports").json()["reports"]
+    }
+    assert rows["run1"] == {
+        "model": "claude-sonnet-5",
+        "counts": {"env": 1},
+        "incomplete": False,
+    }
+    # No model -> the UI shows the grey "report only" state rather than a blue judged one.
+    assert rows["run2"] == {"model": None, "counts": {}, "incomplete": False}
+
+
+def test_a_provider_without_a_model_name_still_reads_as_judged(reports_root):
+    # Not every provider names its model -- pytest-triage's offline `fake` one exposes none,
+    # and a custom provider need not either. Keying "was this judged" off the model name
+    # made such a run read as "report only (no AI)" while its card showed real verdicts.
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref, passed=1, failed=1)
+    write_triage(
+        reports_root, ref, {"tests.test_x::test_f1": _triage_verdict("env")}, model=None
+    )
+    client = TestClient(make_app(reports_root))
+
+    row = client.get("/api/reports").json()["reports"][0]
+    # The mix is what says a model judged this run; the name is extra when there is one.
+    assert row["triage"] == {"model": None, "counts": {"env": 1}, "incomplete": False}

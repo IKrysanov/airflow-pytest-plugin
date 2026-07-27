@@ -20,7 +20,14 @@ from typing import TYPE_CHECKING
 
 from .config import get_reports_root
 from .layout import ReportLayout
-from .models import CaseView, ReportDetail, ReportRef, ReportSummary
+from .models import (
+    CaseView,
+    ReportDetail,
+    ReportRef,
+    ReportSummary,
+    TriageSummary,
+    Verdict,
+)
 from .notifications import AlertPolicy, notify_after_archive, notify_for_run
 from .producer import ArchivingResultParser
 from .retention import RetentionPolicy, RetentionResult, prune_reports
@@ -39,6 +46,8 @@ __all__ = [
     "ReportSummary",
     "ReportDetail",
     "CaseView",
+    "Verdict",
+    "TriageSummary",
     "ReportLayout",
     "RetentionPolicy",
     "RetentionResult",

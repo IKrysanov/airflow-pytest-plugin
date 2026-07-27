@@ -27,7 +27,12 @@ try:  # pragma: no cover - environment-dependent
 except Exception:  # pragma: no cover
     collect_ignore_glob = ["ui/*"]
 
-from airflow_pytest_plugin.layout import ALLURE_DIRNAME, META_FILENAME, ReportLayout
+from airflow_pytest_plugin.layout import (
+    ALLURE_DIRNAME,
+    META_FILENAME,
+    VERDICTS_FILENAME,
+    ReportLayout,
+)
 from airflow_pytest_plugin.models import ReportRef
 
 
@@ -132,6 +137,49 @@ def write_allure(root: str, ref: ReportRef, files: dict | None = None) -> str:
         with open(meta_path, "w", encoding="utf-8") as fh:
             json.dump(meta, fh)
     return allure_dir
+
+
+def write_triage(
+    root: str,
+    ref: ReportRef,
+    verdicts: dict,
+    *,
+    model: str | None = "claude-sonnet-5",
+    duration: float | None = 4.2,
+    total_failures: int | None = None,
+    inline: bool = False,
+) -> str:
+    """Archive an AI triage for an existing report, as the producer writes it.
+
+    ``verdicts`` maps a node id (either form) to its verdict fields. The roll-up lands in
+    ``meta.json`` and the verdicts in ``verdicts.json`` beside it; ``inline=True`` instead
+    stores them inside the roll-up, the shape archives written before the split use.
+    """
+    out_dir = ReportLayout().dir_for(root, ref)
+    meta_path = os.path.join(out_dir, META_FILENAME)
+    with open(meta_path, encoding="utf-8") as fh:
+        meta = json.load(fh)
+    counts: dict = {}
+    for v in verdicts.values():
+        counts[v["category"]] = counts.get(v["category"], 0) + 1
+    meta["triage"] = {
+        "schema_version": 1,
+        "model": model,
+        "duration": duration,
+        "total_failures": (len(verdicts) if total_failures is None else total_failures),
+        "total_verdicts": len(verdicts),
+        "counts": counts,
+    }
+    if inline:
+        meta["triage"]["verdicts"] = verdicts
+    else:
+        with open(
+            os.path.join(out_dir, VERDICTS_FILENAME), "w", encoding="utf-8"
+        ) as fh:
+            json.dump({"schema_version": 1, "verdicts": verdicts}, fh)
+    with open(meta_path, "w", encoding="utf-8") as fh:
+        json.dump(meta, fh)
+    return out_dir
 
 
 def write_tests(

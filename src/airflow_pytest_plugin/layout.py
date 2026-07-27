@@ -30,6 +30,18 @@ ALLURE_DIRNAME = "allure-results"
 #: pytest-cov JSON report the producer asks for with ``coverage=True``, so the run's
 #: coverage travels WITH the archive instead of only through the operator's XCom.
 COVERAGE_FILENAME = "coverage.json"
+#: pytest-triage's failure report, requested with ``triage=True``. Read at archive time,
+#: distilled into the two files below, and then REMOVED -- it is the largest file a run
+#: produces, repeats tracebacks junit.xml already holds, and is owner-only (it may carry
+#: residual secrets even after redaction) so the reader could never open it. Kept only when
+#: it could not be parsed, where it is the sole record of what went wrong.
+TRIAGE_FILENAME = "triage.json"
+#: The distilled per-test AI verdicts. Deliberately NOT part of ``meta.json``: every summary
+#: endpoint pays a tree scan that parses each run's meta in full, so verdicts stored there
+#: would be read by every dashboard load. Measured A/B at 3000 runs x 200 verdicts -- cold
+#: scan 300ms -> 1325ms (4.4x), scanned corpus 48MB -> 1.3GB. Only views that read ONE run
+#: at a time open this file: the run detail, and the heatmap over its window.
+VERDICTS_FILENAME = "verdicts.json"
 
 # Lossy on purpose: exact identity lives in meta.json / the ReportRef token,
 # never recovered from the path.

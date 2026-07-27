@@ -40,8 +40,13 @@ _REPO = Path(__file__).resolve().parents[2]
 _SRC = _REPO / "src"
 sys.path.insert(0, str(_SRC))
 
-from airflow_pytest_plugin.layout import META_FILENAME, ReportLayout  # noqa: E402
+from airflow_pytest_plugin.layout import (  # noqa: E402
+    META_FILENAME,
+    VERDICTS_FILENAME,
+    ReportLayout,
+)
 from airflow_pytest_plugin.models import ReportRef  # noqa: E402
+from airflow_pytest_plugin.triage import canonical_node_key  # noqa: E402
 
 # --- deterministic seed -------------------------------------------------------
 # Two profiles, same generator (so layout is checked on both small and large data):
@@ -165,6 +170,127 @@ def _seed(root: str, specs: list[tuple[str, bool]], nruns: int) -> None:
             _write_run(root, dag, f"r{ri:03d}", when, _cases_for(dag, ri, nruns, rich))
 
 
+#: One verdict per category, cycled over a run's failures so the card shows a real mix.
+#: Mirrors what ``ArchivingResultParser(triage_provider=...)`` distils into meta.json.
+_TRIAGE_VERDICTS = [
+    ("regression", "high", "AssertionError", "the loader stopped de-duplicating rows"),
+    ("env", "high", "ConnectionError", "the payments service is not up here"),
+    ("test_bug", "medium", "AssertionError", "the expected total is stale"),
+    ("flaky", "low", "TimeoutError", "the test sleeps instead of polling"),
+    ("unknown", None, "RuntimeError", None),
+]
+
+
+def _seed_triage(root: str) -> None:
+    """The SMALL seed, carrying every triage state one dashboard can show.
+
+    ``alpha`` is judged by a model -- each run leaving its last failure described but
+    unjudged, and the NEWEST run's pass broken outright; ``gamma`` is report-only (failures
+    described, no provider, no model); ``beta`` is never triaged. One server, three mark
+    states, and both the judged and the unjudged per-failure panels.
+    """
+    _seed(root, _SMALL, _SMALL_NRUNS)
+    for ri in range(_SMALL_NRUNS):
+        run_dir = Path(
+            ReportLayout().dir_for(
+                root, ReportRef("alpha", f"r{ri:03d}", "suite", 1, -1)
+            )
+        )
+        # A REAL traceback is far wider than the dialog -- pytest prints whole environment
+        # dicts into one -- so the case table legitimately scrolls sideways. Reproduce that
+        # here: it is what stretched every cell and pushed the verdict panel off-screen.
+        junit = run_dir / "junit.xml"
+        junit.write_text(
+            junit.read_text(encoding="utf-8").replace(
+                "AssertionError: boom 1 != 2",
+                "AssertionError: boom 1 != 2 | self = environ({"
+                + ", ".join(f"'VAR_{i}': 'value-{i}'" for i in range(40))
+                + "})",
+            ),
+            encoding="utf-8",
+        )
+        meta_path = run_dir / META_FILENAME
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        broken = [r[0] for r in meta.get("tests", []) if r[1] in ("failed", "error")]
+        verdicts: dict = {}
+        counts: dict = {}
+        for n, node in enumerate(broken):
+            category, confidence, exc, hypothesis = _TRIAGE_VERDICTS[
+                (n + ri) % len(_TRIAGE_VERDICTS)
+            ]
+            # The LAST failure of each run is described but never judged -- what a
+            # report-only run looks like, and what a budgeted one leaves behind.
+            judged = n < len(broken) - 1
+            # Stored under the reader's dotted key, exactly as the producer writes it.
+            verdicts[canonical_node_key(node)] = {
+                "category": category if judged else None,
+                "hypothesis": hypothesis if judged else None,
+                "confidence": confidence if judged else None,
+                "suggested_fix": (
+                    "restore the DISTINCT clause" if judged and hypothesis else None
+                ),
+                "exc_type": exc,
+                "selector": node,
+            }
+            if judged:
+                counts[category] = counts.get(category, 0) + 1
+        meta["triage"] = {
+            "schema_version": 1,
+            "model": "claude-sonnet-5",
+            "duration": 4.12,
+            # One more failure than verdicts: the budget-limited case must render too.
+            "total_failures": len(verdicts) + 1,
+            "total_verdicts": sum(counts.values()),
+            "counts": counts,
+            "incomplete": None,
+        }
+        # The newest alpha run had its pass break: the third mark state (red).
+        if ri == _SMALL_NRUNS - 1:
+            meta["triage"]["incomplete"] = (
+                "triage provider error: 401 invalid x-api-key"
+            )
+        meta_path.write_text(json.dumps(meta), encoding="utf-8")
+        # Verdicts live beside meta.json, not inside it -- the tree scan parses meta for
+        # every run, and must not pay for analysis only the detail view reads.
+        Path(meta_path.parent, VERDICTS_FILENAME).write_text(
+            json.dumps({"schema_version": 1, "verdicts": verdicts}), encoding="utf-8"
+        )
+
+    # gamma is report-only: failures described, no provider, no model -> the grey state.
+    for ri in range(_SMALL_NRUNS):
+        run_dir = Path(
+            ReportLayout().dir_for(
+                root, ReportRef("gamma", f"r{ri:03d}", "suite", 1, -1)
+            )
+        )
+        meta = json.loads(Path(run_dir, META_FILENAME).read_text(encoding="utf-8"))
+        broken = [r[0] for r in meta.get("tests", []) if r[1] in ("failed", "error")]
+        verdicts = {
+            canonical_node_key(node): {
+                "category": None,
+                "hypothesis": None,
+                "confidence": None,
+                "suggested_fix": None,
+                "exc_type": "AssertionError",
+                "selector": node,
+            }
+            for node in broken
+        }
+        meta["triage"] = {
+            "schema_version": 1,
+            "model": None,
+            "duration": None,
+            "total_failures": len(verdicts),
+            "total_verdicts": 0,
+            "counts": {},
+            "incomplete": None,
+        }
+        Path(run_dir, META_FILENAME).write_text(json.dumps(meta), encoding="utf-8")
+        Path(run_dir, VERDICTS_FILENAME).write_text(
+            json.dumps({"schema_version": 1, "verdicts": verdicts}), encoding="utf-8"
+        )
+
+
 def _seed_green(root: str, nruns: int = 8) -> None:
     """All-passing runs of one dag·task: no flips -> no flaky, no failures -> no clusters.
 
@@ -201,6 +327,8 @@ def _seed_declining(root: str, nruns: int = 40) -> None:
 #: to regression-test that the UI escapes user-supplied strings client-side.
 _XSS_NODE = "tests/x.py::test_<script>window.__xss=1</script>_case"
 _XSS_MSG = '"><img src=x onerror="window.__xss=1">'
+#: A rerun selector that would become a SECOND shell command if the copy line quoted nothing.
+_EVIL_SELECTOR = "tests/x.py::test_a; touch /tmp/apx-pwned"
 
 
 def _seed_evil(root: str, nruns: int = 3) -> None:
@@ -249,6 +377,43 @@ def _seed_evil(root: str, nruns: int = 3) -> None:
                         "failed_node_ids": [_XSS_NODE],
                     },
                     "tests": [[_XSS_NODE, "failed", 0.1]],
+                    "triage": {
+                        "schema_version": 1,
+                        "model": _XSS_MSG,
+                        "duration": 1.0,
+                        "total_failures": 1,
+                        "total_verdicts": 1,
+                        "counts": {"regression": 1},
+                        # The NEWEST evil run also degraded, so the seed carries both a
+                        # judged run (whose hostile model name the list tooltip prints) and
+                        # a broken one (whose hostile reason the card prints).
+                        "incomplete": (
+                            "triage provider error: 401 " + _XSS_MSG
+                            if ri == nruns - 1
+                            else None
+                        ),
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        # A verdict is MODEL-written prose that reaches the DOM: hostile HTML in every
+        # field, plus a selector that would run a second command if the rerun line were
+        # pasted into a shell unquoted.
+        Path(out, VERDICTS_FILENAME).write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "verdicts": {
+                        canonical_node_key(_XSS_NODE): {
+                            "category": "regression",
+                            "hypothesis": _XSS_MSG,
+                            "confidence": "high",
+                            "suggested_fix": _XSS_MSG,
+                            "exc_type": _XSS_MSG,
+                            "selector": _EVIL_SELECTOR,
+                        }
+                    },
                 }
             ),
             encoding="utf-8",
@@ -359,6 +524,14 @@ def large_base_url(tmp_path_factory):
 
 
 @pytest.fixture(scope="session")
+def triage_base_url(tmp_path_factory):
+    """SMALL seed whose ``alpha`` runs carry AI verdicts -> the triage UI has data."""
+    root = tmp_path_factory.mktemp("ui-reports-triage")
+    _seed_triage(str(root))
+    yield from _boot(str(root))
+
+
+@pytest.fixture(scope="session")
 def green_base_url(tmp_path_factory):
     """All-green seed (no flaky, no failures) -> flaky UI absent, chart full width."""
     root = tmp_path_factory.mktemp("ui-reports-green")
@@ -428,6 +601,12 @@ def dash(page, base_url) -> Dash:
 def large_dash(page, large_base_url) -> Dash:
     """A loaded LARGE dashboard (3200 runs / 40 groups) for layout-at-scale checks."""
     return _load_dash(page, large_base_url)
+
+
+@pytest.fixture
+def triage_dash(page, triage_base_url) -> Dash:
+    """A loaded dashboard whose ``alpha`` runs were AI-triaged (beta/gamma were not)."""
+    return _load_dash(page, triage_base_url)
 
 
 @pytest.fixture

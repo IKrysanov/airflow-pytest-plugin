@@ -17,9 +17,11 @@ optional raw Allure results for TestOps)."""
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import json
 import logging
+import math
 import os
 import uuid
 from datetime import datetime, timezone
@@ -35,9 +37,12 @@ from ..layout import (
     COVERAGE_FILENAME,
     META_FILENAME,
     REPORT_FILENAME,
+    TRIAGE_FILENAME,
+    VERDICTS_FILENAME,
     ReportLayout,
 )
 from ..models import ReportRef
+from ..triage import TriageArchive, distill_report
 
 _log = logging.getLogger(__name__)
 
@@ -49,8 +54,10 @@ META_SCHEMA_VERSION = 1
 # otherwise, so the misc subclass error fires only sometimes. `unused-ignore` keeps this
 # quiet either way.
 class ArchivingResultParser(JUnitResultParser):  # type: ignore[misc, unused-ignore]
-    """Archive each run under the reports layout: the operator's JUnit result,
-    plus (with ``allure=True``) raw Allure results for TestOps export."""
+    """Archive each run under the reports layout: the operator's JUnit result, plus
+    (with ``allure=True``) raw Allure results for TestOps export, (with ``coverage=True``)
+    the run's coverage, and (with ``triage=True`` / ``triage_provider=...``) an AI verdict
+    per failed test."""
 
     def __init__(
         self,
@@ -61,6 +68,10 @@ class ArchivingResultParser(JUnitResultParser):  # type: ignore[misc, unused-ign
         coverage: bool = False,
         coverage_source: str | None = None,
         coverage_threshold: float | None = None,
+        triage: bool = False,
+        triage_provider: str | None = None,
+        triage_budget: int | None = None,
+        triage_timeout: float | None = None,
         email: bool = False,
         email_only_fail: bool = False,
     ) -> None:
@@ -93,6 +104,27 @@ class ArchivingResultParser(JUnitResultParser):  # type: ignore[misc, unused-ign
         # single reader-side env var cannot express. Presentational only: like the env var
         # it tints the card and never fails a run (that is the operator's cov_fail_under).
         self._coverage_threshold = _unit_fraction_or_none(coverage_threshold)
+        # AI failure triage (pytest-triage on the worker; needs the package installed, else
+        # pytest aborts on the unrecognized flags -- exactly like allure/coverage above).
+        # Two levels, both opt-in and both self-contained:
+        #   triage=True                -> pytest writes its failure report into the archive
+        #                                 dir. No provider, no network, every verdict null;
+        #                                 the run still gets exc_type + a rerun selector per
+        #                                 failure.
+        #   triage_provider="anthropic" -> ALSO turns the LLM pass on, so each failure gets a
+        #                                 category / hypothesis / suggested fix. Naming a
+        #                                 provider implies the report, so one argument is
+        #                                 enough for the full feature.
+        # The verdicts are read at ARCHIVE time, so (like coverage) they survive a FAILED run
+        # -- the parser runs before the operator raises. The roll-up lands in meta.json; the
+        # per-test verdicts in their own verdicts.json, which the tree scan never opens.
+        self._triage_provider = (triage_provider or "").strip() or None
+        self._triage = bool(triage) or self._triage_provider is not None
+        # Max provider calls per run (pytest-triage's own default is 10) and the wall-clock
+        # cap per call. Left unset, pytest-triage's defaults apply -- which is what a suite
+        # with a handful of failures wants; raise the budget for a suite that breaks wide.
+        self._triage_budget = _positive_int_or_none(triage_budget)
+        self._triage_timeout = _positive_float_or_none(triage_timeout)
         # Per-task switches for automatic email (both need
         # ``AIRFLOW_PYTEST_ALERTS_EMAIL_TO`` recipients + a mail transport):
         #   email=True           -> mail after EVERY run (styled by outcome).
@@ -149,6 +181,10 @@ class ArchivingResultParser(JUnitResultParser):  # type: ignore[misc, unused-ign
                     f"--cov-report=json:{self._coverage_path(req.report_path)}",
                 ),
             )
+        if self._triage and req.report_path:
+            req = dataclasses.replace(
+                req, pytest_args=(*req.pytest_args, *self._triage_args(req.report_path))
+            )
         return req
 
     def parse(self, report_path: str, *, exit_code: int = 0) -> TestRunResult:
@@ -180,6 +216,91 @@ class ArchivingResultParser(JUnitResultParser):  # type: ignore[misc, unused-ign
     def _coverage_path(report_path: str) -> str:
         """Where pytest-cov should write the run's JSON coverage report."""
         return os.path.join(os.path.dirname(report_path), COVERAGE_FILENAME)
+
+    @staticmethod
+    def _triage_path(report_path: str) -> str:
+        """Where pytest-triage should write the run's failure report."""
+        return os.path.join(os.path.dirname(report_path), TRIAGE_FILENAME)
+
+    def _triage_args(self, report_path: str) -> tuple[str, ...]:
+        """pytest-triage flags for this run, aimed at the archive directory.
+
+        ``--ai-report`` alone gives the report with null verdicts; ``--ai-triage=on``
+        plus a provider adds the LLM pass. Budget and timeout are only passed when the
+        task pinned them, so pytest-triage's own defaults stay in force otherwise.
+        """
+        args = [f"--ai-report={self._triage_path(report_path)}"]
+        if self._triage_provider:
+            args += ["--ai-triage=on", f"--ai-provider={self._triage_provider}"]
+            if self._triage_budget is not None:
+                args.append(f"--ai-budget={self._triage_budget}")
+            if self._triage_timeout is not None:
+                args.append(f"--ai-timeout={self._triage_timeout:g}")
+        return tuple(args)
+
+    def _read_triage(self, report_path: str) -> dict[str, Any] | None:
+        """Archive the run's AI verdicts; return the roll-up for ``meta.json``.
+
+        The per-test verdicts are written to their own ``verdicts.json`` beside the report:
+        ``meta.json`` is parsed for every run on every tree scan, so it carries only the
+        roll-up (see :data:`~..layout.VERDICTS_FILENAME`).
+
+        ``None`` when triage wasn't requested, pytest-triage wrote nothing (not installed,
+        or the run died before its session finished), or the file is unreadable -- the run
+        then simply shows no AI analysis. Never raises: an unusable report must not cost
+        the archive its ``meta.json``.
+        """
+        if not self._triage:
+            return None
+        path = self._triage_path(report_path)
+        try:
+            with open(path, encoding="utf-8") as fh:
+                raw = json.load(fh)
+        except (OSError, ValueError, RecursionError):
+            # RecursionError, not just ValueError: that is how json.load fails on a nesting
+            # bomb, and uncaught it escapes _write_meta -- costing the run the very file that
+            # makes it visible in the viewer. Losing the AI section is fine; losing the run
+            # is not.
+            _log.debug("No readable triage report at %s", path, exc_info=True)
+            return None
+        archive = distill_report(raw)
+        if archive is None:
+            # Unreadable: keep it. It is then the only record of what went wrong, and the
+            # archive has no distilled copy to fall back on.
+            return None
+        # Drop the original ONLY once the distilled copy is on disk. It is the LARGEST file
+        # in a run's archive (measured: 10.1KB against junit.xml's 8.5KB on a nine-failure
+        # suite), it repeats tracebacks junit.xml already stores, and being owner-only the
+        # reader can never open it -- but deleting it after a failed write would leave a run
+        # that claims to be triaged with nothing behind it and no evidence of why.
+        if self._write_verdicts(report_path, archive):
+            with contextlib.suppress(OSError):
+                os.unlink(path)
+        return archive.rollup
+
+    def _write_verdicts(self, report_path: str, archive: TriageArchive) -> bool:
+        """Write ``verdicts.json`` atomically beside the report; ``True`` when it landed.
+
+        Atomic (temp + rename) so a reader scanning concurrently never opens a half file,
+        and uniquely named so two writers cannot share a temp. Catches ``Exception``, not
+        just ``OSError``: this runs while ``meta.json`` is being built, and a failure to
+        archive the per-test analysis must never cost the run its identity sidecar -- the
+        roll-up still lands, and the run still reads as triaged.
+        """
+        out_dir = os.path.dirname(os.path.abspath(report_path))
+        tmp = os.path.join(out_dir, f".{VERDICTS_FILENAME}.{uuid.uuid4().hex}.tmp")
+        try:
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(archive.verdicts_document(), fh, ensure_ascii=False)
+            os.replace(tmp, os.path.join(out_dir, VERDICTS_FILENAME))
+        except Exception:
+            _log.warning(
+                "Could not archive AI verdicts for %s", report_path, exc_info=True
+            )
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+            return False
+        return True
 
     def _read_coverage(self, report_path: str) -> float | None:
         """The run's overall line-coverage fraction (0-1) from the archived JSON report.
@@ -310,6 +431,10 @@ class ArchivingResultParser(JUnitResultParser):  # type: ignore[misc, unused-ign
             # Only written when the task pinned one; absent -> the reader applies its
             # AIRFLOW_PYTEST_SUCCESS_COVERAGE default.
             "coverage_threshold": self._coverage_threshold,
+            # The AI triage roll-up (model, duration, category counts) -- small on purpose,
+            # since every tree scan parses this file for every run. The per-test verdicts go
+            # to verdicts.json; tracebacks stay in junit.xml and in the raw report.
+            "triage": self._read_triage(report_path),
             "summary": result.to_xcom(),
             # Compact [node_id, outcome, duration] rows so cross-run views
             # (compare/flaky/history) need not re-parse junit.xml.
@@ -382,6 +507,37 @@ def _unit_fraction_or_none(value: float | None) -> float | None:
         )
         return None
     return float(value)
+
+
+def _positive_int_or_none(value: int | None) -> int | None:
+    """A positive int, or ``None`` when unset / not an int / not positive.
+
+    Rejects rather than clamps, and warns: a task that wrote ``0`` or ``"20"`` should fall
+    back to pytest-triage's own default instead of silently disabling the AI pass.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        _log.warning("ignoring non-integer triage_budget %r", value)
+        return None
+    if value <= 0:
+        _log.warning("ignoring non-positive triage_budget %r", value)
+        return None
+    return value
+
+
+def _positive_float_or_none(value: float | None) -> float | None:
+    """A finite, positive number of seconds, or ``None`` when unset / unusable."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        _log.warning("ignoring non-numeric triage_timeout %r", value)
+        return None
+    number = float(value)
+    if not math.isfinite(number) or number <= 0:
+        _log.warning("ignoring non-positive triage_timeout %r", value)
+        return None
+    return number
 
 
 def _first_str(*values: Any, default: str) -> str:
