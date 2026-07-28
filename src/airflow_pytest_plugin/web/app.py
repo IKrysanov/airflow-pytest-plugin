@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
@@ -29,21 +30,23 @@ from ..compat import (
 )
 from ..sources import FileSystemReportSource, ReportSource
 from ..version import __version__
+from .help_templates import help_html
 from .routes.common import Authorizer, RouteDeps
 from .templates import index_html
 
 _log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from fastapi import FastAPI
+    from fastapi import FastAPI, Request
     from fastapi.responses import HTMLResponse, Response
 else:
     # Viewer/icon routes annotate these; with future annotations FastAPI resolves
     # them from module globals, so they must live here. FastAPI is optional.
     try:
+        from fastapi import Request
         from fastapi.responses import HTMLResponse, Response
     except ModuleNotFoundError:  # pragma: no cover - only without fastapi installed
-        HTMLResponse = Response = None
+        HTMLResponse = Request = Response = None
 
 #: Tag descriptions shown as Swagger UI section headers.
 _OPENAPI_TAGS = [
@@ -70,6 +73,50 @@ _API_DESCRIPTION = (
     "a run (dag·run·task·try). The viewer itself and its icons are served outside "
     "this schema."
 )
+
+_HELP_HEADERS = {
+    # Unlike the viewer, the guide is one constant string with no report data in it, so it
+    # can be cached -- but it still must never be served stale after an upgrade. no-cache
+    # keeps the copy and forces revalidation on every open; the ETag then turns a repeat
+    # visit into an empty 304 instead of ~95 KB, and changes to the page change the tag.
+    "Cache-Control": "no-cache, must-revalidate",
+    "Content-Security-Policy": (
+        "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
+        "img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; "
+        "form-action 'none'; frame-ancestors 'self'"
+    ),
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+    "Referrer-Policy": "no-referrer",
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "SAMEORIGIN",
+}
+
+
+_HELP_ETAG_CACHE: str | None = None
+
+
+def _help_etag() -> str:
+    """Strong validator for the guide: the build's own content hash."""
+    global _HELP_ETAG_CACHE
+    if _HELP_ETAG_CACHE is None:
+        digest = hashlib.sha256(help_html().encode("utf-8")).hexdigest()[:32]
+        _HELP_ETAG_CACHE = f'"{digest}"'
+    return _HELP_ETAG_CACHE
+
+
+def _etag_matches(header: str | None, etag: str) -> bool:
+    """Whether an ``If-None-Match`` header covers ``etag`` (RFC 9110 weak comparison)."""
+    if not header:
+        return False
+    for candidate in header.split(","):
+        token = candidate.strip()
+        if token == "*":
+            return True
+        if token.startswith("W/"):
+            token = token[2:]
+        if token == etag:
+            return True
+    return False
 
 
 def _no_user() -> None:
@@ -175,5 +222,18 @@ def create_app(
         return HTMLResponse(
             index_html(), headers={"Cache-Control": "no-store, must-revalidate"}
         )
+
+    # Both spellings are served directly. Left to Starlette's redirect_slashes, a
+    # bookmarked or hand-typed "/help/" costs an extra 307 round trip on every open --
+    # and shows up as two document requests for one visit.
+    @app.get("/help", response_class=HTMLResponse, include_in_schema=False)
+    @app.get("/help/", response_class=HTMLResponse, include_in_schema=False)
+    def help_page(request: Request) -> Response:
+        """Serve the static user guide without reading report data."""
+        etag = _help_etag()
+        headers = {**_HELP_HEADERS, "ETag": etag}
+        if _etag_matches(request.headers.get("if-none-match"), etag):
+            return Response(status_code=304, headers=headers)
+        return HTMLResponse(help_html(), headers=headers)
 
     return app

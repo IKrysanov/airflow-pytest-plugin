@@ -104,11 +104,186 @@ def test_index_serves_html(client):
     assert "no-store" in r.headers.get("cache-control", "")
 
 
+def test_help_serves_user_guide(client):
+    r = client.get("/help")
+
+    assert r.status_code == 200
+    assert "no-cache" in r.headers.get("cache-control", "")
+    assert r.headers["x-content-type-options"] == "nosniff"
+    assert r.headers["x-frame-options"] == "SAMEORIGIN"
+    assert r.headers["referrer-policy"] == "no-referrer"
+    assert r.headers["permissions-policy"] == (
+        "camera=(), microphone=(), geolocation=()"
+    )
+    csp = r.headers["content-security-policy"]
+    assert "default-src 'none'" in csp
+    assert "frame-ancestors 'self'" in csp
+    assert "object-src 'none'" in csp
+    assert 'id="help-content"' in r.text
+    assert 'class="help-sidebar"' in r.text
+    assert 'href="#getting-started"' in r.text
+    assert 'href="#setup"' in r.text
+    assert 'href="#dashboard"' in r.text
+    assert 'href="#run-details"' in r.text
+    assert 'href="#flaky"' in r.text
+    assert 'href="#ai-triage"' in r.text
+    assert 'href="#email"' in r.text
+    assert 'href="#access"' in r.text
+    assert 'href="#faq"' in r.text
+    assert 'id="help-github-link"' in r.text
+    assert 'id="help-api-link"' in r.text
+    assert 'id="footer-github-link"' in r.text
+    assert 'href="https://github.com/IKrysanov/airflow-pytest-plugin"' in r.text
+    assert 'rel="noopener noreferrer"' in r.text
+    assert "secure-xml" in r.text
+
+
+def test_help_serves_the_trailing_slash_without_a_redirect(client):
+    # A bookmarked "/help/" must not cost a 307 first: that is a second round trip on
+    # every open, and it reads as two document requests for one visit.
+    r = client.get("/help/", follow_redirects=False)
+
+    assert r.status_code == 200
+    assert 'id="help-content"' in r.text
+    assert r.headers["etag"] == client.get("/help").headers["etag"]
+
+
+def test_help_revalidates_with_an_etag_instead_of_resending_the_page(client):
+    first = client.get("/help")
+    etag = first.headers["etag"]
+    assert etag.startswith('"') and etag.endswith('"')
+
+    again = client.get("/help", headers={"If-None-Match": etag})
+
+    assert again.status_code == 304
+    assert again.content == b""
+    assert again.headers["etag"] == etag
+    # A 304 still carries the framing/sniffing guards: the browser reuses the cached
+    # body under whatever the revalidation response says.
+    assert again.headers["x-frame-options"] == "SAMEORIGIN"
+    assert again.headers["x-content-type-options"] == "nosniff"
+    assert "default-src 'none'" in again.headers["content-security-policy"]
+    # Cached under a tag from another build -> the reader must get the current page,
+    # never a stale guide describing a UI that no longer exists.
+    stale = client.get("/help", headers={"If-None-Match": '"0123456789abcdef"'})
+    assert stale.status_code == 200
+    assert 'id="help-content"' in stale.text
+    # Chrome sends the tag it stored plus weak forms; both must be recognised.
+    for header in (f"W/{etag}", f'"other", {etag}', "*"):
+        assert client.get("/help", headers={"If-None-Match": header}).status_code == 304
+
+
+def test_help_etag_changes_when_the_guide_changes(monkeypatch):
+    from airflow_pytest_plugin.web import app as app_module
+
+    monkeypatch.setattr(app_module, "_HELP_ETAG_CACHE", None)
+    monkeypatch.setattr(app_module, "help_html", lambda: "<p>edited guide</p>")
+
+    assert app_module._help_etag() != '"unchanged"'
+    edited = app_module._help_etag()
+
+    monkeypatch.setattr(app_module, "_HELP_ETAG_CACHE", None)
+    monkeypatch.setattr(app_module, "help_html", lambda: "<p>edited guide 2</p>")
+    assert app_module._help_etag() != edited
+
+
+def test_help_is_static_and_available_when_report_reads_are_denied(reports_root):
+    app = make_app(reports_root, read_authorizer=lambda dag_id, user: False)
+    c = TestClient(app)
+
+    assert c.get("/help").status_code == 200
+    assert c.get("/api/version").status_code == 200
+    assert c.get("/api/reports").json()["reports"] == []
+
+
+def test_help_follows_airflow_locale_theme_and_accessibility(client):
+    html = client.get("/help").text
+
+    for marker in (
+        'class="skip-link"',
+        'aria-label="Help sections"',
+        'data-i18n="back"',
+        'data-i18n="title"',
+        "i18nextLng",
+        "parentWin",
+        "MutationObserver",
+        "activeNavIcon",
+        "apx-nav-style",
+        "updateCurrentSection",
+        "atPageEnd",
+        "bindAirflowNavReturn",
+        "openHelpLink",
+        "prefers-color-scheme: dark",
+        "prefers-reduced-motion: reduce",
+        'document.documentElement.setAttribute("lang", LOCALE)',
+        'aria-current="true"',
+    ):
+        assert marker in html
+
+
+def test_help_inline_script_is_syntactically_valid(client, tmp_path):
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node unavailable to syntax-check the inline JS")
+    html = client.get("/help").text
+    scripts = re.findall(r"<script>(.*?)</script>", html, re.S)
+    assert scripts, "no inline <script> found in the help page"
+    for i, code in enumerate(scripts):
+        script = tmp_path / f"help_{i}.js"
+        script.write_text(code, encoding="utf-8")
+        result = subprocess.run(
+            [node, "--check", str(script)], capture_output=True, text=True
+        )
+        assert result.returncode == 0, f"script #{i}: {result.stderr}"
+
+
+def test_help_i18n_locales_have_identical_keys(client, tmp_path):
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node unavailable to evaluate the help translations")
+    html = client.get("/help").text
+    start = html.index("{", html.index("var HELP_I18N = "))
+    depth = 0
+    end = None
+    for i in range(start, len(html)):
+        if html[i] == "{":
+            depth += 1
+        elif html[i] == "}":
+            depth -= 1
+            if depth == 0:
+                end = i + 1
+                break
+    assert end is not None, "could not brace-match HELP_I18N"
+    script = tmp_path / "help_i18n.js"
+    script.write_text(
+        "const I18N = " + html[start:end] + ";\n"
+        "const en = Object.keys(I18N.en), ru = Object.keys(I18N.ru);\n"
+        "console.log(JSON.stringify({"
+        "keys: en,"
+        "missing_in_ru: en.filter(k => !(k in I18N.ru)),"
+        "missing_in_en: ru.filter(k => !(k in I18N.en))}));\n",
+        encoding="utf-8",
+    )
+    result = subprocess.run([node, str(script)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    translations = json.loads(result.stdout)
+    assert translations["missing_in_ru"] == []
+    assert translations["missing_in_en"] == []
+    used = set(re.findall(r'data-i18n(?:-html|-al)?="([^"]+)"', html))
+    assert used <= set(translations["keys"])
+
+
+def test_help_stays_out_of_openapi(client):
+    assert "/help" not in client.get("/api/openapi.json").json()["paths"]
+
+
 def test_index_has_feature_markers(client):
     # Regression guard that the UI feature markers are all present in the page.
     html = client.get("/").text
     for marker in (
         "data-i18n",
+        'id="help-btn"',
+        "openHelp",
         'id="chart"',
         'id="d-copy"',
         "setReportParam",
@@ -231,6 +406,21 @@ def test_index_has_feature_markers(client):
         "surface-glass",
     ):
         assert marker in html
+    assert 'id="help-btn" class="menu-item"' in html
+
+
+def test_links_menu_uses_closed_book_and_code_icons(client):
+    html = client.get("/").text
+
+    help_start = html.index('id="help-btn"')
+    help_item = html[help_start : html.index("</button>", help_start)]
+    assert 'data-icon="book-closed"' in help_item
+    assert 'd="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"' in help_item
+
+    api_start = html.index('data-api="docs"')
+    api_item = html[api_start : html.index("</button>", api_start)]
+    assert 'data-icon="code"' in api_item
+    assert 'd="m8 9-3 3 3 3M16 9l3 3-3 3M14 5l-4 14"' in api_item
 
 
 def test_inline_script_is_syntactically_valid(client, tmp_path):
