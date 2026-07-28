@@ -61,3 +61,12 @@ def test_airflow_embedded_data_endpoints_work(airflow_dash):
     assert page.locator("#kpi-failures .value").inner_text().strip() == "2"
     expect(page.locator("#kpi-unique .value")).not_to_have_text("…", timeout=15000)
     assert int(page.locator("#kpi-unique .value").inner_text().strip()) > 0
+
+
+def test_airflow_serves_help_and_mount_aware_api_link(page, airflow_base_url):
+    page.goto(airflow_base_url + "help")
+
+    expect(page.locator("#help-content")).to_be_visible()
+    assert page.locator("#help-api-link").evaluate("link => link.href") == (
+        airflow_base_url + "api/docs"
+    )

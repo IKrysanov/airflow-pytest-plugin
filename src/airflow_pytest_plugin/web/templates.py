@@ -1098,16 +1098,25 @@ _INDEX_HTML = r"""<!DOCTYPE html>
         </svg>
       </button>
       <div class="menu" id="links-menu" role="menu" hidden>
+        <button id="help-btn" class="menu-item" type="button" role="menuitem">
+          <svg data-icon="book-closed" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2"
+               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+            <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+          </svg>
+          <span data-i18n="help">Help</span>
+        </button>
         <button class="menu-item" type="button" role="menuitem"
                 data-href="https://github.com/IKrysanov/airflow-pytest-plugin">
           <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.7.5.5 5.7.5 12c0 5.1 3.3 9.4 7.9 10.9.6.1.8-.3.8-.6v-2c-3.2.7-3.9-1.4-3.9-1.4-.5-1.3-1.3-1.7-1.3-1.7-1.1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.7 1.3 3.4 1 .1-.8.4-1.3.7-1.6-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.5-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.3 1.2a11.5 11.5 0 0 1 6 0C17 5 18 5.3 18 5.3c.6 1.6.2 2.8.1 3.1.8.8 1.2 1.8 1.2 3.1 0 4.4-2.7 5.4-5.3 5.7.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6 4.6-1.5 7.9-5.8 7.9-10.9C23.5 5.7 18.3.5 12 .5z"/></svg>
           <span data-i18n="ghItem">GitHub</span>
         </button>
         <button class="menu-item" type="button" role="menuitem" data-api="docs">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+          <svg data-icon="code" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2"
                stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
-            <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+            <path d="m8 9-3 3 3 3M16 9l3 3-3 3M14 5l-4 14"/>
           </svg>
           <span data-i18n="apiDocs">API docs</span>
         </button>
@@ -1474,6 +1483,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       closeReport: "Close report", ofWord: "of", testsWord: "tests",
       avgWord: "avg", uqRuns: "Total runs",
       apiDocs: "API docs", linksAl: "Links & documentation", ghItem: "GitHub",
+      help: "Help", helpAl: "Open user guide",
       benchTitle: "Test durations (10s buckets)", uniqueTitle: "Unique tests",
       reliabilityTitle: "Reliability", reliabilityHint: "higher is better", relOverall: "score",
       relPass: "Pass rate", relRobust: "No errors", relFresh: "Green now",
@@ -1661,6 +1671,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       closeReport: "Закрыть отчёт", ofWord: "из", testsWord: "тестов",
       avgWord: "сред.", uqRuns: "Всего прогонов",
       apiDocs: "Документация API", linksAl: "Ссылки и документация", ghItem: "GitHub",
+      help: "Справка", helpAl: "Открыть руководство пользователя",
       benchTitle: "Время выполнения тестов (по 10с)", uniqueTitle: "Уникальные тесты",
       reliabilityTitle: "Надёжность", reliabilityHint: "больше — лучше", relOverall: "оценка",
       relPass: "Проходимость", relRobust: "Без ошибок", relFresh: "Сейчас зелёные",
@@ -5528,9 +5539,13 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   heatmapDlg.addEventListener("close", updateParentDim);
   closeOnBackdrop(heatmapDlg, closeHeatmap);
 
+  function openHelp() {
+    window.location.assign(location.pathname.replace(/\/+$/, "") + "/help");
+  }
   document.getElementById("refresh").addEventListener("click", load);
-  // Links menu: GitHub + the FastAPI docs. Airflow's iframe sandbox blocks _blank from
-  // inside, so open the tab from the same-origin parent; standalone uses ours.
+  // Links menu: the user guide replaces this page; GitHub + API docs open in a new tab.
+  // Airflow's iframe sandbox blocks _blank from inside, so those external links use the
+  // same-origin parent; standalone uses this window.
   var linksBtn = document.getElementById("links-btn");
   var linksMenu = document.getElementById("links-menu");
   function closeLinksMenu() {
@@ -5545,6 +5560,11 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   });
   linksMenu.querySelectorAll(".menu-item").forEach(function (item) {
     item.addEventListener("click", function () {
+      if (item.id === "help-btn") {
+        closeLinksMenu();
+        openHelp();
+        return;
+      }
       var href = item.getAttribute("data-href") || API + item.getAttribute("data-api");
       (sameOriginTop() || window).open(href, "_blank", "noopener");
       closeLinksMenu();

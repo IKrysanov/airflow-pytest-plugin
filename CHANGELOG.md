@@ -53,6 +53,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     by `claude-sonnet-5` cost **$0.067 / 11,882 input + 2,090 output tokens / ~40 s**, one
     provider call per failing test, and a retry pays the same again. See the README for the
     cost model.
+- **A built-in user guide** at `/help`, opened from the links menu. Twelve sections cover
+  setup, the dashboard, finding and reading a run, flaky history, comparison, triage,
+  sharing and permissions — in the same Russian/English as the viewer, following Airflow's
+  theme, and laid out for a phone as well as a desktop. It is static: no report data, no
+  network calls, served under its own strict CSP, and available even to a user whose report
+  access is denied. Repeat visits revalidate against an `ETag` and cost an empty 304.
 
 ## [0.6.2] - 2026-07-23
 
