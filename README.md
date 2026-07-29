@@ -52,6 +52,7 @@ It has two halves that share one on-disk layout:
 - [How it works](#how-it-works)
 - [HTTP API](#http-api)
 - [Access control (RBAC)](#access-control-rbac)
+- [Captured output](#captured-output)
 - [Coverage](#coverage)
 - [AI triage](#ai-triage)
 - [Configuration](#configuration)
@@ -87,7 +88,9 @@ click a slice to filter by status), a **coverage** card next to the duration (wh
 run was produced by [`airflow-pytest-operator`](https://github.com/IKrysanov/airflow-pytest-operator)
 `>= 0.6` with `coverage=True` — see [Coverage](#coverage); omitted when the run carries
 none), a **test-duration histogram** (10-second buckets, scrollable), case
-search / group-by-module, and every test's captured output on expand. With
+search / group-by-module, and every test's own prints and log lines on expand
+(kept in their own scrolling block under the traceback — see
+[Captured output](#captured-output)). With
 [AI triage](#ai-triage) on, each failed test also carries its verdict — *regression /
 flaky / environment / test bug* — with the model's hypothesis, a suggested fix and a
 rerun command, plus a run-level card that filters the table by category:
@@ -276,6 +279,7 @@ runtime. Endpoints (relative to the mount):
 | `GET /api/test-history?dag_id=&task_id=&node_id=&limit=` | one test's outcome per run |
 | `GET /api/unique-tests?dag_id=&task_id=&run_id=&full=` | distinct test count (+ when `full`, each test's runs / passed / failed / errors / skipped / avg duration) |
 | `DELETE /api/reports/{report_id}` | delete a report (RBAC-gated) |
+| `POST /api/reports/delete` | delete up to 200 reports in one request (RBAC-gated per DAG; partial success is reported per id) |
 | `GET /api/reports/{report_id}/allure.zip` | raw Allure results as a zip (if any) |
 | `GET /api/health` | liveness + readiness: `status`, `ready`, `reports_root`(+`_exists`), `auth`, `secure_xml` |
 | `GET /api/version` | `{"name": ..., "version": ...}` from package metadata |
@@ -300,6 +304,18 @@ The report list is filtered to the DAGs you may read, opening a report you can't
 read returns `403`, and deleting one requires permission to **trigger** its DAG.
 Every check **fails closed**: if the auth manager can't be consulted, access is
 denied.
+
+**Deleting many at once** (`POST /api/reports/delete`, what the viewer's bulk delete uses)
+applies exactly the same per-DAG check — there is no batch-wide permission and no
+administrator bypass. A mixed selection deletes only the DAGs you may trigger; the rest
+come back in `forbidden` and stay on disk. Permission is evaluated **once per DAG**
+rather than once per run, which is the point of the endpoint. Its body is capped at
+200 ids, 4096 characters each and 1 MiB in total, so one caller cannot make the API hold
+an unbounded request, and at most four bulk deletes run at once — beyond that the endpoint
+answers `503` **without deleting anything**, so the batch is safe to retry (the viewer
+does). That cap exists because Airflow's API server serves these from one bounded worker
+pool: without it, a few simultaneous cleanups delay every other request by the length of a
+batch.
 
 **Airflow 2 → 3 mapping.** Airflow 2's FAB used `(action, resource)` pairs —
 `can_read` / `can_edit` / `can_delete` / `can_create` on a resource such as
@@ -356,6 +372,56 @@ the report, with an `executor.json` linking the launch back to the Airflow run.
 Download them from a report's detail view, or `GET
 /api/reports/{id}/allure.zip` — then upload to [Allure TestOps](https://qameta.io/)
 (`allurectl upload …`). The JUnit viewer is unaffected; both artifacts coexist.
+
+## Captured output
+
+Every test's own `print()` and `logging` output is archived with the run and shown under
+its traceback, in its own scrolling block — for passing tests too, where it is the only
+content there is.
+
+This needs pytest's `junit_logging`, which defaults to **`no`**: without it the archive
+keeps tracebacks and drops everything the test printed. The parser therefore sets it
+itself, so the archive does not depend on the operator version or the project's `pytest.ini`:
+
+```python
+ArchivingResultParser(logs=True)              # default
+ArchivingResultParser(logs=False)             # archive tracebacks only
+ArchivingResultParser(logs_only_fail=True)    # capture, but only for failed/errored tests
+```
+
+`logs_only_fail=True` is enforced on the archive, not just asked of pytest: pytest can only
+be told to skip the capture of *passing* tests, so a **skipped** one still writes its own
+(500 skips printing 32 KB each left a 6 MB report). Whatever pytest leaves behind is removed
+after the run — failures and errors keep theirs.
+
+A DAG that sets `-o junit_logging=...` in its own `pytest_args` still wins: pytest honours
+the last override, and the task's arguments are spliced after the parser's.
+
+**What is and isn't captured.** pytest captures output by default and hands it to the
+report; `-s` / `--capture=no` turns that off, so with it in `pytest_args` the run is
+archived without any captured output (there is nothing to archive — the text went straight
+to the worker's console). Live-logging settings such as `log_cli` only change what pytest
+prints while running; what lands in the report is `junit_logging` and the capture above.
+
+**Size.** With capture on, a suite printing a few KB per test writes more captured text
+than test results — measured on 500 tests × 2 KB, `junit.xml` grows from 0.04 MB to
+1.19 MB, and on 500 × 32 KB to 15.8 MB. `logs_only_fail=True` is the producer-side lever:
+on the same 2 KB suite it brings `junit.xml` back to 0.06 MB. Past 32 MB a report is
+trimmed to its failures automatically, whatever the setting, and the task log says so.
+
+The API response is bounded independently of what the producer wrote: 16 KB per test, then
+2 MB of captured output and 4 MB of failure text per run (past either, a case says its text
+was omitted rather than appearing silent). The caps are in **UTF-8 bytes**, so a suite that
+prints Cyrillic, CJK or emoji gets the same budget as an ASCII one rather than 2–4× it. On a
+pathological run — 2,000 failures with 16 KB of traceback and 16 KB of output each — that is
+a 6.2 MB response instead of 66 MB.
+What the caps do **not** bound is parsing the archived XML itself: a report is read whole,
+so a 69 MB one still costs ~80 MB of memory in the api-server while it is read.
+
+**Secrets.** Captured output is stored verbatim, outside Airflow's task-log masking. If a
+test prints tokens, credentials or personal data, that text lands in the archive and is
+readable by anyone who can read the DAG's reports. Use `logs=False` or `logs_only_fail=True`
+for such suites, and keep the reports' retention aligned with your log-retention policy.
 
 ## Coverage
 

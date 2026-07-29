@@ -90,6 +90,16 @@ class ReportSource(ABC):
         """
         return None
 
+    def exists(self, ref: ReportRef) -> bool:
+        """Whether this run is still stored, without reading or parsing it.
+
+        Lets a caller tell "already gone" from "the store refused to remove it" after a
+        failed delete -- the two need different words in front of a user, and asking
+        :meth:`get_detail` would parse a whole report to answer a yes/no question.
+        Default falls back to that parse for sources that can't answer cheaply.
+        """
+        return self.get_detail(ref) is not None
+
     def report_size(self, ref: ReportRef) -> int:
         """Bytes one report occupies on the backing store (``0`` if unknown).
 

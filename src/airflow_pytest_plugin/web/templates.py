@@ -814,6 +814,18 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     overflow-x: auto; max-width: 100%; font-size: 12.5px; line-height: 1.55;
     white-space: pre; color: var(--fg); }
   .copied { font-size: 12px; color: var(--pass); }
+  /* What the test itself printed/logged: its own block, so a traceback stays readable
+     and a passing test's output is not mistaken for one. */
+  .case-cap { margin-top: 10px; }
+  /* The capture is the one part of a row with no natural size: a test that logged a
+     thousand lines would push every other test off the screen. It scrolls inside itself
+     so an expanded row stays about as tall as the traceback above it. */
+  .case-cap pre.tb {
+    max-height: 240px; overflow-y: auto; overscroll-behavior: contain;
+    padding-right: 8px; border-left-color: var(--primary);
+  }
+  .case-cap-h { margin-bottom: 4px; font-size: 11px; font-weight: 700;
+    letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
   /* Compare (diff) sections */
   .cmp-sec { margin-bottom: 16px; }
   .cmp-sec h3 { font-size: 13px; font-weight: 650; margin: 0 0 6px;
@@ -1571,6 +1583,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       hOutcome: "Outcome", hTest: "Test", hTime: "Time",
       afDag: "DAG", afRun: "Run", afTask: "Task", downloadAllure: "Allure results",
       loading: "Loading…", noOutput: "No output captured.",
+      capOut: "Captured output",
       noMatch: "No reports match the current filter.",
       noReports: "No reports found yet. Run a PytestOperator task with ArchivingResultParser to populate this view.",
       noCases: "No matching cases.", tryWord: "try",
@@ -1640,6 +1653,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       deleteTitleN: "Delete {n} reports?",
       deleteConfirm: "This permanently removes the report and its files everywhere.",
       cancel: "Cancel", delete: "Delete", deleting: "Deleting…",
+      deletingN: "Deleting… {n} of {m}",
       emailRun: "Email this run", emailTitle: "Email this run", emailToLabel: "Recipients",
       emailToPh: "name@example.com, other@example.com",
       emailHint: "Comma-separated. Leave empty to use the configured recipients.",
@@ -1651,7 +1665,9 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       alertsSentFail: "send failed", alertsAuto: "automatic", alertsManual: "manual",
       alertsEmpty: "No emails were sent for this run.",
       deleteFail: "Failed to delete: ",
-      deleteFailedN: "{n} could not be deleted (no permission).",
+      delForbidden: "{n} kept: you cannot trigger their DAG.",
+      delStorage: "{n} kept: storage refused to delete them.",
+      delUnproven: "{n} unconfirmed: the request failed. Retry to check.",
       nSelected: "{n} selected", deleteSelected: "Delete", clearSel: "Clear",
       selectRow: "Select row", selectAll: "Select all",
       forbidden: "You don't have permission to delete this report (it requires permission to trigger the DAG).",
@@ -1763,6 +1779,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       hOutcome: "Итог", hTest: "Тест", hTime: "Время",
       afDag: "DAG", afRun: "Запуск", afTask: "Задача", downloadAllure: "Allure-отчёт",
       loading: "Загрузка…", noOutput: "Вывод не захвачен.",
+      capOut: "Вывод теста",
       noMatch: "Нет отчётов под текущий фильтр.",
       noReports: "Отчётов пока нет. Запусти задачу PytestOperator с ArchivingResultParser, чтобы они появились здесь.",
       noCases: "Нет подходящих тестов.", tryWord: "попытка",
@@ -1835,8 +1852,11 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       deleteTitleN: "Удалить отчётов: {n}?",
       deleteConfirm: "Отчёт и его файлы будут удалены безвозвратно — везде.",
       cancel: "Отмена", delete: "Удалить", deleting: "Удаление…",
+      deletingN: "Удаление… {n} из {m}",
       deleteFail: "Не удалось удалить: ",
-      deleteFailedN: "Не удалось удалить: {n} (нет прав).",
+      delForbidden: "Осталось {n}: нет прав на запуск их DAG.",
+      delStorage: "Осталось {n}: хранилище отказало в удалении.",
+      delUnproven: "Не подтверждено: {n}. Запрос не прошёл — повторите.",
       emailRun: "Отправить на почту", emailTitle: "Отправить прогон на почту",
       emailToLabel: "Получатели", emailToPh: "name@example.com, other@example.com",
       emailHint: "Через запятую. Пусто — отправить настроенным получателям.",
@@ -4090,9 +4110,18 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   }
   function caseRowHtml(c, i) {
     var kind = { passed: "pass", failed: "fail", error: "error", skipped: "skip" }[c.outcome] || "skip";
-    var output = (c.message && c.message.trim()) ? c.message : t("noOutput");
-    // The verdict rides beside the test id (a word, not just a colour) and opens in full
-    // above the traceback -- the diagnosis is the first thing read, the raw output second.
+    var trace = (c.message && c.message.trim()) ? c.message : "";
+    var printed = (c.output && c.output.trim()) ? c.output : "";
+    // Reading order is diagnosis, then evidence: verdict, traceback, then whatever the
+    // test itself printed or logged. The capture gets its own labelled block instead of
+    // being appended to the traceback -- for a PASSING test it is the only content there
+    // is, and glued onto a failure it reads as part of the stack.
+    var body = trace ? '<pre class="tb mono">' + esc(trace) + "</pre>" : "";
+    if (printed) {
+      body += '<div class="case-cap"><div class="case-cap-h">' + esc(t("capOut"))
+        + '</div><pre class="tb mono">' + esc(printed) + "</pre></div>";
+    }
+    if (!body) body = '<pre class="tb mono">' + esc(t("noOutput")) + "</pre>";
     var chip = triCat(c.verdict) ? triChipHtml(triCat(c.verdict), null, { cls: "case-tri" }) : "";
     return '<tr class="case clickable" tabindex="0" role="button" aria-expanded="false" data-exp="' + i + '">'
       + "<td>" + badge(kind, outcomeLabel(c.outcome)) + "</td>"
@@ -4103,7 +4132,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       + '<button class="case-hist" type="button" data-hist="' + esc(c.node_id) + '">'
       + HIST_ICON + esc(t("historyBtn")) + "</button>"
       + (c.verdict ? triPanelHtml(c.verdict) : "")
-      + '<pre class="tb mono">' + esc(output) + "</pre></td></tr>";
+      + body + "</td></tr>";
   }
   function setOutcomeFilter(k) {
     filter = k;
@@ -4609,40 +4638,106 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     updateParentDim();
   }
   function closeConfirm() {
+    if (deleting) return;   // see doDelete: the dialog IS the progress indicator
     pendingDelete = [];
     if (confirmDlg.open) confirmDlg.close(); else confirmDlg.removeAttribute("open");
   }
+  // Runs per request. The server caps the batch at the same number; sending them in
+  // batches (rather than one request per run, or one request for everything) is what
+  // keeps a 2000-run cleanup from queueing behind the browser's ~6 connections while
+  // showing the user nothing.
+  var DELETE_BATCH = 200;
+  var deleting = false;
   function doDelete() {
+    if (deleting) return;
     var ids = pendingDelete.slice();
     if (!ids.length) return;
-    var ok = document.getElementById("c-ok");
-    ok.disabled = true; ok.textContent = t("deleting");
-    var failed = [];
-    Promise.all(ids.map(function (id) {
-      // Each DELETE is RBAC-checked server-side; a forbidden one just fails.
-      return fetch(API + "reports/" + encodeURIComponent(id), { method: "DELETE" })
-        .then(function (r) {
-          if (r.status === 404 || r.ok) {
-            allReports = allReports.filter(function (x) { return x.id !== id; });
-            selectedIds.delete(id);
-            if (currentId === id) closeDetail();
-          } else { failed.push(id); }
-        })
-        .catch(function () { failed.push(id); });
-    })).then(function () {
+    var ok = document.getElementById("c-ok"), cancel = document.getElementById("c-cancel");
+    var name = document.getElementById("c-name");
+    deleting = true;
+    ok.disabled = true; cancel.disabled = true;
+    var total = ids.length, done = 0, rejected = [], removed = {};
+    // Why each survivor survived. One count per cause: "no permission" was previously
+    // shown for a storage error and a dropped connection alike, which sends the user
+    // looking at Airflow roles for a problem that is not there.
+    var why = { forbidden: 0, failed: 0, unproven: 0 };
+    function label() {
+      ok.textContent = total > DELETE_BATCH
+        ? t("deletingN").replace("{n}", done).replace("{m}", total)
+        : t("deleting");
+    }
+    label();
+    // The server caps how many bulk deletes run at once and refuses the rest with 503
+    // WITHOUT deleting anything, so the same batch can simply be sent again. Waiting a
+    // moment and retrying keeps that cap invisible while several people clear history.
+    function send(chunk, attempt) {
+      return fetch(API + "reports/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids: chunk })
+      }).then(function (r) {
+        if (r.status === 503 && attempt < 3) {
+          return new Promise(function (done) { setTimeout(done, 1200 * attempt); })
+            .then(function () { return send(chunk, attempt + 1); });
+        }
+        if (!r.ok) throw new Error(r.status);
+        return r.json();
+      });
+    }
+    function batch(i) {
+      if (i >= ids.length) return Promise.resolve();
+      var chunk = ids.slice(i, i + DELETE_BATCH);
+      // One request per batch: RBAC is evaluated once per DAG server-side and the run
+      // list is invalidated once, instead of once per run.
+      return send(chunk, 1).then(function (res) {
+        // Only forbidden and failed runs are still on disk. "missing" ones were already
+        // gone, so they leave the list like a successful delete -- keeping them would ask
+        // the user to retry something that cannot be retried.
+        var left = {};
+        (res.forbidden || []).forEach(function (id) { left[id] = 1; why.forbidden++; });
+        (res.failed || []).forEach(function (id) { left[id] = 1; why.failed++; });
+        chunk.forEach(function (id) {
+          if (left[id]) { rejected.push(id); return; }
+          removed[id] = 1;
+          selectedIds.delete(id);
+          if (currentId === id) closeDetail();
+        });
+      }).catch(function () {
+        rejected.push.apply(rejected, chunk);   // network/5xx: the whole batch is unproven
+        why.unproven += chunk.length;
+      }).then(function () {
+        done += chunk.length;
+        label();
+        return batch(i + DELETE_BATCH);
+      });
+    }
+    batch(0).then(function () {
+      // One pass over the list at the end: filtering it per deleted run is quadratic, and
+      // a bulk cleanup is exactly where that bites.
+      allReports = allReports.filter(function (x) { return !removed[x.id]; });
+      deleting = false;
+      ok.disabled = false; cancel.disabled = false; ok.textContent = t("delete");
       applyFilter(true);
-      if (failed.length) {
-        pendingDelete = failed;
-        document.getElementById("c-name").textContent =
-          t("deleteFailedN").replace("{n}", failed.length);
+      if (rejected.length) {
+        pendingDelete = rejected;
+        var parts = [];
+        if (why.forbidden) parts.push(t("delForbidden").replace("{n}", why.forbidden));
+        if (why.failed) parts.push(t("delStorage").replace("{n}", why.failed));
+        if (why.unproven) parts.push(t("delUnproven").replace("{n}", why.unproven));
+        name.textContent = parts.join(" ");
       } else {
         closeConfirm();
       }
-    }).finally(function () { ok.disabled = false; ok.textContent = t("delete"); });
+    });
   }
   document.getElementById("c-cancel").addEventListener("click", closeConfirm);
   document.getElementById("c-ok").addEventListener("click", doDelete);
-  confirmDlg.addEventListener("cancel", function () { pendingDelete = []; });
+  confirmDlg.addEventListener("cancel", function (e) {
+    // Escape while a delete is running would hide the only progress there is and leave
+    // the list showing runs that are already gone -- the operation cannot be called back.
+    if (deleting) { e.preventDefault(); return; }
+    pendingDelete = [];
+  });
   confirmDlg.addEventListener("close", updateParentDim);
   closeOnBackdrop(confirmDlg, closeConfirm);
 

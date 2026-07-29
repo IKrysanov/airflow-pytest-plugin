@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "airflow-pytest-plugin"
-version = "0.6.2"
+version = "0.7.0"
 description = "View airflow-pytest-operator results in the Airflow 3 web UI."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -74,6 +74,10 @@ dev = [
     # schema, node-id join, file permissions. Without it those tests importorskip, so the
     # contract goes unchecked until a user hits it. Its own plugin is opt-in and inert.
     "pytest-triage>=0.1.2",
+    # Same reasoning for Allure: tests/test_allure_integration.py runs REAL allure-pytest
+    # to pin where --alluredir actually writes. Faking that directory cannot catch results
+    # landing outside the archive, which is precisely how the download button goes missing.
+    "allure-pytest>=2.13",
 ]
 # Playwright UI regression suite (tests/ui, marker `ui`). Opt-in: heavy (real browser),
 # run locally + in a dedicated CI job. After install: `playwright install chromium`.

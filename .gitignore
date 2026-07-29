@@ -223,3 +223,4 @@ __marimo__/
 # Local preview config (machine-specific absolute paths)
 .claude/
 .claude/launch.json
+SECURITY_LOAD_AUDIT.md

@@ -19,12 +19,14 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from pydantic import BaseModel, Field
 
 from ...compat import get_run_coverage
 from ...config import (
@@ -44,7 +46,15 @@ from ...notifications import (
     record_sent_alert,
 )
 from ...triage import canonical_node_key
-from .common import ERR_400, ERR_403, ERR_404, RouteDeps, ok, ref_from_token
+from .common import (
+    ERR_400,
+    ERR_403,
+    ERR_404,
+    MAX_BULK_DELETE_BODY_BYTES,
+    RouteDeps,
+    ok,
+    ref_from_token,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -52,6 +62,44 @@ TAG = "reports"
 
 #: Recipient cap per email, so the endpoint can't be used as a mass-mailer.
 _MAX_EMAIL_RECIPIENTS = 10
+#: Runs one bulk delete may cover. Bounds the work a single request can queue behind the
+#: server's other callers; the viewer splits a larger selection into successive batches so
+#: the user still sees it advance instead of one opaque wait.
+_MAX_DELETE_BATCH = 200
+#: A real report token consists of three bounded Airflow identifiers plus two integers.
+#: 4096 leaves ample forward-compatibility headroom while preventing one malformed batch
+#: from making the API decode and echo hundreds of multi-megabyte strings.
+_MAX_REPORT_TOKEN_LENGTH = 4096
+#: Bulk deletes running at once. FastAPI serves sync endpoints from one bounded worker
+#: pool, so without this a handful of callers clearing their history at the same time
+#: holds every thread for the length of their batches and the rest of the API -- health,
+#: the run list -- waits behind them. The viewer sends its batches one after another, so a
+#: single user never reaches this; several users at once get a 503 and retry.
+_MAX_CONCURRENT_BULK_DELETES = 4
+_bulk_delete_slots = threading.BoundedSemaphore(_MAX_CONCURRENT_BULK_DELETES)
+
+ReportToken = Annotated[
+    str,
+    Field(
+        min_length=1,
+        max_length=_MAX_REPORT_TOKEN_LENGTH,
+        description="Opaque report id returned by GET /api/reports.",
+    ),
+]
+
+
+class DeleteReportsRequest(BaseModel):
+    """Validated request body for deleting archived runs in one batch."""
+
+    ids: list[ReportToken] = Field(
+        min_length=1,
+        max_length=_MAX_DELETE_BATCH,
+        description=(
+            "Report ids to delete. Airflow trigger permission is checked for every "
+            "referenced DAG; denied reports are returned in `forbidden` and are not deleted."
+        ),
+    )
+
 
 #: How long after a run is archived its coverage XCom is still worth probing. The operator
 #: commits coverage within seconds of archiving the report, so past this window a run that
@@ -218,6 +266,7 @@ _EX_CASE = {
     "outcome": "failed",
     "time": 0.3,
     "message": "AssertionError: row count mismatch",
+    "output": "--- Captured Log ---\nINFO  etl:load.py:42 loaded 0 rows",
     "verdict": _EX_VERDICT,
 }
 #: `model` is whatever the provider reports -- pytest-triage's Anthropic default here;
@@ -709,7 +758,21 @@ def build_router(deps: RouteDeps) -> APIRouter:
     @router.delete(
         "/api/reports/{report_id}",
         summary="Delete a run",
-        responses={**ok({"deleted": True}), **ERR_400, **ERR_403, **ERR_404},
+        responses={
+            **ok({"deleted": True}),
+            **ERR_400,
+            **ERR_403,
+            **ERR_404,
+            500: {
+                "description": "The report is still stored: the backing store refused "
+                "to remove it (read-only mount, permissions, a lost NFS lock).",
+                "content": {
+                    "application/json": {
+                        "example": {"detail": "the report could not be deleted"}
+                    }
+                },
+            },
+        },
     )
     def delete_report(
         report_id: str,
@@ -718,7 +781,8 @@ def build_router(deps: RouteDeps) -> APIRouter:
         """Permanently delete one archived run and prune now-empty parent dirs.
 
         Destructive: requires permission to **trigger** the run's DAG (RBAC), not just
-        read it. ``400`` bad token, ``403`` not permitted, ``404`` already gone.
+        read it. ``400`` bad token, ``403`` not permitted, ``404`` already gone,
+        ``500`` the store refused to remove it and the run is still there.
         """
         ref = ref_from_token(report_id)
         if not delete_auth(ref.dag_id, user):
@@ -727,8 +791,172 @@ def build_router(deps: RouteDeps) -> APIRouter:
                 detail="deleting a report requires permission to trigger its DAG",
             )
         if not src.delete(ref):
+            # "Not found" and "storage said no" are different answers: reporting the
+            # second as 404 tells the caller the run is gone while every file is still
+            # on disk -- and disagrees with what the bulk endpoint reports for the same
+            # run. Same distinction, same words, both routes.
+            if src.exists(ref):
+                raise HTTPException(
+                    status_code=500, detail="the report could not be deleted"
+                )
             raise HTTPException(status_code=404, detail="report not found")
         return JSONResponse({"deleted": True})
+
+    @router.post(
+        "/api/reports/delete",
+        summary="Delete many runs",
+        responses={
+            **ok(
+                {
+                    "deleted": 1,
+                    "failed": [],
+                    "forbidden": [
+                        "eyJkIjoiZGFuZ19yZWFkX29ubHkiLCJtIjotMSwibiI6MSwiciI6InIxIiwidCI6InRlc3QifQ"
+                    ],
+                    "missing": [],
+                    "invalid": 0,
+                },
+                description=(
+                    "Per-id result. `forbidden` reports were retained because the current "
+                    "user cannot trigger their DAG; `failed` ones because storage refused "
+                    "to remove them; `missing` were already gone. `invalid` counts ids "
+                    "that could not be decoded — they are counted, never echoed back."
+                ),
+            ),
+            503: {
+                "description": (
+                    "Too many bulk deletes are already running; nothing was deleted. "
+                    "Retry the same batch."
+                ),
+                "content": {
+                    "application/json": {
+                        "example": {
+                            "detail": "too many bulk deletes in progress; retry shortly"
+                        }
+                    }
+                },
+            },
+            413: {
+                "description": (
+                    "Request body exceeds "
+                    f"{MAX_BULK_DELETE_BODY_BYTES // (1024 * 1024)} MiB."
+                ),
+                "content": {
+                    "application/json": {
+                        "example": {
+                            "detail": (
+                                "request body too large "
+                                f"(max {MAX_BULK_DELETE_BODY_BYTES} bytes)"
+                            )
+                        }
+                    }
+                },
+            },
+        },
+    )
+    def delete_reports(
+        body: Annotated[
+            DeleteReportsRequest,
+            Body(
+                openapi_examples={
+                    "selection": {
+                        "summary": "Delete two selected reports",
+                        "value": {
+                            "ids": [
+                                "eyJkIjoiZGFuX2EiLCJtIjotMSwibiI6MSwiciI6InIxIiwidCI6InRlc3QifQ",
+                                "eyJkIjoiZGFuX2IiLCJtIjotMSwibiI6MSwiciI6InIyIiwidCI6InRlc3QifQ",
+                            ]
+                        },
+                    }
+                }
+            ),
+        ],
+        user: Any = Depends(user_dep),  # noqa: B008 - FastAPI dependency idiom
+    ) -> JSONResponse:
+        """Permanently delete a batch of archived runs.
+
+        The same destructive operation as ``DELETE /api/reports/{id}``, done in one round
+        trip: clearing a suite's history is thousands of runs, and one request per run
+        means one RBAC evaluation and one cache invalidation per run, plus a browser that
+        will only open a handful of connections at a time. Permission is still checked per
+        DAG -- ids the user may not delete come back in ``forbidden`` and stay on disk.
+
+        **Permission policy:** in Airflow, the current user must be allowed to trigger
+        every referenced DAG (the same check as single-report deletion). There is no
+        batch-wide or administrator bypass: a mixed request deletes only the permitted
+        DAGs. The standalone development server has no Airflow RBAC and therefore allows
+        all callers; it must not be exposed as a public service.
+
+        Body: ``{"ids": ["<token>", ...]}``, at most ``_MAX_DELETE_BATCH`` per call,
+        ``_MAX_REPORT_TOKEN_LENGTH`` characters per id and
+        ``MAX_BULK_DELETE_BODY_BYTES`` bytes for the entire request. Partial success is
+        normal and reported per id.
+        """
+        if not _bulk_delete_slots.acquire(blocking=False):
+            # Refusing is the point: queueing here would hold a worker thread and starve
+            # the endpoints that answer in microseconds. Nothing was deleted, so the
+            # caller can simply send the same batch again.
+            raise HTTPException(
+                status_code=503,
+                detail="too many bulk deletes in progress; retry shortly",
+                headers={"Retry-After": "5"},
+            )
+        try:
+            return _delete_batch(body.ids, user)
+        finally:
+            _bulk_delete_slots.release()
+
+    def _delete_batch(raw_ids: list[str], user: Any) -> JSONResponse:
+        """The batch itself, so the concurrency slot is always released."""
+        # Preserve the caller's order while preventing a duplicate from being deleted once
+        # and then reported as failed on its second occurrence.
+        ids = list(dict.fromkeys(raw_ids))
+
+        deleted, invalid = 0, 0
+        failed: list[str] = []  # storage refused the removal -- the run is still there
+        forbidden: list[str] = []  # no trigger permission for that DAG
+        missing: list[str] = []  # nothing to delete: already gone
+        allowed: dict[str, bool] = {}  # one RBAC check per DAG, not per run
+        for report_id in ids:
+            try:
+                ref = ref_from_token(report_id)
+            except HTTPException:
+                # Counted, never echoed: an id the server cannot even decode names no
+                # report, so returning it would only reflect caller-supplied bytes.
+                invalid += 1
+                continue
+            # One id's failure must not discard the answer for the other 199. Without
+            # this, an authorizer or a custom ReportSource raising halfway through turns
+            # a partly-completed batch into a 5xx, and the caller cannot tell which runs
+            # are already gone.
+            try:
+                if ref.dag_id not in allowed:
+                    allowed[ref.dag_id] = bool(delete_auth(ref.dag_id, user))
+                if not allowed[ref.dag_id]:
+                    forbidden.append(report_id)
+                elif src.delete(ref):
+                    deleted += 1
+                else:
+                    # Either the run was already gone or storage refused to remove it.
+                    # Both leave the viewer with a row it must keep, and the two are
+                    # worth telling apart in the message the user gets.
+                    (failed if src.exists(ref) else missing).append(report_id)
+            except Exception as exc:
+                _log.exception(
+                    "Bulk delete failed for %s (%s)",
+                    _log_safe(report_id),
+                    type(exc).__name__,
+                )
+                failed.append(report_id)
+        return JSONResponse(
+            {
+                "deleted": deleted,
+                "failed": failed,
+                "forbidden": forbidden,
+                "missing": missing,
+                "invalid": invalid,
+            }
+        )
 
     @router.post(
         "/api/reports/{report_id}/email",

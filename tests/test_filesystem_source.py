@@ -268,10 +268,13 @@ def test_case_output_includes_captured_stdout_for_passed(reports_root):
     assert detail is not None
     case = detail.cases[0]
     assert case.outcome == "passed"
-    # Captured output is surfaced even for a passing test.
-    assert "Captured stdout / log" in case.message
-    assert "hello from stdout" in case.message
-    assert "Captured stderr" in case.message
+    # Captured output is surfaced even for a passing test -- and in its OWN field, so it
+    # is never mistaken for a failure message.
+    assert case.message is None or not case.message.strip()
+    assert "Captured stdout / log" in case.output
+    assert "hello from stdout" in case.output
+    assert "Captured stderr" in case.output
+    assert "a warning" in case.output
 
 
 def test_delete_removes_report_and_prunes_empty_ancestors(reports_root):
@@ -307,9 +310,9 @@ def test_delete_returns_false_when_absent(reports_root):
     assert src.delete(ReportRef("nope", "nope", "nope", 1)) is False
 
 
-def test_case_outputs_empty_on_parse_error():
-    # A missing/unparseable file yields no outputs (best-effort).
-    assert FileSystemReportSource._case_outputs("/no/such/report.xml") == {}
+def test_case_details_empty_on_parse_error():
+    # A missing/unparseable file yields no details (best-effort).
+    assert FileSystemReportSource._case_details("/no/such/report.xml") == {}
 
 
 def test_case_output_is_truncated(reports_root, monkeypatch):
@@ -329,7 +332,7 @@ def test_case_output_is_truncated(reports_root, monkeypatch):
 
     detail = FileSystemReportSource(report_root=reports_root).get_detail(ref)
     assert detail is not None
-    assert detail.cases[0].message.endswith("…(truncated)")
+    assert detail.cases[0].output.endswith("…(truncated)")
 
 
 def test_case_with_empty_skipped_body_adds_no_output(reports_root):
@@ -670,7 +673,7 @@ def test_case_outputs_reads_every_junit_shape(reports_root):
     def outputs_for(name, xml):
         ref = ReportRef("d", name, "t", 1, -1)
         write_report_xml(reports_root, ref, xml)
-        return FileSystemReportSource._case_outputs(
+        return FileSystemReportSource._case_details(
             ReportLayout().report_path(reports_root, ref)
         )
 
@@ -684,11 +687,13 @@ def test_case_outputs_reads_every_junit_shape(reports_root):
         "<system-err>ERR</system-err></testcase></testsuite>",
     )
     assert ("a", "p") not in single  # a clean pass carries no output
-    assert single[("a", "f")] == "MF\nTF"
-    assert single[("a", "e")] == "ME\nTE"
-    assert single[("a", "s")] == "MS"
+    # (failure text, captured output) -- the diagnosis never mixes with the evidence.
+    assert single[("a", "f")] == ("MF\nTF", "")
+    assert single[("a", "e")] == ("ME\nTE", "")
+    assert single[("a", "s")] == ("MS", "")
     assert single[("a", "o")] == (
-        "--- Captured stdout / log ---\nOUT\n\n--- Captured stderr ---\nERR"
+        "",
+        "--- Captured stdout / log ---\nOUT\n\n--- Captured stderr ---\nERR",
     )
 
     multi = outputs_for(
@@ -701,8 +706,8 @@ def test_case_outputs_reads_every_junit_shape(reports_root):
         "</testsuite></testsuites>",
     )
     assert multi == {
-        ("p1", "t1"): "F1\nB1",
-        ("p2", "t2"): "--- Captured stdout / log ---\nO2",
+        ("p1", "t1"): ("F1\nB1", ""),
+        ("p2", "t2"): ("", "--- Captured stdout / log ---\nO2"),
     }
 
     assert outputs_for("empty", "<testsuite/>") == {}
@@ -721,8 +726,10 @@ def test_case_outputs_reads_every_junit_shape(reports_root):
         + ("Z" * (_MAX_OUTPUT + 500))
         + "</system-out></testcase></testsuite>",
     )
-    assert big[("c", "b")].endswith("…(truncated)")
-    assert len(big[("c", "b")]) < _MAX_OUTPUT + 100  # one case can't flood the response
+    assert big[("c", "b")][1].endswith("…(truncated)")
+    assert (
+        len(big[("c", "b")][1]) < _MAX_OUTPUT + 100
+    )  # one case can't flood a response
 
 
 def test_record_coverage_refuses_traversal_token(tmp_path):
@@ -1439,3 +1446,161 @@ def test_an_empty_verdicts_file_does_not_trigger_the_legacy_meta_read(
     )
     assert src.verdicts(ref) == {}
     assert parses == [], "an empty sidecar is still a sidecar -- no meta read needed"
+
+
+def test_capture_drops_streams_nothing_was_written_to():
+    # pytest emits a banner for EVERY stream it captured, empty ones included. Kept, they
+    # put an empty "Captured Err" heading under every test in the run.
+    clean = FileSystemReportSource._clean_capture
+
+    assert (
+        clean(
+            "------- Captured Log -------\n\n------- Captured Out -------\nPDF: 24 KB\n"
+        )
+        == "--- Captured Out ---\nPDF: 24 KB"
+    )
+    assert clean("------- Captured Err -------\n\n") == ""
+    assert clean("plain text\nno banners") == "plain text\nno banners"
+    # Two streams with content stay apart: one system-out can hold both, and the banner is
+    # the only thing separating a log line from a print.
+    assert (
+        clean(
+            "------- Captured Log -------\nWARNING boom\n------- Captured Out -------\nhi\n"
+        )
+        == "--- Captured Log ---\nWARNING boom\n--- Captured Out ---\nhi"
+    )
+
+
+def test_delete_reports_failure_instead_of_claiming_success(reports_root, monkeypatch):
+    # A delete the storage refused must not come back as True: the viewer drops the run
+    # from the list on True, so the user believes the space was reclaimed while every
+    # file is still there -- on a read-only mount, for the whole selection.
+    from airflow_pytest_plugin.sources import filesystem
+
+    ref = ReportRef("dag", "run", "task", 1)
+    out_dir = write_report(reports_root, ref)
+    src = FileSystemReportSource(report_root=reports_root)
+
+    def refuse(path, *a, **kw):
+        raise PermissionError("read-only file system")
+
+    monkeypatch.setattr(filesystem.shutil, "rmtree", refuse)
+    assert src.delete(ref) is False
+    assert os.path.isdir(out_dir)  # and it really is still there
+
+    # A partial rmtree counts as failure too: what is left behind is a truncated run.
+    monkeypatch.setattr(filesystem.shutil, "rmtree", lambda path, *a, **kw: None)
+    assert src.delete(ref) is False
+
+    monkeypatch.undo()
+    assert src.delete(ref) is True
+    assert not os.path.exists(out_dir)
+
+
+def test_captured_output_is_capped_across_the_whole_run(reports_root, monkeypatch):
+    # The per-case cap still multiplies by the number of tests. Without a run-wide budget
+    # a chatty suite becomes one enormous JSON response for the browser to hold.
+    from airflow_pytest_plugin.sources import filesystem
+
+    monkeypatch.setattr(filesystem, "_MAX_OUTPUT", 200)
+    monkeypatch.setattr(filesystem, "_MAX_RUN_OUTPUT", 500)
+    ref = ReportRef("dag", "run", "task", 1)
+    cases = "".join(
+        f'<testcase classname="t.m" name="test_{i}" time="0.1">'
+        f"<system-out>{'x' * 5000}</system-out></testcase>"
+        for i in range(10)
+    )
+    write_report_xml(
+        reports_root,
+        ref,
+        f'<testsuite name="s" tests="10" failures="0" errors="0" skipped="0">{cases}</testsuite>',
+    )
+
+    detail = FileSystemReportSource(report_root=reports_root).get_detail(ref)
+    assert detail is not None
+    total = sum(len(c.output or "") for c in detail.cases)
+    assert total <= 500 + len(filesystem._OUTPUT_BUDGET_SPENT) * 10
+    # Past the budget a test that printed something says so rather than looking silent.
+    assert detail.cases[-1].output == filesystem._OUTPUT_BUDGET_SPENT
+    assert detail.cases[0].output.endswith("…(truncated)")
+
+
+def test_failure_text_is_capped_across_the_whole_run_too(reports_root, monkeypatch):
+    # A suite that broke wide is the other way one run becomes tens of megabytes of JSON:
+    # 2,000 failures at 16KB of traceback each need no captured output to get there.
+    from airflow_pytest_plugin.sources import filesystem
+
+    monkeypatch.setattr(filesystem, "_MAX_OUTPUT", 200)
+    monkeypatch.setattr(filesystem, "_MAX_RUN_FAILURES", 500)
+    ref = ReportRef("dag", "run", "task", 1)
+    cases = "".join(
+        f'<testcase classname="t.m" name="test_{i}" time="0.1">'
+        f'<failure message="boom">{"E   assert 1 == 2" * 400}</failure></testcase>'
+        for i in range(10)
+    )
+    write_report_xml(
+        reports_root,
+        ref,
+        f'<testsuite name="s" tests="10" failures="10" errors="0" skipped="0">{cases}</testsuite>',
+    )
+
+    detail = FileSystemReportSource(report_root=reports_root).get_detail(ref)
+    assert detail is not None
+    total = sum(len(c.message or "") for c in detail.cases)
+    assert total <= 500 + len(filesystem._FAILURE_BUDGET_SPENT) * 10
+    # A test that broke is never shown as one that did not.
+    assert detail.cases[-1].message == filesystem._FAILURE_BUDGET_SPENT
+    assert detail.cases[0].message.endswith("…(truncated)")
+
+
+def test_budgets_count_utf8_bytes_not_python_characters(reports_root, monkeypatch):
+    # The response is measured in bytes; the budget used to be measured in characters, so
+    # any non-ASCII text passed at up to 4x the limit -- a suite printing emoji sent 8 MB
+    # through a 2,000,000-"character" budget. Cyrillic and CJK do the same at 2x-3x.
+    from airflow_pytest_plugin.sources import filesystem
+
+    monkeypatch.setattr(filesystem, "_MAX_OUTPUT", 400)
+    monkeypatch.setattr(filesystem, "_MAX_RUN_OUTPUT", 1000)
+    monkeypatch.setattr(filesystem, "_MAX_RUN_FAILURES", 1000)
+
+    def used(char):
+        ref = ReportRef("dag", f"run_{ord(char)}", "task", 1)
+        blob = char * 5000
+        cases = "".join(
+            f'<testcase classname="t.m" name="test_{i}" time="0.1">'
+            f'<failure message="boom">{blob}</failure>'
+            f"<system-out>{blob}</system-out></testcase>"
+            for i in range(5)
+        )
+        write_report_xml(
+            reports_root,
+            ref,
+            f'<testsuite name="s" tests="5" failures="5" errors="0" skipped="0">{cases}</testsuite>',
+        )
+        detail = FileSystemReportSource(report_root=reports_root).get_detail(ref)
+        assert detail is not None
+        texts = [t for c in detail.cases for t in (c.message, c.output) if t]
+        return sum(len(t.encode("utf-8")) for t in texts), texts
+
+    ascii_bytes, _ = used("A")
+    for wide in ("ф", "漢", "😀"):
+        wide_bytes, texts = used(wide)
+        # Within the note overhead of the ASCII case -- not 2x, 3x or 4x it.
+        assert wide_bytes <= ascii_bytes + 1000, (
+            f"{wide}: {wide_bytes} vs {ascii_bytes}"
+        )
+        # And truncation never splits a character into a replacement glyph.
+        assert all("�" not in t for t in texts)
+        assert all(t.encode("utf-8").decode("utf-8") == t for t in texts)
+
+
+def test_cap_truncates_on_a_character_boundary():
+    from airflow_pytest_plugin.sources.filesystem import _cap
+
+    text, size = _cap("😀" * 10, 6)  # 6 bytes = one emoji and a half
+    assert text.startswith("😀") and "�" not in text
+    assert text.count("😀") == 1  # the split one is dropped, not mangled
+    assert size == len(text.encode("utf-8"))
+    # A block that fits is returned untouched, with its real byte cost.
+    same, size = _cap("привет", 100)
+    assert same == "привет" and size == 12

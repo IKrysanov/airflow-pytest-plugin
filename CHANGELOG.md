@@ -5,7 +5,7 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.7.0] - unreleased
 
 ### Added
 - **AI triage — a verdict on every failed test.** With
@@ -16,49 +16,85 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   result_parser=ArchivingResultParser(triage_provider="anthropic")
   ```
 
-  Each failed test carries its **category** — `regression` (the code broke) / `flaky` /
-  `env` (the environment, not the code) / `test_bug` / `unknown` — and expands to the
-  model's **hypothesis**, a **suggested fix**, its **confidence**, and a copyable command
-  that reruns exactly that test. A run-level card above the case table names the model,
-  shows the category mix as a proportional bar, and filters the table to one group in a
-  click; the heatmap names the AI's reading of a hovered cell; the run list marks each
-  analysed run. Anthropic, OpenAI (and any OpenAI-compatible endpoint) and GigaChat are
-  supported — bring your own key.
+  Each failed test carries a **category** — `regression` / `flaky` / `env` / `test_bug` /
+  `unknown` — and expands to the model's hypothesis, a suggested fix, its confidence and a
+  copyable command that reruns exactly that test. A run-level card names the model, shows
+  the category mix as a proportional bar and filters the table to one group in a click; the
+  heatmap names the AI's reading of a hovered cell; the run list marks each analysed run —
+  blue judged, red the pass broke, grey report-only. Anthropic, OpenAI (and any
+  OpenAI-compatible endpoint) and GigaChat are supported — bring your own key.
 
-  - **Three levels of opt-in.** `triage=True` alone costs nothing — no provider, no
-    network — and still gives every failure its exception type and rerun command. Naming a
-    provider adds the LLM pass. `triage_budget` / `triage_timeout` bound the spend,
-    defaulting to pytest-triage's own.
-  - **Verdicts survive a failed run** (the operator raises *after* the parser, and a red
-    suite is exactly what you want triaged) and are stored beside the run, not inside the
-    file every tree scan parses: at 3,000 runs × 200 verdicts, keeping them in `meta.json`
-    made a cold scan **4.4× slower** and grew the scanned corpus from 48 MB to 1.3 GB.
-  - **A pass that could not run is reported as such, not as verdicts.** pytest-triage
-    answers a rejected key, a timeout, an exhausted budget or a tripped breaker with
-    `unknown` verdicts; shown as judgements those would leave a misconfigured run looking
-    fully analysed. They are dropped and the reason is stated once, in the provider's own
-    words. The run-list mark is coloured by state — red the pass broke, blue a model judged
-    it, grey report-only — and names the model on hover.
-  - pytest-triage's raw report is **removed once distilled** (it is the largest file a run
-    produces and repeats tracebacks `junit.xml` already holds), and kept only when it could
-    not be read, where it is the sole evidence of what went wrong.
-  - Nothing about triage can fail a run: a missing, unreadable or half-written report — or
-    a failure to write the verdicts — just leaves the archive without an AI section.
+  - **Three levels of opt-in.** `triage=True` costs nothing (no provider, no network) and
+    still gives every failure its exception type and rerun command; naming a provider adds
+    the LLM pass; `triage_budget` / `triage_timeout` bound the spend.
+  - **Verdicts survive a failed run** and are stored beside it, not inside the file every
+    tree scan parses: at 3,000 runs × 200 verdicts, keeping them in `meta.json` made a cold
+    scan **4.4× slower** and grew the scanned corpus from 48 MB to 1.3 GB.
+  - **A pass that could not run is reported as such, not as verdicts.** A rejected key, a
+    timeout or an exhausted budget would otherwise leave a misconfigured run looking fully
+    analysed; those are dropped and the reason stated once, in the provider's own words.
+  - Nothing about triage can fail a run: an unreadable or half-written report just leaves
+    the archive without an AI section.
   - New in the API: `triage` on `GET /api/reports/{id}` plus a `verdict` per case,
-    `has_triage` and a `triage` mix on each run summary, and `cats` on the heatmap.
-    `Verdict` and `TriageSummary` join the view models exported from the package root.
-  - New **worker-side** extras: `triage`, plus `triage-anthropic` / `triage-openai` /
-    `triage-gigachat`, which add that provider's SDK so one install covers the feature.
-  - Verified against the real library and a real provider: a nine-way-broken suite triaged
-    by `claude-sonnet-5` cost **$0.067 / 11,882 input + 2,090 output tokens / ~40 s**, one
-    provider call per failing test, and a retry pays the same again. See the README for the
-    cost model.
+    `has_triage` and a `triage` mix per run summary, and `cats` on the heatmap.
+  - New **worker-side** extras: `triage`, `triage-anthropic`, `triage-openai`,
+    `triage-gigachat`.
+  - Measured against a real provider: a nine-way-broken suite triaged by `claude-sonnet-5`
+    cost **$0.067 / 11,882 in + 2,090 out tokens / ~40 s** — one call per failing test, and
+    a retry pays again.
 - **A built-in user guide** at `/help`, opened from the links menu. Twelve sections cover
-  setup, the dashboard, finding and reading a run, flaky history, comparison, triage,
-  sharing and permissions — in the same Russian/English as the viewer, following Airflow's
-  theme, and laid out for a phone as well as a desktop. It is static: no report data, no
-  network calls, served under its own strict CSP, and available even to a user whose report
-  access is denied. Repeat visits revalidate against an `ETag` and cost an empty 304.
+  setup, the dashboard, reading a run, flaky history, comparison, triage, sharing and
+  permissions — bilingual like the viewer, following Airflow's theme, laid out for a phone
+  as well as a desktop. Static: no report data, no network calls, its own strict CSP, and
+  available even to a user whose report access is denied. Repeat visits revalidate against
+  an `ETag` and cost an empty 304.
+- **Bulk delete** — `POST /api/reports/delete` removes up to 200 runs per request, with
+  trigger permission evaluated **once per DAG** instead of once per run. The viewer sends
+  successive batches and counts them off, so clearing thousands of runs shows progress
+  instead of queueing a request per run behind the browser's handful of connections
+  (200 runs: 0.68 s → 0.28 s, 200 RBAC checks → 1). Partial success is reported per id:
+  refused runs stay on disk and in the list. At most four batches run at once — beyond
+  that the endpoint answers `503` without deleting anything and the viewer retries, so a
+  few simultaneous cleanups cannot hold every worker thread (unrelated API calls under
+  that load: 501 ms worst case → 4 ms).
+- **`logs` / `logs_only_fail`** on the parser decide how much of each test's captured
+  output is archived — see [Captured output](README.md#captured-output).
+
+### Fixed
+- **A test's own prints and log lines are archived and shown.** pytest's `junit_logging`
+  defaults to `no`, so runs were archived with tracebacks and nothing else — the output
+  that usually explains the failure was dropped on the worker, whose console is gone by
+  the time anyone opens the viewer. The parser now states what it needs rather than
+  inheriting it. The capture gets its own scrolling block under the traceback (for passing
+  tests too), is kept out of failure clustering, and is bounded per test (16 KB) and per run
+  (2 MB of output, 4 MB of failure text) so one chatty — or wide-open — suite cannot turn a
+  run into a 66 MB response. The caps count UTF-8 bytes, not Python characters: measured in
+  characters, emoji output passed at 4× the limit (12.2 MB → 3.1 MB for the same run). Reports past 32 MB are trimmed to their failures on the worker,
+  whatever the setting, so the archive cannot grow without limit either.
+- **`logs_only_fail=True` now really means failed/error only.** pytest can only be told to
+  skip the capture of *passing* tests, so skipped ones kept writing theirs — 500 skips at
+  32 KB each left a 6 MB report the setting promised not to keep. The archive is trimmed
+  after the run instead of trusting the flag.
+- **A failed delete is no longer reported as success.** `shutil.rmtree` ran with
+  `ignore_errors=True` and the result was returned as `True` regardless, so a read-only
+  mount dropped the run from the list while every file stayed on disk. Removal is now
+  confirmed, and the viewer separates "no permission", "storage refused" and "the request
+  never completed" instead of blaming permissions for all three. Single `DELETE` answers
+  `500` (not `404`) when the store refused, so it no longer contradicts the bulk endpoint
+  for the same run, and one id raising mid-batch no longer discards the result for the rest.
+- **A missing Allure download is explained instead of silent.** With `allure=True`, results
+  land in the run's own directory — unless the task's own `pytest_args` set `--alluredir`
+  (spliced later, so it wins) or the session collected nothing. Both now say so in the task
+  log rather than leaving a run that simply has no button.
+
+### Security
+- The bulk-delete body is bounded before it is parsed: 1 MiB total, 1–200 ids, 4096
+  characters each. Ids that cannot be decoded are counted, never echoed, and validation
+  responses no longer reflect the rejected value — a request could otherwise make the
+  response as large as itself.
+- Captured output is stored verbatim and is outside Airflow's task-log masking. Suites that
+  print credentials or personal data should archive less of it: see
+  [Captured output](README.md#captured-output).
 
 ## [0.6.2] - 2026-07-23
 

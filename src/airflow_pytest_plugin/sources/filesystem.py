@@ -21,6 +21,7 @@ import json
 import logging
 import math
 import os
+import re
 import shutil
 import stat
 import threading
@@ -72,8 +73,47 @@ except Exception:  # pragma: no cover - fallback path
 
 _log = logging.getLogger(__name__)
 
-#: Cap one case's captured output so a pathological report can't bloat a response.
+#: Cap one case's failure text and captured output (each) so a pathological report can't
+#: bloat a response. A test that logs a megabyte is exactly when the viewer must stay usable.
+#:
+#: All three caps are in UTF-8 BYTES, which is what the response is measured in. Counting
+#: Python characters instead lets any non-ASCII text through at up to four times the limit
+#: -- a suite printing emoji stayed inside a 2,000,000-"character" budget while sending
+#: 8 MB, and the same trick works with Cyrillic or CJK at 2x-3x.
 _MAX_OUTPUT = 16000
+#: Caps on a WHOLE run's text. The per-case cap still multiplies by the number of tests:
+#: 2,000 tests at 16KB each would be a 32MB JSON response either way, which is why the
+#: diagnosis gets its own, larger budget rather than none at all.
+_MAX_RUN_OUTPUT = 2_000_000
+_MAX_RUN_FAILURES = 4_000_000
+#: Shown for the cases past those budgets, so a test that printed something -- or broke --
+#: is never rendered as one that did neither.
+_OUTPUT_BUDGET_SPENT = (
+    "…(output omitted: this run's captured output exceeded the limit)"
+)
+_FAILURE_BUDGET_SPENT = (
+    "…(traceback omitted: this run's failure text exceeded the limit)"
+)
+#: pytest's banner around a captured stream: ``------- Captured Log -------``.
+_CAPTURE_RULE = re.compile(r"^-{3,}\s*(Captured [^-]*?)\s*-{3,}$")
+
+
+def _cap(text: str, limit: int = -1) -> tuple[str, int]:
+    """Truncate one block to ``limit`` UTF-8 bytes; return it and the bytes it costs.
+
+    Never splits a character: the tail of a clipped multi-byte sequence is dropped rather
+    than emitted as a replacement glyph. ``limit`` defaults to :data:`_MAX_OUTPUT`.
+    """
+    if not text:
+        return "", 0
+    cap = _MAX_OUTPUT if limit < 0 else limit
+    raw = text.encode("utf-8")
+    if len(raw) <= cap:
+        return text, len(raw)
+    clipped = raw[:cap].decode("utf-8", "ignore") + "\n…(truncated)"
+    return clipped, len(clipped.encode("utf-8"))
+
+
 #: Cap on a run's verdicts sidecar before it is parsed. The producer's own caps put the
 #: worst case near 500KB (200 verdicts x two 1000-char fields); anything far past that was
 #: not written by us, and this parse happens inside the api-server on every detail request.
@@ -296,8 +336,9 @@ class FileSystemReportSource(ReportSource):
                 created_at=None,
             )
 
-        # The parser keeps only the short message; read the XML for full per-case output.
-        outputs = self._case_outputs(report_path)
+        # The parser keeps only the short message; read the XML for the full traceback and
+        # whatever the test printed or logged.
+        details = self._case_details(report_path)
         # AI verdicts are keyed by the canonical dotted node id, which is the form the JUnit
         # parser already reconstructs -- re-canonicalizing here costs nothing and keeps the
         # join working for a source whose cases arrive in pytest's native slash form.
@@ -310,7 +351,9 @@ class FileSystemReportSource(ReportSource):
                 classname=c.classname,
                 outcome=c.outcome,
                 time=c.time,
-                message=outputs.get((c.classname, c.name), c.message),
+                message=details.get((c.classname, c.name), (c.message or "", ""))[0]
+                or c.message,
+                output=details.get((c.classname, c.name), ("", ""))[1] or None,
                 verdict=verdicts.get(canonical_node_key(c.node_id)),
             )
             for c in result.cases
@@ -384,10 +427,29 @@ class FileSystemReportSource(ReportSource):
         }
 
     def delete(self, ref: ReportRef) -> bool:
+        """Remove one run's directory. ``True`` only when it is really gone.
+
+        Storage errors are reported, not swallowed: the viewer drops a deleted run from
+        the list, and a delete that silently failed would leave the user believing space
+        was reclaimed while the files stay behind -- on a read-only mount or an NFS share
+        that lost its lock, for every run they picked. A partial ``rmtree`` also counts as
+        a failure, since what is left behind is a truncated run.
+        """
         target = self._safe_dir(ref)
         if target is None or not os.path.isdir(target):
             return False
-        shutil.rmtree(target, ignore_errors=True)
+        try:
+            shutil.rmtree(target)
+        except OSError:
+            _log.exception("Could not delete report %s", target)
+        # The tree walk can fail per entry, so confirm rather than trust the return.
+        if os.path.exists(target):
+            self._invalidate_scan()  # a partial delete still changed the run
+            _log.error(
+                "Report %s still exists after delete: storage refused the removal",
+                target,
+            )
+            return False
         # Remove now-empty ancestors so the tree doesn't accumulate orphan dirs.
         self._prune_empty_parents(
             os.path.dirname(target), os.path.realpath(self._report_root)
@@ -451,6 +513,11 @@ class FileSystemReportSource(ReportSource):
         except Exception:
             _log.exception("Failed to record coverage in %s", meta_file)
             return False
+
+    def exists(self, ref: ReportRef) -> bool:
+        """Whether the run's directory is still there (one stat, no parsing)."""
+        target = self._safe_dir(ref)
+        return target is not None and os.path.isdir(target)
 
     def report_size(self, ref: ReportRef) -> int:
         """Total bytes of the report's directory (``0`` if it resolves nowhere)."""
@@ -587,18 +654,60 @@ class FileSystemReportSource(ReportSource):
     # -- internals -------------------------------------------------------
 
     @staticmethod
-    def _case_outputs(report_path: str) -> dict[tuple[str, str], str]:
-        """Map ``(classname, name) -> full captured output`` from the XML (best-effort)."""
+    def _clean_capture(text: str) -> str:
+        """Trim pytest's banner rules out of a captured stream.
+
+        pytest brackets each stream with a full-width rule
+        (``------- Captured Log -------``). The viewer gives the block its own heading, so
+        the rule is redundant width -- on a phone it is the widest line on the page. The
+        stream NAME is kept: one ``system-out`` can hold both log and stdout, and the
+        boundary between them is the only thing separating them.
+        """
+        # [heading or None, body lines] per stream. pytest emits a rule for every stream it
+        # was asked to capture, including the ones nothing wrote to -- a heading with an
+        # empty body under it is noise the reader has to scroll past on every single test.
+        sections: list[tuple[str | None, list[str]]] = [(None, [])]
+        for line in text.splitlines():
+            m = _CAPTURE_RULE.match(line)
+            if m:
+                sections.append((f"--- {m.group(1).strip()} ---", []))
+            else:
+                sections[-1][1].append(line)
+        kept: list[str] = []
+        for heading, body in sections:
+            if not any(ln.strip() for ln in body):
+                continue
+            if heading:
+                kept.append(heading)
+            kept.append("\n".join(body).strip("\n"))
+        return "\n".join(kept).strip()
+
+    @classmethod
+    def _case_details(cls, report_path: str) -> dict[tuple[str, str], tuple[str, str]]:
+        """Map ``(classname, name) -> (failure text, captured output)`` (best-effort).
+
+        Kept apart on purpose: the failure is the diagnosis and the capture is the
+        evidence, they are read in that order, and only the first should decide how
+        failures cluster.
+
+        Both halves are bounded twice: :data:`_MAX_OUTPUT` per case, and a run-wide budget
+        (:data:`_MAX_RUN_OUTPUT` / :data:`_MAX_RUN_FAILURES`). The per-case cap alone still
+        multiplies by the number of tests, so without the second one a chatty suite -- or a
+        suite that broke wide -- is a JSON response of tens of megabytes for the browser to
+        hold. The diagnosis gets the larger budget and is spent last.
+        """
+        budget = _MAX_RUN_OUTPUT
+        fail_budget = _MAX_RUN_FAILURES
         try:
             tree = _xml_parse(report_path)
         except Exception:
             return {}
         root = tree.getroot()
         suites = list(root.iter("testsuite")) if root.tag == "testsuites" else [root]
-        out: dict[tuple[str, str], str] = {}
+        out: dict[tuple[str, str], tuple[str, str]] = {}
         for suite in suites:
             for tc in suite.findall("testcase"):
-                sections: list[str] = []
+                failure = ""
                 # Element truthiness is child-based, so test ``is not None`` explicitly.
                 for tag in ("failure", "error", "skipped"):
                     node = tc.find(tag)
@@ -607,25 +716,57 @@ class FileSystemReportSource(ReportSource):
                     parts = [
                         p for p in (node.get("message"), (node.text or "").strip()) if p
                     ]
-                    body = "\n".join(parts).strip()
-                    if body:
-                        sections.append(body)
+                    failure = "\n".join(parts).strip()
                     break
-                # Captured logs -- present even for passed tests under junit_logging=all.
+                # Captured streams -- present for passed tests too, but only when the run
+                # was archived with ``junit_logging`` on (which the parser guarantees).
+                sections: list[str] = []
                 for tag, label in (
                     ("system-out", "Captured stdout / log"),
                     ("system-err", "Captured stderr"),
                 ):
                     node = tc.find(tag)
-                    body = (node.text or "").strip() if node is not None else ""
-                    if body:
-                        sections.append(f"--- {label} ---\n{body}")
-                if not sections:
+                    # Slice before cleaning: past the per-case cap the text is discarded
+                    # anyway, and splitting a megabyte into lines to throw it away is the
+                    # expensive half of parsing a chatty report.
+                    raw = (
+                        (node.text or "")[: _MAX_OUTPUT + 1] if node is not None else ""
+                    )
+                    body = cls._clean_capture(raw) if raw.strip() else ""
+                    if not body:
+                        continue
+                    # pytest names each stream itself ("Captured Log", "Captured Out"),
+                    # and one system-out can hold both. Adding our own heading on top of
+                    # that stacks three titles over one block, so label only what arrived
+                    # unlabelled.
+                    sections.append(
+                        body
+                        if body.startswith("--- Captured")
+                        else f"--- {label} ---\n{body}"
+                    )
+                failure, cost = _cap(failure)
+                if failure:
+                    if fail_budget <= 0:
+                        failure = _FAILURE_BUDGET_SPENT
+                    elif cost > fail_budget:
+                        failure, _ = _cap(failure, fail_budget)
+                        fail_budget = 0
+                    else:
+                        fail_budget -= cost
+                captured, cost = _cap("\n\n".join(sections))
+                if captured:
+                    if budget <= 0:
+                        # Say it rather than showing an empty block: a test that printed
+                        # something must not look like a test that printed nothing.
+                        captured = _OUTPUT_BUDGET_SPENT
+                    elif cost > budget:
+                        captured, _ = _cap(captured, budget)
+                        budget = 0
+                    else:
+                        budget -= cost
+                if not failure and not captured:
                     continue
-                text = "\n\n".join(sections)
-                if len(text) > _MAX_OUTPUT:
-                    text = text[:_MAX_OUTPUT] + "\n…(truncated)"
-                out[(tc.get("classname", ""), tc.get("name", ""))] = text
+                out[(tc.get("classname", ""), tc.get("name", ""))] = (failure, captured)
         return out
 
     @staticmethod

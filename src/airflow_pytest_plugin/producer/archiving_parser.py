@@ -30,6 +30,11 @@ from urllib.parse import quote
 
 from airflow_pytest_operator import JUnitResultParser, ReportRequest, TestRunResult
 
+try:  # prefer the hardened parser, exactly as the reader does
+    from defusedxml.ElementTree import parse as _xml_parse
+except Exception:  # pragma: no cover - fallback path
+    from xml.etree.ElementTree import parse as _xml_parse
+
 from ..compat import get_conf_value, get_current_context
 from ..config import get_reports_root
 from ..layout import (
@@ -49,6 +54,61 @@ _log = logging.getLogger(__name__)
 #: Bumped when the meta.json shape changes incompatibly.
 META_SCHEMA_VERSION = 1
 
+#: Past this, an archived report is trimmed to failures-only capture even when the task
+#: asked to keep everything: the file is read whole by every viewer that opens the run, so
+#: an unbounded one is a problem for the reader, not just for the disk it sits on.
+_MAX_ARCHIVED_REPORT = 32 * 1024 * 1024
+#: ...but trimming parses the report on the worker, so past this it is refused and logged
+#: rather than risking the task's memory to save disk.
+_MAX_TRIMMABLE_REPORT = 512 * 1024 * 1024
+
+
+def _ini_value(args: tuple[str, ...], key: str) -> str | None:
+    """The value these args currently give pytest ini option ``key``, if any.
+
+    pytest keeps the LAST ``-o``/``--override-ini`` for a key, so that is what this
+    reports. All three accepted spellings are recognised, including the two-argv form
+    the operator base uses.
+    """
+    prefix = f"{key}="
+    found: str | None = None
+    for i, arg in enumerate(args):
+        if arg == "-o" and i + 1 < len(args):
+            arg = args[i + 1]
+        elif arg.startswith("-o"):
+            arg = arg[2:]
+        elif arg.startswith("--override-ini="):
+            arg = arg[len("--override-ini=") :]
+        else:
+            continue
+        if arg.startswith(prefix):
+            found = arg.split("=", 1)[1]
+    return found
+
+
+def _with_ini(args: tuple[str, ...], key: str, value: str) -> tuple[str, ...]:
+    """Pin one pytest ini option for this run.
+
+    Used for the capture settings the archive depends on. ``junit_logging`` defaults to
+    ``no``, and without it the archive holds tracebacks and nothing else -- a test's own
+    prints and log lines, usually the thing that actually explains the failure, are dropped
+    on the floor. The archive is the only copy (the worker's console is gone by the time
+    anyone opens the viewer), so this parser states what it needs instead of inheriting
+    whatever the operator version or the project's ini happens to set.
+
+    Appended only when it would change something, so the task log does not show the same
+    override twice. The task's own ``pytest_args`` are spliced after these and pytest
+    honours the last setting, so an explicit ``-o <key>=...`` in the DAG still wins.
+    """
+    if _ini_value(args, key) == value:
+        return args
+    return (*args, "-o", f"{key}={value}")
+
+
+def _with_junit_logging(args: tuple[str, ...], value: str) -> tuple[str, ...]:
+    """How much of each test's captured output pytest writes into the JUnit report."""
+    return _with_ini(args, "junit_logging", value)
+
 
 # The operator base is Any when its package ships without type info, concretely typed
 # otherwise, so the misc subclass error fires only sometimes. `unused-ignore` keeps this
@@ -64,6 +124,8 @@ class ArchivingResultParser(JUnitResultParser):  # type: ignore[misc, unused-ign
         *,
         report_root: str | None = None,
         layout: ReportLayout | None = None,
+        logs: bool = True,
+        logs_only_fail: bool = False,
         allure: bool = False,
         coverage: bool = False,
         coverage_source: str | None = None,
@@ -78,6 +140,18 @@ class ArchivingResultParser(JUnitResultParser):  # type: ignore[misc, unused-ign
         super().__init__()  # base report_dir stays None; we compute per-run
         self._report_root = os.path.abspath(report_root or get_reports_root())
         self._layout = layout or ReportLayout()
+        # Archive each test's own prints and log lines (see :func:`_with_junit_logging`).
+        # On by default: an archived run whose output was dropped is the one case where the
+        # viewer cannot answer "why did this fail?". False pins ``junit_logging=no`` for a
+        # suite whose logging would dwarf its report -- deterministic either way, rather
+        # than depending on the operator version or the project's ini. Tracebacks are
+        # unaffected; a DAG-level ``-o junit_logging=...`` still overrides both.
+        self._logs = logs
+        # Keep the capture, but only for tests that failed. The archive is dominated by
+        # the passing majority -- a suite printing a few KB per test writes more captured
+        # text than it does test results -- and their output is the part nobody reads.
+        # Ignored when logs=False (there is nothing to narrow).
+        self._logs_only_fail = logs_only_fail
         # When True, also pass pytest ``--alluredir`` (requires allure-pytest in the
         # worker, else pytest errors on the unknown arg) so raw Allure results land
         # beside junit.xml for TestOps export.
@@ -159,6 +233,19 @@ class ArchivingResultParser(JUnitResultParser):  # type: ignore[misc, unused-ign
             self._report_dir,
         )
         req = super().report_request(report_dir)
+        req = dataclasses.replace(
+            req,
+            pytest_args=_with_junit_logging(
+                req.pytest_args, "all" if self._logs else "no"
+            ),
+        )
+        if self._logs and self._logs_only_fail:
+            req = dataclasses.replace(
+                req,
+                pytest_args=_with_ini(
+                    req.pytest_args, "junit_log_passing_tests", "False"
+                ),
+            )
         if self._allure and req.report_path:
             allure_dir = os.path.join(os.path.dirname(req.report_path), ALLURE_DIRNAME)
             req = dataclasses.replace(
@@ -189,6 +276,12 @@ class ArchivingResultParser(JUnitResultParser):  # type: ignore[misc, unused-ign
 
     def parse(self, report_path: str, *, exit_code: int = 0) -> TestRunResult:
         result = super().parse(report_path, exit_code=exit_code)
+        # Runs before the sidecar, so meta.json is written next to the archive as it will
+        # be read. Best-effort like everything else here: never masks the test outcome.
+        try:
+            self._trim_capture(report_path)
+        except Exception:
+            _log.exception("Could not trim captured output in %s", report_path)
         # Best-effort sidecar: a write failure must never mask the test outcome.
         try:
             self._write_meta(report_path, result)
@@ -211,6 +304,67 @@ class ArchivingResultParser(JUnitResultParser):  # type: ignore[misc, unused-ign
         return result
 
     # -- internals -------------------------------------------------------
+
+    def _trim_capture(self, report_path: str) -> None:
+        """Drop captured output from cases that did not fail, when asked or when huge.
+
+        pytest can only be told to skip the capture of *passing* tests
+        (``junit_log_passing_tests``); a skipped test still gets its own, so 500 skips
+        printing 32KB each wrote a 6MB report that ``logs_only_fail=True`` promised not
+        to. Whatever pytest left is removed here, which is also the only place that can
+        keep the archive bounded: without it the report grows with whatever the suite
+        decided to print, and every viewer that opens the run pays for it.
+
+        Two triggers, both leaving failures and errors untouched -- they are the reason
+        the capture is archived at all:
+
+        * ``logs_only_fail=True`` -- the setting, applied exactly.
+        * a report past :data:`_MAX_ARCHIVED_REPORT` -- the safety net, so a chatty suite
+          cannot leave an unbounded file behind. Reported in the task log.
+        """
+        if not self._logs:
+            return  # nothing was captured to begin with
+        try:
+            size = os.path.getsize(report_path)
+        except OSError:
+            return
+        oversized = size > _MAX_ARCHIVED_REPORT
+        if not self._logs_only_fail and not oversized:
+            return
+        if size > _MAX_TRIMMABLE_REPORT:
+            # Rewriting means holding the tree in memory on the worker. Past this the
+            # cure is worse than the disease -- say so instead of risking the task.
+            _log.error(
+                "%s is %.1f MB of captured output and too large to trim safely; archive "
+                "it with logs=False or make the suite quieter",
+                report_path,
+                size / 1e6,
+            )
+            return
+        tree = _xml_parse(report_path)
+        removed = 0
+        for suite in tree.getroot().iter("testsuite"):
+            for case in suite.findall("testcase"):
+                if case.find("failure") is not None or case.find("error") is not None:
+                    continue
+                for tag in ("system-out", "system-err"):
+                    for node in case.findall(tag):
+                        case.remove(node)
+                        removed += 1
+        if not removed:
+            return
+        # Atomic: a reader scanning this directory never sees a half-written report.
+        tmp = f"{report_path}.{uuid.uuid4().hex}.tmp"
+        tree.write(tmp, encoding="utf-8", xml_declaration=True)
+        os.replace(tmp, report_path)
+        _log.info(
+            "Trimmed captured output from %d non-failing case streams in %s (%.1f -> %.1f MB)%s",
+            removed,
+            report_path,
+            size / 1e6,
+            os.path.getsize(report_path) / 1e6,
+            " because it exceeded the archive limit" if oversized else "",
+        )
 
     @staticmethod
     def _coverage_path(report_path: str) -> str:
@@ -448,12 +602,34 @@ class ArchivingResultParser(JUnitResultParser):  # type: ignore[misc, unused-ign
 
     def _archive_allure(self, out_dir: str, ref: ReportRef) -> bool:
         """True if Allure results exist here; also drop an executor.json so the
-        TestOps launch links back to this Airflow run. Best-effort."""
+        TestOps launch links back to this Airflow run. Best-effort.
+
+        Says why when a task asked for Allure and the archive has none: the run then shows
+        no download button, and without a line in the task log that looks like the viewer
+        losing the report rather than the results never arriving.
+        """
+        if not self._allure:
+            return False
         allure_dir = os.path.join(out_dir, ALLURE_DIRNAME)
         try:
-            if not self._allure or not os.listdir(allure_dir):
-                return False
-        except OSError:  # no allure-results dir
+            entries = os.listdir(allure_dir)
+        except OSError:
+            # Our --alluredir never took effect. The task's own pytest_args are spliced
+            # after ours and the last --alluredir wins, so its results went elsewhere.
+            _log.warning(
+                "allure=True but %s does not exist: pytest wrote its results somewhere "
+                "else. A --alluredir in the task's own pytest_args overrides this "
+                "parser's, so the run is archived without an Allure download.",
+                allure_dir,
+            )
+            return False
+        if not entries:
+            _log.warning(
+                "allure=True but %s is empty: pytest produced no Allure results (no test "
+                "was collected, or the session failed before any ran). The run is "
+                "archived without an Allure download.",
+                allure_dir,
+            )
             return False
         try:
             with open(

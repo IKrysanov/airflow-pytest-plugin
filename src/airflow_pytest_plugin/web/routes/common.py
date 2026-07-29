@@ -27,11 +27,16 @@ from ...sources import ReportSource
 #: An authorizer: ``(dag_id, user) -> bool``. ``user`` is ``None`` standalone.
 Authorizer = Callable[[str, Any], bool]
 
+#: Maximum raw JSON body accepted by the bulk-delete endpoint. A legitimate request
+#: with 200 ASCII report tokens at their 4096-character schema limit remains below it.
+MAX_BULK_DELETE_BODY_BYTES = 1024 * 1024
+
 __all__ = [
     "ERR_400",
     "ERR_403",
     "ERR_404",
     "FAIL_OUTCOMES",
+    "MAX_BULK_DELETE_BODY_BYTES",
     "Authorizer",
     "RouteDeps",
     "ok",

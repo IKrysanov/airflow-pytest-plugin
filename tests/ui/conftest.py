@@ -114,7 +114,14 @@ def _write_run(root: str, dag: str, run: str, when: str, cases: list[tuple]) -> 
         attrs = f'classname="{cls}" name="{name}" time="{d:.3f}"'
         if oc == "passed":
             p += 1
-            body = "<system-out>ok</system-out>"
+            body = (
+                "<system-out>"
+                "--------------------------------- Captured Log ---------------------------------\n"
+                f"INFO     suite:{node} fixtures ready, running assertions\n"
+                "--------------------------------- Captured Out ---------------------------------\n"
+                f"checked {len(node)} rows, all matched"
+                "</system-out>"
+            )
         elif oc == "skipped":
             sk += 1
             body = "<skipped/>"
@@ -124,7 +131,21 @@ def _write_run(root: str, dag: str, run: str, when: str, cases: list[tuple]) -> 
                 f += 1
             else:
                 e += 1
-            body = f'<{tag} message="{msg}">{msg}</{tag}>'
+            # A real failing run carries what the test printed and logged alongside the
+            # traceback (junit_logging), banners and all -- the viewer has to keep the two
+            # apart, so the seed must contain both.
+            body = (
+                f'<{tag} message="{msg}">{msg}</{tag}>'
+                "<system-out>"
+                "--------------------------------- Captured Log ---------------------------------\n"
+                f"WARNING  suite:{node} retrying after {msg}\n"
+                "--------------------------------- Captured Out ---------------------------------\n"
+                f"printed before {name} failed"
+                "</system-out>"
+                "<system-err>"
+                "--------------------------------- Captured Err ---------------------------------\n"
+                "</system-err>"
+            )
         tc.append(f"<testcase {attrs}>{body}</testcase>")
     total = p + f + e + sk
     xml = (

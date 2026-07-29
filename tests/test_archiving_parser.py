@@ -177,6 +177,54 @@ def test_logical_date_variants():
     )
 
 
+def test_captured_output_is_requested_so_the_archive_holds_prints_and_logs(
+    monkeypatch, reports_root
+):
+    # pytest's junit_logging defaults to "no": without this the archive keeps tracebacks
+    # and silently drops everything the test itself printed or logged, which is usually
+    # the only explanation of the failure the worker ever produced.
+    ti = FakeTI(dag_id="d", task_id="t", run_id="run1", try_number=1)
+    _patch_context(monkeypatch, {"ti": ti})
+
+    req = ArchivingResultParser(report_root=reports_root).report_request("/x")
+
+    assert archiving_parser._ini_value(req.pytest_args, "junit_logging") == "all"
+
+
+def test_captured_output_setting_wins_and_is_never_stated_twice(
+    monkeypatch, reports_root
+):
+    ti = FakeTI(dag_id="d", task_id="t", run_id="run1", try_number=1)
+    _patch_context(monkeypatch, {"ti": ti})
+
+    # pytest honours the LAST setting, so the parser's value must land last -- whatever
+    # spelling an operator version or a plugin used before it. Reading them all is the
+    # difference between a deliberate setting and a duplicate nobody can explain.
+    for existing in (
+        ("-o", "junit_logging=out-err"),
+        ("-ojunit_logging=log",),
+        ("--override-ini=junit_logging=system-out",),
+    ):
+        args = archiving_parser._with_junit_logging(
+            ("--junitxml=/x/junit.xml", *existing), "all"
+        )
+        assert archiving_parser._ini_value(args, "junit_logging") == "all", args
+
+    # Idempotent: asking for what is already set adds nothing.
+    same = ("--junitxml=/x/junit.xml", "-o", "junit_logging=all")
+    assert archiving_parser._with_junit_logging(same, "all") == same
+
+    # logs=False is a decision, not a no-op: it pins "no" even though the operator base
+    # asks for "all", so the archive size is predictable rather than version-dependent.
+    off = ArchivingResultParser(report_root=reports_root, logs=False)
+    assert (
+        archiving_parser._ini_value(
+            off.report_request("/x").pytest_args, "junit_logging"
+        )
+        == "no"
+    )
+
+
 def test_allure_dir_appended_when_enabled(monkeypatch, reports_root):
     ti = FakeTI(dag_id="d", task_id="t", run_id="run1", try_number=1)
     _patch_context(monkeypatch, {"ti": ti})
@@ -227,6 +275,39 @@ def test_parse_allure_false_when_no_results(monkeypatch, reports_root):
     parser.parse(req.report_path)  # no allure-results dir was created
     meta = json.load(open(os.path.join(rd, META_FILENAME), encoding="utf-8"))
     assert meta["allure"] is False
+
+
+def test_missing_allure_results_are_explained_in_the_task_log(
+    monkeypatch, reports_root, caplog
+):
+    # A run archived with allure=True and no download button is indistinguishable from a
+    # broken viewer unless the producer says which of the two things happened.
+    ti = FakeTI(dag_id="d", task_id="t", run_id="run1", try_number=1)
+    _patch_context(monkeypatch, {"ti": ti})
+    parser = ArchivingResultParser(report_root=reports_root, allure=True)
+    rd, req = _run_with_report(parser, reports_root)
+
+    with caplog.at_level("WARNING"):
+        parser.parse(req.report_path)
+    # No directory at all: our --alluredir lost to one in the task's own pytest_args.
+    assert "does not exist" in caplog.text
+    assert "--alluredir" in caplog.text
+
+    caplog.clear()
+    os.makedirs(os.path.join(rd, "allure-results"), exist_ok=True)
+    with caplog.at_level("WARNING"):
+        parser.parse(req.report_path)
+    # Directory but nothing in it: pytest ran and collected nothing worth exporting.
+    assert "is empty" in caplog.text
+
+    caplog.clear()
+    with open(
+        os.path.join(rd, "allure-results", "x-result.json"), "w", encoding="utf-8"
+    ) as fh:
+        fh.write("{}")
+    with caplog.at_level("WARNING"):
+        parser.parse(req.report_path)
+    assert "allure" not in caplog.text.lower()  # results archived: nothing to report
 
 
 def test_executor_json_has_buildurl_with_base_url(monkeypatch):
@@ -879,3 +960,129 @@ def test_the_raw_report_survives_a_failed_verdicts_write(monkeypatch, reports_ro
         "the only surviving copy of the verdicts was deleted"
     )
     assert not os.path.exists(os.path.join(rd, VERDICTS_FILENAME))
+
+
+def test_logs_only_fail_keeps_the_capture_for_failures_alone(monkeypatch, reports_root):
+    # The passing majority writes most of the captured output and none of the part anyone
+    # reads. This is the lever for a suite whose archive would otherwise be mostly logs.
+    ti = FakeTI(dag_id="d", task_id="t", run_id="run1", try_number=1)
+    _patch_context(monkeypatch, {"ti": ti})
+    ini = archiving_parser._ini_value
+
+    default = ArchivingResultParser(report_root=reports_root).report_request("/x")
+    assert ini(default.pytest_args, "junit_log_passing_tests") is None  # pytest's own
+
+    only_fail = ArchivingResultParser(
+        report_root=reports_root, logs_only_fail=True
+    ).report_request("/x")
+    assert ini(only_fail.pytest_args, "junit_logging") == "all"
+    assert ini(only_fail.pytest_args, "junit_log_passing_tests") == "False"
+
+    # Nothing to narrow when the capture is off entirely.
+    off = ArchivingResultParser(
+        report_root=reports_root, logs=False, logs_only_fail=True
+    ).report_request("/x")
+    assert ini(off.pytest_args, "junit_logging") == "no"
+    assert ini(off.pytest_args, "junit_log_passing_tests") is None
+
+
+def _mixed_report(path, *, chunk="Z" * 64):
+    """A report with every outcome, each carrying captured output."""
+    cases = []
+    for i in range(3):
+        cases.append(
+            f'<testcase classname="t.m" name="test_pass_{i}" time="0.1">'
+            f"<system-out>{chunk}</system-out><system-err>{chunk}</system-err></testcase>"
+        )
+        cases.append(
+            f'<testcase classname="t.m" name="test_skip_{i}" time="0.1"><skipped/>'
+            f"<system-out>{chunk}</system-out></testcase>"
+        )
+    cases.append(
+        '<testcase classname="t.m" name="test_fail" time="0.1">'
+        '<failure message="boom">boom</failure>'
+        f"<system-out>{chunk}</system-out></testcase>"
+    )
+    cases.append(
+        '<testcase classname="t.m" name="test_err" time="0.1">'
+        '<error message="kaboom">kaboom</error>'
+        f"<system-out>{chunk}</system-out></testcase>"
+    )
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(
+            '<?xml version="1.0" encoding="utf-8"?>'
+            '<testsuites><testsuite name="pytest" tests="8" failures="1" errors="1" '
+            'skipped="3" time="1.0">' + "".join(cases) + "</testsuite></testsuites>"
+        )
+
+
+def _streams_by_outcome(path):
+    import xml.etree.ElementTree as ET
+
+    counts = {"passed": 0, "skipped": 0, "broken": 0}
+    for case in ET.parse(path).getroot().iter("testcase"):
+        if case.find("failure") is not None or case.find("error") is not None:
+            kind = "broken"
+        elif case.find("skipped") is not None:
+            kind = "skipped"
+        else:
+            kind = "passed"
+        counts[kind] += sum(1 for c in case if c.tag.startswith("system-"))
+    return counts
+
+
+def test_logs_only_fail_also_drops_the_capture_of_skipped_tests(
+    monkeypatch, reports_root
+):
+    # pytest can only be told to skip the capture of PASSING tests, so a skipped test
+    # still writes its own -- 500 skips printing 32KB each left a 6MB report that this
+    # setting promised not to keep.
+    ti = FakeTI(dag_id="d", task_id="t", run_id="run1", try_number=1)
+    _patch_context(monkeypatch, {"ti": ti})
+    parser = ArchivingResultParser(report_root=reports_root, logs_only_fail=True)
+    rd, req = _run_with_report(parser, reports_root)
+    _mixed_report(req.report_path)
+
+    parser.parse(req.report_path)
+
+    # Failures and errors keep theirs: they are why the capture is archived at all.
+    assert _streams_by_outcome(req.report_path) == {
+        "passed": 0,
+        "skipped": 0,
+        "broken": 2,
+    }
+
+
+def test_capture_is_kept_by_default_and_trimmed_when_the_report_gets_huge(
+    monkeypatch, reports_root, caplog
+):
+    ti = FakeTI(dag_id="d", task_id="t", run_id="run1", try_number=1)
+    _patch_context(monkeypatch, {"ti": ti})
+    parser = ArchivingResultParser(report_root=reports_root)
+    rd, req = _run_with_report(parser, reports_root)
+    _mixed_report(req.report_path)
+
+    parser.parse(req.report_path)
+    kept = _streams_by_outcome(req.report_path)
+    assert kept["passed"] and kept["skipped"]  # default keeps everything
+
+    # The safety net: past the archive limit even a default run is trimmed to the
+    # failures, because every viewer that opens the run reads this file whole.
+    monkeypatch.setattr(archiving_parser, "_MAX_ARCHIVED_REPORT", 100)
+    with caplog.at_level("INFO"):
+        parser.parse(req.report_path)
+    assert _streams_by_outcome(req.report_path) == {
+        "passed": 0,
+        "skipped": 0,
+        "broken": 2,
+    }
+    assert "exceeded the archive limit" in caplog.text
+
+    # ...but trimming parses the report, so an absurd one is refused, not attempted.
+    _mixed_report(req.report_path)
+    monkeypatch.setattr(archiving_parser, "_MAX_TRIMMABLE_REPORT", 10)
+    caplog.clear()
+    with caplog.at_level("ERROR"):
+        parser.parse(req.report_path)
+    assert _streams_by_outcome(req.report_path)["passed"] == 6  # left alone
+    assert "too large to trim safely" in caplog.text

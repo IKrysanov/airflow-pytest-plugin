@@ -524,6 +524,40 @@ def test_openapi_and_docs_serve(client):
         assert {"400", "403", "404"} <= codes, (path, method, codes)
 
 
+def test_bulk_delete_openapi_documents_body_limits_and_permission_policy(client):
+    from airflow_pytest_plugin.web.routes.common import MAX_BULK_DELETE_BODY_BYTES
+
+    doc = client.get("/api/openapi.json").json()
+    operation = doc["paths"]["/api/reports/delete"]["post"]
+
+    request_body = operation["requestBody"]
+    assert request_body["required"] is True
+    content = request_body["content"]["application/json"]
+    assert content["examples"]["selection"]["value"]["ids"]
+
+    schema_name = content["schema"]["$ref"].rsplit("/", 1)[-1]
+    schema = doc["components"]["schemas"][schema_name]
+    ids = schema["properties"]["ids"]
+    assert ids["type"] == "array"
+    assert ids["minItems"] == 1 and ids["maxItems"] == 200
+    assert ids["items"]["type"] == "string"
+    assert ids["items"]["maxLength"] == 4096
+    assert operation["responses"]["413"]["description"] == "Request body exceeds 1 MiB."
+    assert (
+        operation["responses"]["413"]["content"]["application/json"]["example"][
+            "detail"
+        ]
+        == f"request body too large (max {MAX_BULK_DELETE_BODY_BYTES} bytes)"
+    )
+
+    # Swagger must answer the destructive-action question without requiring source access:
+    # bulk uses the same per-DAG trigger permission as the single DELETE endpoint.
+    description = operation["description"].lower()
+    assert "permission policy" in description
+    assert "trigger" in description and "every referenced dag" in description
+    assert "batch-wide" in description
+
+
 def test_icon_routes(client):
     for path in ("/icon.svg", "/icon-dark.svg"):
         r = client.get(path)
@@ -755,6 +789,313 @@ def test_delete_endpoint_removes_report(client):
     # Gone from both list and detail.
     assert client.get("/api/reports").json()["reports"] == []
     assert client.get(f"/api/reports/{token}").status_code == 404
+
+
+def test_bulk_delete_removes_every_run_in_one_request(reports_root):
+    for i in range(25):
+        write_report(reports_root, ReportRef("dag", f"run{i:02d}", "task", 1), passed=1)
+    c = TestClient(make_app(reports_root))
+    ids = [r["id"] for r in c.get("/api/reports").json()["reports"]]
+
+    r = c.post("/api/reports/delete", json={"ids": ids})
+
+    assert r.status_code == 200
+    assert r.json() == {
+        "deleted": 25,
+        "failed": [],
+        "forbidden": [],
+        "missing": [],
+        "invalid": 0,
+    }
+    assert c.get("/api/reports").json()["reports"] == []
+
+
+def test_bulk_delete_checks_permission_per_dag_and_keeps_refused_runs(reports_root):
+    write_report(reports_root, ReportRef("mine", "r", "t", 1), passed=1)
+    write_report(reports_root, ReportRef("theirs", "r", "t", 1), passed=1)
+    c = TestClient(
+        make_app(reports_root, authorizer=lambda dag_id, user: dag_id == "mine")
+    )
+    by_dag = {r["dag_id"]: r["id"] for r in c.get("/api/reports").json()["reports"]}
+
+    r = c.post("/api/reports/delete", json={"ids": list(by_dag.values())})
+
+    body = r.json()
+    assert body["deleted"] == 1
+    # A batch must not become a way around the per-DAG check that guards single deletes.
+    assert body["forbidden"] == [by_dag["theirs"]]
+    left = [x["dag_id"] for x in c.get("/api/reports").json()["reports"]]
+    assert left == ["theirs"]
+
+
+def test_bulk_delete_uses_current_user_and_checks_authorization_once_per_dag(
+    reports_root,
+):
+    mine = [
+        ReportRef("mine", "r1", "t", 1),
+        ReportRef("mine", "r2", "t", 1),
+    ]
+    theirs = ReportRef("theirs", "r1", "t", 1)
+    for ref in [*mine, theirs]:
+        write_report(reports_root, ref, passed=1)
+    calls = []
+
+    def authorize(dag_id, user):
+        calls.append((dag_id, user))
+        return dag_id == "mine"
+
+    c = TestClient(make_app(reports_root, authorizer=authorize))
+    response = c.post(
+        "/api/reports/delete",
+        json={"ids": [mine[0].token, theirs.token, mine[1].token]},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "deleted": 2,
+        "failed": [],
+        "forbidden": [theirs.token],
+        "missing": [],
+        "invalid": 0,
+    }
+    assert calls == [("mine", _TEST_USER), ("theirs", _TEST_USER)]
+    assert os.path.isdir(ReportLayout().dir_for(reports_root, theirs))
+
+
+def test_bulk_delete_cannot_delete_any_run_when_trigger_permission_is_denied(
+    reports_root,
+):
+    refs = [ReportRef("a", "r", "t", 1), ReportRef("b", "r", "t", 1)]
+    for ref in refs:
+        write_report(reports_root, ref, passed=1)
+    c = TestClient(make_app(reports_root, authorizer=lambda dag_id, user: False))
+
+    response = c.post("/api/reports/delete", json={"ids": [r.token for r in refs]})
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "deleted": 0,
+        "failed": [],
+        "forbidden": [r.token for r in refs],
+        "missing": [],
+        "invalid": 0,
+    }
+    assert all(os.path.isdir(ReportLayout().dir_for(reports_root, ref)) for ref in refs)
+
+
+def test_bulk_delete_rejects_an_unusable_body_and_an_oversized_batch(client):
+    from airflow_pytest_plugin.web.routes.reports import (
+        _MAX_DELETE_BATCH,
+        _MAX_REPORT_TOKEN_LENGTH,
+    )
+
+    for body in ({}, {"ids": []}, {"ids": "tok"}, {"ids": {}}):
+        assert client.post("/api/reports/delete", json=body).status_code == 422
+    too_many = {"ids": ["tok"] * (_MAX_DELETE_BATCH + 1)}
+    assert client.post("/api/reports/delete", json=too_many).status_code == 422
+    private_value = "must-not-be-reflected-" + "x" * _MAX_REPORT_TOKEN_LENGTH
+    response = client.post("/api/reports/delete", json={"ids": [private_value]})
+    assert response.status_code == 422
+    assert private_value not in response.text
+    assert all("input" not in error for error in response.json()["detail"])
+
+
+def test_bulk_delete_rejects_a_large_body_before_json_validation(client):
+    from airflow_pytest_plugin.web.routes.common import MAX_BULK_DELETE_BODY_BYTES
+
+    marker = b"must-not-be-reflected"
+    raw = b'{"ids":["' + marker + b"x" * MAX_BULK_DELETE_BODY_BYTES + b'"]}'
+
+    response = client.post(
+        "/api/reports/delete",
+        content=raw,
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 413
+    assert marker not in response.content
+    assert len(response.content) < 200
+    assert len(client.get("/api/reports").json()["reports"]) == 1
+
+
+def test_bulk_delete_enforces_the_body_limit_without_content_length(client):
+    from airflow_pytest_plugin.web.routes.common import MAX_BULK_DELETE_BODY_BYTES
+
+    marker = b"chunked-must-not-be-reflected"
+
+    def chunks():
+        yield b'{"ids":["'
+        yield marker + b"x" * MAX_BULK_DELETE_BODY_BYTES
+        yield b'"]}'
+
+    response = client.post(
+        "/api/reports/delete",
+        content=chunks(),
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 413
+    assert marker not in response.content
+    assert len(response.content) < 200
+    assert len(client.get("/api/reports").json()["reports"]) == 1
+
+
+def test_bulk_delete_body_limit_applies_under_the_airflow_mount(reports_root):
+    from airflow_pytest_plugin.web.routes.common import MAX_BULK_DELETE_BODY_BYTES
+
+    write_report(reports_root, ReportRef("dag", "run", "task", 1), passed=1)
+    host = fastapi.FastAPI()
+    host.mount("/pytest-reports", make_app(reports_root))
+    mounted = TestClient(host)
+    marker = b"mounted-must-not-be-reflected"
+    raw = b'{"ids":["' + marker + b"x" * MAX_BULK_DELETE_BODY_BYTES + b'"]}'
+
+    response = mounted.post(
+        "/pytest-reports/api/reports/delete",
+        content=raw,
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 413
+    assert marker not in response.content
+    assert len(response.content) < 200
+    assert len(mounted.get("/pytest-reports/api/reports").json()["reports"]) == 1
+
+
+def test_bulk_delete_rejects_a_non_string_id_before_deleting_anything(client):
+    good = client.get("/api/reports").json()["reports"][0]["id"]
+
+    response = client.post("/api/reports/delete", json={"ids": [good, 42]})
+
+    assert response.status_code == 422
+    assert len(client.get("/api/reports").json()["reports"]) == 1
+
+
+def test_bulk_delete_deduplicates_ids(client):
+    good = client.get("/api/reports").json()["reports"][0]["id"]
+
+    response = client.post("/api/reports/delete", json={"ids": [good, good]})
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "deleted": 1,
+        "failed": [],
+        "forbidden": [],
+        "missing": [],
+        "invalid": 0,
+    }
+
+
+def test_bulk_delete_reports_bad_and_missing_ids_instead_of_failing_the_batch(client):
+    # One unusable id must not cost the caller the runs it could delete: a cleanup of
+    # thousands would otherwise be blocked by a single stale row in the browser's list.
+    good = client.get("/api/reports").json()["reports"][0]["id"]
+    gone = ReportRef("nope", "nope", "nope", 9).token
+
+    r = client.post("/api/reports/delete", json={"ids": [good, gone, "!!bad"]})
+
+    body = r.json()
+    assert r.status_code == 200 and body["deleted"] == 1
+    # A run that is already gone is reported apart from one storage refused to remove:
+    # only the second is worth keeping in the list and retrying.
+    assert body["missing"] == [gone]
+    assert body["failed"] == []
+    # An id the server cannot decode is counted, never echoed: reflecting it would hand
+    # a caller a way to make the response as large as the request.
+    assert body["invalid"] == 1
+    assert "!!bad" not in r.text
+    assert client.get("/api/reports").json()["reports"] == []
+
+
+def test_single_delete_reports_a_storage_failure_as_such_not_as_missing(
+    reports_root, monkeypatch
+):
+    # 404 tells the caller the run is gone. When storage refused the removal every file
+    # is still there -- and the bulk endpoint says so for the same run, so the two
+    # answers must not contradict each other.
+    from airflow_pytest_plugin.sources import filesystem
+
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref, passed=1)
+    c = TestClient(make_app(reports_root))
+    token = c.get("/api/reports").json()["reports"][0]["id"]
+    monkeypatch.setattr(
+        filesystem.shutil,
+        "rmtree",
+        lambda *a, **kw: (_ for _ in ()).throw(PermissionError("read-only")),
+    )
+
+    stuck = c.delete(f"/api/reports/{token}")
+    bulk = c.post("/api/reports/delete", json={"ids": [token]}).json()
+
+    assert stuck.status_code == 500
+    assert "not found" not in stuck.text
+    assert bulk["failed"] == [token] and bulk["missing"] == []
+    assert os.path.isdir(ReportLayout().dir_for(reports_root, ref))
+
+    # A run that really is gone still answers 404.
+    monkeypatch.undo()
+    assert c.delete(f"/api/reports/{token}").status_code == 200
+    assert c.delete(f"/api/reports/{token}").status_code == 404
+
+
+def test_bulk_delete_keeps_going_when_one_id_raises(reports_root):
+    # A batch is a partial operation by design: one exploding authorizer must not throw
+    # away the answer for the runs that were already deleted.
+    refs = [ReportRef("dag", f"run{i}", "t", 1) for i in range(3)]
+    for ref in refs:
+        write_report(reports_root, ref, passed=1)
+
+    boom = refs[1].token
+
+    c = TestClient(make_app(reports_root))
+    ids = [r["id"] for r in c.get("/api/reports").json()["reports"]]
+
+    from airflow_pytest_plugin.sources.filesystem import FileSystemReportSource
+
+    real_delete = FileSystemReportSource.delete
+
+    def exploding(self, ref):
+        if ref.token == boom:
+            raise RuntimeError("backing store went away")
+        return real_delete(self, ref)
+
+    FileSystemReportSource.delete = exploding
+    try:
+        r = c.post("/api/reports/delete", json={"ids": ids})
+    finally:
+        FileSystemReportSource.delete = real_delete
+
+    body = r.json()
+    assert r.status_code == 200
+    assert body["deleted"] == 2  # the other two really went
+    assert body["failed"] == [boom]
+
+
+def test_bulk_delete_separates_a_storage_failure_from_an_already_gone_run(
+    reports_root, monkeypatch
+):
+    # Both leave a row in the viewer, but only one is worth retrying -- and telling the
+    # user "no permission" for a read-only mount sends them to fix Airflow roles.
+    from airflow_pytest_plugin.sources import filesystem
+
+    stuck = ReportRef("dag", "stuck", "t", 1)
+    write_report(reports_root, stuck, passed=1)
+    c = TestClient(make_app(reports_root))
+    stuck_id = c.get("/api/reports").json()["reports"][0]["id"]
+    gone_id = ReportRef("dag", "gone", "t", 1).token
+
+    monkeypatch.setattr(
+        filesystem.shutil,
+        "rmtree",
+        lambda *a, **kw: (_ for _ in ()).throw(PermissionError("read-only")),
+    )
+    body = c.post("/api/reports/delete", json={"ids": [stuck_id, gone_id]}).json()
+
+    assert body["deleted"] == 0
+    assert body["failed"] == [stuck_id]  # still on disk, retrying may work
+    assert body["missing"] == [gone_id]  # nothing to retry
+    assert os.path.isdir(ReportLayout().dir_for(reports_root, stuck))
 
 
 def test_delete_unknown_is_404(client):
@@ -2775,3 +3116,31 @@ def test_a_provider_without_a_model_name_still_reads_as_judged(reports_root):
     row = client.get("/api/reports").json()["reports"][0]
     # The mix is what says a model judged this run; the name is extra when there is one.
     assert row["triage"] == {"model": None, "counts": {"env": 1}, "incomplete": False}
+
+
+def test_bulk_delete_refuses_rather_than_holding_every_worker_thread(reports_root):
+    # FastAPI serves sync endpoints from one bounded pool. Several callers clearing their
+    # history at once would otherwise hold every thread for the length of their batches,
+    # and health/list requests -- which answer in microseconds -- would queue behind them.
+    from airflow_pytest_plugin.web.routes import reports as routes
+
+    write_report(reports_root, ReportRef("dag", "run", "t", 1), passed=1)
+    c = TestClient(make_app(reports_root))
+    token = c.get("/api/reports").json()["reports"][0]["id"]
+
+    held = [
+        routes._bulk_delete_slots.acquire()
+        for _ in range(routes._MAX_CONCURRENT_BULK_DELETES)
+    ]
+    try:
+        r = c.post("/api/reports/delete", json={"ids": [token]})
+        assert r.status_code == 503
+        assert r.headers["retry-after"] == "5"
+        # Refused, not partially applied: the same batch can simply be sent again.
+        assert len(c.get("/api/reports").json()["reports"]) == 1
+    finally:
+        for _ in held:
+            routes._bulk_delete_slots.release()
+
+    # The slot is returned even when the batch raises, so the endpoint cannot leak them.
+    assert c.post("/api/reports/delete", json={"ids": [token]}).json()["deleted"] == 1

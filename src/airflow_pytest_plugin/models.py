@@ -210,6 +210,11 @@ class TriageSummary:
 class CaseView:
     """One test case, flattened for the detail table.
 
+    ``message``: the failure, error or skip text -- the traceback for a broken test.
+
+    ``output``: whatever the test itself printed or logged, kept apart from the failure so
+    the diagnosis is not buried under it. Present for passing tests too.
+
     ``verdict``: the AI triage judgement for this test, when the run was archived with
     ``ArchivingResultParser(triage_provider=...)`` and the provider reached it. Only
     failed/errored cases can carry one.
@@ -221,6 +226,7 @@ class CaseView:
     outcome: str  # "passed" | "failed" | "error" | "skipped"
     time: float
     message: str | None = None
+    output: str | None = None
     verdict: Verdict | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -231,6 +237,7 @@ class CaseView:
             "outcome": self.outcome,
             "time": self.time,
             "message": self.message,
+            "output": self.output,
             "verdict": self.verdict.to_dict() if self.verdict else None,
         }
 
