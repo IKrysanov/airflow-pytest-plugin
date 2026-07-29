@@ -2483,8 +2483,13 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       tipHide();
     });
   }
+  // Both interpolations are escaped, including the count. Every caller passes a
+  // server-coerced integer today, so this changes nothing on screen -- but the value lands
+  // in markup and the colour name inside a quoted attribute, and the next caller to reach
+  // for this helper with a string from a report should not have to notice that.
   function statDot(varName, label, v) {
-    return '<span><i style="background:var(' + varName + ')"></i>' + v + " " + esc(label) + "</span>";
+    return '<span><i style="background:var(' + esc(varName) + ')"></i>' + esc(v) + " "
+      + esc(label) + "</span>";
   }
   function barTip(r, num) {
     return '<div class="tt">#' + num + " · " + esc(r.dag_id) + "</div>"

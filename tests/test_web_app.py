@@ -440,6 +440,55 @@ def test_inline_script_is_syntactically_valid(client, tmp_path):
         assert result.returncode == 0, f"script #{i}: {result.stderr}"
 
 
+def _js_function(html, name):
+    """The source of one named JS function from the viewer page, by brace matching."""
+    i = html.index("{", html.index("function " + name + "("))
+    start = html.rindex("function " + name + "(", 0, i)
+    depth = 0
+    for j in range(i, len(html)):
+        if html[j] == "{":
+            depth += 1
+        elif html[j] == "}":
+            depth -= 1
+            if depth == 0:
+                return html[start : j + 1]
+    raise AssertionError("could not brace-match function " + name)
+
+
+def test_stat_dot_escapes_its_value_and_colour(client, tmp_path):
+    # statDot puts a count into markup and a CSS variable name into a quoted style
+    # attribute. Every caller passes a server-coerced integer, so nothing reaches it
+    # hostile today -- this runs the real function under Node with markup in both slots so
+    # the escaping cannot be dropped again without a red test.
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node unavailable to evaluate statDot")
+    html = client.get("/").text
+    script = tmp_path / "statdot.js"
+    script.write_text(
+        _js_function(html, "esc") + "\n" + _js_function(html, "statDot") + "\n"
+        "console.log(JSON.stringify({\n"
+        '  value: statDot("--pass", "passed", \'<img src=x onerror=alert(1)>\'),\n'
+        "  colour: statDot('--pass)\"></i><script>alert(1)</scr' + 'ipt><i x=\"',"
+        ' "passed", 3),\n'
+        '  label: statDot("--pass", "<b>passed</b>", 3),\n'
+        '  plain: statDot("--pass", "passed", 7)}));\n',
+        encoding="utf-8",
+    )
+    result = subprocess.run([node, str(script)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    out = json.loads(result.stdout)
+    # Markup in any slot survives only as escaped text ...
+    for slot in ("value", "colour", "label"):
+        assert "<img" not in out[slot] and "<script" not in out[slot], slot
+        assert "&lt;" in out[slot], slot
+    # ... and the style attribute is never broken out of.
+    assert out["colour"].count('"') == 2
+    assert "onerror=alert(1)&gt;" in out["value"]
+    # An ordinary integer count renders exactly as before the fix.
+    assert out["plain"] == '<span><i style="background:var(--pass)"></i>7 passed</span>'
+
+
 def test_i18n_locales_have_identical_keys(client, tmp_path):
     # Every EN string must have an RU counterpart and vice-versa: a key present in one
     # locale but not the other renders as a raw key (or blank) for half the users. Node
