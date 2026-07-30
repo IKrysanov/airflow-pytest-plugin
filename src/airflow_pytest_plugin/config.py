@@ -316,14 +316,20 @@ def get_metrics_token() -> str | None:
 ALERTS_EMAIL_TO_ENV = "AIRFLOW_PYTEST_ALERTS_EMAIL_TO"
 
 
-def _list_setting(env_var: str, conf_key: str) -> tuple[str, ...]:
-    """Comma/semicolon-separated list from env, then cfg (empty tuple when unset)."""
+def _raw_setting(env_var: str, conf_key: str) -> str | None:
+    """The setting as written, from env then cfg. ``None`` when neither has a value."""
     raw = os.environ.get(env_var)
     if raw is None or not raw.strip():
         raw = get_conf_value(CONF_SECTION, conf_key)
-    if raw is None or not str(raw).strip():
+    return str(raw) if raw is not None and str(raw).strip() else None
+
+
+def _list_setting(env_var: str, conf_key: str) -> tuple[str, ...]:
+    """Comma/semicolon-separated list from env, then cfg (empty tuple when unset)."""
+    raw = _raw_setting(env_var, conf_key)
+    if raw is None:
         return ()
-    parts = (p.strip() for p in str(raw).replace(";", ",").split(","))
+    parts = (p.strip() for p in raw.replace(";", ",").split(","))
     return tuple(p for p in parts if p)
 
 
@@ -341,14 +347,39 @@ def get_alerts_recipients() -> tuple[str, ...]:
 ALERTS_EMAIL_DOMAINS_ENV = "AIRFLOW_PYTEST_ALERTS_EMAIL_DOMAINS"
 
 
-def get_alerts_allowed_domains() -> tuple[str, ...]:
-    """Lower-cased domains that may receive plugin email; empty tuple = no restriction.
+#: Raw allowlist values already reported as unusable, so the warning is said once.
+_warned_domain_values: set[str] = set()
+
+
+def get_alerts_allowed_domains() -> tuple[str, ...] | None:
+    """Lower-cased domains that may receive plugin email, or ``None`` when unrestricted.
 
     A leading ``@`` or ``.`` is accepted and stripped, so ``@corp.io``, ``.corp.io`` and
     ``corp.io`` all mean the same thing.
+
+    ``None`` means the setting is absent. A setting that IS present but yields no usable
+    domain (``"@"``, ``","``, a stray separator) returns an EMPTY tuple, which allows
+    nothing: someone who configured an allowlist asked for a restriction, and quietly
+    mailing the world because their value had a typo is the one outcome they did not ask
+    for. It is loud in the log and immediate in the ``400``, so it is a minute to fix.
     """
+    written = _raw_setting(ALERTS_EMAIL_DOMAINS_ENV, "alerts_email_domains")
+    if written is None:
+        return None
     raw = _list_setting(ALERTS_EMAIL_DOMAINS_ENV, "alerts_email_domains")
-    return tuple(d.lstrip("@.").lower() for d in raw if d.lstrip("@."))
+    domains = tuple(d.lstrip("@.").lower() for d in raw if d.lstrip("@."))
+    if not domains:
+        key = written
+        if key not in _warned_domain_values:
+            _warned_domain_values.add(key)
+            _log.error(
+                "%s=%r names no usable domain, so NOTHING may be emailed. Use a bare "
+                "domain list such as 'corp.io, team.dev', or unset it to allow any "
+                "recipient.",
+                ALERTS_EMAIL_DOMAINS_ENV,
+                key,
+            )
+    return domains
 
 
 def get_reports_root() -> str:

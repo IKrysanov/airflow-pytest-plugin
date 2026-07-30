@@ -334,12 +334,19 @@ class FileSystemReportSource(ReportSource):
             return None  # already searched this exact file and it has no rows
         # The KEY, not the substring: a node id inside the rows cannot contain an unescaped
         # quote, so the first '"tests":' in the file is always the key we cut at.
-        marker = '"tests":'
+        #
+        # Read as BYTES. Decoding as we go would measure the budget in characters while the
+        # limit that sent us here is in bytes: a file of 4-byte characters then read four
+        # times its budget -- an 8MiB limit peaked at 72MiB -- which is the amplification
+        # this whole path exists to avoid.
+        marker = b'"tests":'
         budget = get_max_meta_bytes() or _MAX_META_BYTES_FALLBACK
-        head = ""
+        # bytearray, not bytes: ``+=`` on bytes copies the whole buffer each time, so the
+        # last chunk before the budget briefly holds it twice.
+        head = bytearray()
         cut = -1
         try:
-            with meta_file.open("r", encoding="utf-8") as fh:
+            with meta_file.open("rb") as fh:
                 while len(head) < budget:
                     chunk = fh.read(_META_HEAD_CHUNK)
                     if not chunk:
@@ -348,7 +355,7 @@ class FileSystemReportSource(ReportSource):
                     cut = head.find(marker)
                     if cut >= 0:
                         break
-        except (OSError, ValueError):
+        except OSError:
             return None
         if cut <= 0:
             # Either not our shape, or the rows are further in than we will read. Both mean
@@ -357,9 +364,11 @@ class FileSystemReportSource(ReportSource):
                 _unusable_meta.clear()
             _unusable_meta[key] = (st.st_size, st.st_mtime_ns)
             return None
+        # The cut is at a key boundary, so the prefix is whole UTF-8 -- but the file was
+        # written by something else if it is not, and that is a skip, not a crash.
         try:
-            data = json.loads(head[:cut].rstrip().rstrip(",") + "}")
-        except ValueError:
+            data = json.loads(head[:cut].decode("utf-8").rstrip().rstrip(",") + "}")
+        except (ValueError, UnicodeDecodeError):
             return None
         return data if isinstance(data, dict) else None
 

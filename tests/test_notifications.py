@@ -1242,3 +1242,23 @@ def test_configured_recipients_outside_the_allowlist_are_dropped(monkeypatch, ca
     # button and not the nightly alert it shares its recipients with.
     assert policy.recipients == ("team@corp.io",)
     assert "out@evil.net" in caplog.text
+
+
+def test_an_allowlist_that_names_no_domain_allows_nothing(monkeypatch, caplog):
+    from airflow_pytest_plugin.config import _warned_domain_values
+    from airflow_pytest_plugin.notifications import domain_allowed
+
+    # Someone who configured an allowlist asked for a restriction. A value that parses to
+    # no usable domain ("@", a stray comma) used to allow the whole internet -- the one
+    # outcome they did not ask for. It now allows nothing, and says so once.
+    for bad in ("@", ".", ",", " , ", "@."):
+        _warned_domain_values.clear()
+        monkeypatch.setenv("AIRFLOW_PYTEST_ALERTS_EMAIL_DOMAINS", bad)
+        with caplog.at_level("ERROR"):
+            assert not domain_allowed("attacker@evil.net"), bad
+            assert not domain_allowed("qa@corp.io"), bad
+        assert "AIRFLOW_PYTEST_ALERTS_EMAIL_DOMAINS" in caplog.text
+
+    # Absent is still unrestricted -- the knob is opt-in.
+    monkeypatch.delenv("AIRFLOW_PYTEST_ALERTS_EMAIL_DOMAINS")
+    assert domain_allowed("attacker@evil.net")

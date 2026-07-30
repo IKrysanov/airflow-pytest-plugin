@@ -1900,3 +1900,33 @@ def test_a_meta_that_cannot_answer_is_not_searched_on_every_scan(
     src._invalidate_scan()
     src.list_summaries()
     assert len(reads) == 2
+
+
+def test_the_head_search_budget_counts_bytes_not_characters(reports_root, monkeypatch):
+    # The limit that sends us down this path is in bytes. Measuring the search in decoded
+    # characters instead let a file of 4-byte characters be read at several times its
+    # budget -- the amplification this path exists to avoid.
+    ref = ReportRef("dag", "run", "task", 1)
+    out = write_report(reports_root, ref, passed=1)
+    meta_path = os.path.join(out, META_FILENAME)
+    with open(meta_path, encoding="utf-8") as fh:
+        meta = json.load(fh)
+    meta["summary"]["failed_node_ids"] = ["\U0001f600" * 200 for _ in range(4000)]
+    meta["tests"] = [
+        ["tests/t.py::test_a", "passed", 0.1]
+    ]  # last, as the producer writes
+    with open(meta_path, "w", encoding="utf-8") as fh:
+        json.dump(meta, fh, ensure_ascii=False)
+
+    raw = Path(meta_path).read_bytes()
+    at_byte = raw.find(b'"tests":')
+    at_char = raw.decode("utf-8").find('"tests":')
+    assert at_char < at_byte  # the head really is mostly multi-byte
+
+    # A budget BETWEEN the two offsets: counting characters would still reach the rows,
+    # counting bytes must stop short of them.
+    monkeypatch.setenv(
+        "AIRFLOW_PYTEST_MAX_META_MIB", str(((at_char + at_byte) // 2) / 2**20)
+    )
+    filesystem._unusable_meta.clear()
+    assert FileSystemReportSource(report_root=reports_root).list_summaries() == []

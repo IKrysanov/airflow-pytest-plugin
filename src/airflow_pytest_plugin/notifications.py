@@ -118,12 +118,12 @@ def is_valid_email(address: str) -> bool:
 def domain_allowed(address: str) -> bool:
     """Whether ``address`` may be mailed under the configured domain allowlist.
 
-    Unset allowlist -> everything is allowed (the pre-0.7.0 behaviour). A listed domain also
+    An absent allowlist allows everything (the pre-0.7.0 behaviour). A listed domain also
     covers its subdomains, so ``corp.io`` accepts ``qa@ci.corp.io`` -- matched label-wise, so
     it never accepts a lookalike like ``corp.io.evil.net``.
     """
     allowed = get_alerts_allowed_domains()
-    if not allowed:
+    if allowed is None:  # unset -> unrestricted; empty -> configured but unusable
         return True
     domain = address.rpartition("@")[2].lower().rstrip(".")
     return any(domain == d or domain.endswith("." + d) for d in allowed)
