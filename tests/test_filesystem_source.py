@@ -16,11 +16,20 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+import time
+from pathlib import Path
 
-from airflow_pytest_plugin.layout import META_FILENAME, ReportLayout
+from airflow_pytest_plugin.layout import META_FILENAME, VERDICTS_FILENAME, ReportLayout
 from airflow_pytest_plugin.models import ReportRef
-from airflow_pytest_plugin.sources import FileSystemReportSource
-from conftest import write_allure, write_report, write_report_xml, write_tests
+from airflow_pytest_plugin.sources import FileSystemReportSource, filesystem
+from conftest import (
+    write_allure,
+    write_report,
+    write_report_xml,
+    write_tests,
+    write_triage,
+)
 
 
 def test_missing_root_lists_nothing(reports_root):
@@ -260,10 +269,13 @@ def test_case_output_includes_captured_stdout_for_passed(reports_root):
     assert detail is not None
     case = detail.cases[0]
     assert case.outcome == "passed"
-    # Captured output is surfaced even for a passing test.
-    assert "Captured stdout / log" in case.message
-    assert "hello from stdout" in case.message
-    assert "Captured stderr" in case.message
+    # Captured output is surfaced even for a passing test -- and in its OWN field, so it
+    # is never mistaken for a failure message.
+    assert case.message is None or not case.message.strip()
+    assert "Captured stdout / log" in case.output
+    assert "hello from stdout" in case.output
+    assert "Captured stderr" in case.output
+    assert "a warning" in case.output
 
 
 def test_delete_removes_report_and_prunes_empty_ancestors(reports_root):
@@ -299,9 +311,9 @@ def test_delete_returns_false_when_absent(reports_root):
     assert src.delete(ReportRef("nope", "nope", "nope", 1)) is False
 
 
-def test_case_outputs_empty_on_parse_error():
-    # A missing/unparseable file yields no outputs (best-effort).
-    assert FileSystemReportSource._case_outputs("/no/such/report.xml") == {}
+def test_case_details_empty_on_parse_error():
+    # A missing/unparseable file yields no details (best-effort).
+    assert FileSystemReportSource._case_details("/no/such/report.xml") == {}
 
 
 def test_case_output_is_truncated(reports_root, monkeypatch):
@@ -321,7 +333,7 @@ def test_case_output_is_truncated(reports_root, monkeypatch):
 
     detail = FileSystemReportSource(report_root=reports_root).get_detail(ref)
     assert detail is not None
-    assert detail.cases[0].message.endswith("…(truncated)")
+    assert detail.cases[0].output.endswith("…(truncated)")
 
 
 def test_case_with_empty_skipped_body_adds_no_output(reports_root):
@@ -662,7 +674,7 @@ def test_case_outputs_reads_every_junit_shape(reports_root):
     def outputs_for(name, xml):
         ref = ReportRef("d", name, "t", 1, -1)
         write_report_xml(reports_root, ref, xml)
-        return FileSystemReportSource._case_outputs(
+        return FileSystemReportSource._case_details(
             ReportLayout().report_path(reports_root, ref)
         )
 
@@ -676,11 +688,13 @@ def test_case_outputs_reads_every_junit_shape(reports_root):
         "<system-err>ERR</system-err></testcase></testsuite>",
     )
     assert ("a", "p") not in single  # a clean pass carries no output
-    assert single[("a", "f")] == "MF\nTF"
-    assert single[("a", "e")] == "ME\nTE"
-    assert single[("a", "s")] == "MS"
+    # (failure text, captured output) -- the diagnosis never mixes with the evidence.
+    assert single[("a", "f")] == ("MF\nTF", "")
+    assert single[("a", "e")] == ("ME\nTE", "")
+    assert single[("a", "s")] == ("MS", "")
     assert single[("a", "o")] == (
-        "--- Captured stdout / log ---\nOUT\n\n--- Captured stderr ---\nERR"
+        "",
+        "--- Captured stdout / log ---\nOUT\n\n--- Captured stderr ---\nERR",
     )
 
     multi = outputs_for(
@@ -693,8 +707,8 @@ def test_case_outputs_reads_every_junit_shape(reports_root):
         "</testsuite></testsuites>",
     )
     assert multi == {
-        ("p1", "t1"): "F1\nB1",
-        ("p2", "t2"): "--- Captured stdout / log ---\nO2",
+        ("p1", "t1"): ("F1\nB1", ""),
+        ("p2", "t2"): ("", "--- Captured stdout / log ---\nO2"),
     }
 
     assert outputs_for("empty", "<testsuite/>") == {}
@@ -713,8 +727,10 @@ def test_case_outputs_reads_every_junit_shape(reports_root):
         + ("Z" * (_MAX_OUTPUT + 500))
         + "</system-out></testcase></testsuite>",
     )
-    assert big[("c", "b")].endswith("…(truncated)")
-    assert len(big[("c", "b")]) < _MAX_OUTPUT + 100  # one case can't flood the response
+    assert big[("c", "b")][1].endswith("…(truncated)")
+    assert (
+        len(big[("c", "b")][1]) < _MAX_OUTPUT + 100
+    )  # one case can't flood a response
 
 
 def test_record_coverage_refuses_traversal_token(tmp_path):
@@ -1054,3 +1070,895 @@ def test_allure_ignores_a_symlinked_directory(reports_root, tmp_path):
 
     zf = zipfile.ZipFile(io.BytesIO(b"".join(src.allure_stream(ref))))
     assert zf.namelist() == ["real-result.json"]
+
+
+# --- AI triage ------------------------------------------------------------------------
+def _verdict(category="regression", **over):
+    v = {
+        "category": category,
+        "hypothesis": "the loader stopped de-duplicating rows",
+        "confidence": "high",
+        "suggested_fix": "restore the DISTINCT clause",
+        "exc_type": "AssertionError",
+        "selector": "tests/test_x.py::test_f1",
+    }
+    v.update(over)
+    return v
+
+
+def test_detail_joins_verdicts_onto_their_cases(reports_root):
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref, passed=1, failed=1)
+    # Stored in pytest's own slash form; the JUnit cases arrive dotted. The join must
+    # bridge the two without either side guessing.
+    write_triage(reports_root, ref, {"tests/test_x.py::test_f1": _verdict("env")})
+
+    detail = FileSystemReportSource(report_root=reports_root).get_detail(ref)
+    by_node = {c.node_id: c for c in detail.cases}
+    failed = by_node["tests.test_x::test_f1"]
+    assert failed.verdict.category == "env"
+    assert failed.verdict.suggested_fix == "restore the DISTINCT clause"
+    # A passing test has no verdict, and never invents one.
+    assert by_node["tests.test_x::test_p0"].verdict is None
+
+
+def test_detail_carries_the_run_level_roll_up(reports_root):
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref, passed=1, failed=1)
+    write_triage(
+        reports_root,
+        ref,
+        {"tests.test_x::test_f1": _verdict("test_bug")},
+        model="gpt-4o-mini",
+        total_failures=3,
+    )
+
+    detail = FileSystemReportSource(report_root=reports_root).get_detail(ref)
+    assert detail.triage.model == "gpt-4o-mini"
+    assert detail.triage.counts == {"test_bug": 1}
+    # Budget-limited pass: three failed, one was judged. The gap is visible, not hidden.
+    assert detail.triage.total_failures == 3 and detail.triage.total_verdicts == 1
+    payload = detail.to_dict()
+    assert payload["triage"]["model"] == "gpt-4o-mini"
+    assert payload["cases"][1]["verdict"]["category"] == "test_bug"
+
+
+def test_an_untriaged_run_reports_no_triage(reports_root):
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref, passed=1, failed=1)
+
+    detail = FileSystemReportSource(report_root=reports_root).get_detail(ref)
+    assert detail.triage is None
+    assert all(c.verdict is None for c in detail.cases)
+    assert detail.to_dict()["triage"] is None
+
+
+def test_summaries_flag_which_runs_were_triaged(reports_root):
+    triaged = ReportRef("dag", "run1", "task", 1)
+    plain = ReportRef("dag", "run2", "task", 1)
+    write_report(reports_root, triaged, passed=1, failed=1)
+    write_report(reports_root, plain, passed=1, failed=1)
+    write_triage(reports_root, triaged, {"tests.test_x::test_f1": _verdict()})
+
+    src = FileSystemReportSource(report_root=reports_root)
+    flags = {s.ref.run_id: s.has_triage for s in src.list_summaries()}
+    assert flags == {"run1": True, "run2": False}
+
+
+def test_a_corrupt_triage_block_does_not_break_the_detail(reports_root):
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref, passed=1, failed=1)
+    out_dir = ReportLayout().dir_for(reports_root, ref)
+    meta_path = os.path.join(out_dir, META_FILENAME)
+    meta = json.load(open(meta_path, encoding="utf-8"))
+    meta["triage"] = {"model": 42, "counts": "lots", "verdicts": ["nope"]}
+    with open(meta_path, "w", encoding="utf-8") as fh:
+        json.dump(meta, fh)
+
+    detail = FileSystemReportSource(report_root=reports_root).get_detail(ref)
+    assert detail is not None and detail.summary.total == 2
+    assert detail.triage.model is None and detail.triage.counts == {}
+    assert all(c.verdict is None for c in detail.cases)
+
+
+def test_legacy_archives_with_inline_verdicts_still_read(reports_root):
+    # Verdicts used to live inside the meta roll-up. Those archives keep working: the
+    # fallback costs three lines and spares them a silently empty analysis.
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref, passed=1, failed=1)
+    write_triage(
+        reports_root, ref, {"tests.test_x::test_f1": _verdict("flaky")}, inline=True
+    )
+    assert not os.path.exists(
+        os.path.join(ReportLayout().dir_for(reports_root, ref), VERDICTS_FILENAME)
+    )
+
+    detail = FileSystemReportSource(report_root=reports_root).get_detail(ref)
+    assert detail.triage.counts == {"flaky": 1}
+    assert detail.cases[1].verdict.category == "flaky"
+
+
+def test_an_oversized_verdicts_file_is_refused_not_parsed(reports_root, monkeypatch):
+    # This parse runs inside the Airflow api-server on every detail request, over a file
+    # written on the worker by the tested project's own process.
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref, passed=1, failed=1)
+    write_triage(reports_root, ref, {"tests.test_x::test_f1": _verdict()})
+    monkeypatch.setattr(filesystem, "_MAX_VERDICTS_BYTES", 10)
+
+    detail = FileSystemReportSource(report_root=reports_root).get_detail(ref)
+    # The run still opens, and still reads as triaged -- only the per-test analysis is gone.
+    assert detail is not None and detail.triage is not None
+    assert all(c.verdict is None for c in detail.cases)
+
+
+def test_a_verdict_for_a_test_the_run_does_not_have_is_not_advertised(reports_root):
+    # Real case: a collection error names the FILE, not a test, so pytest-triage reports a
+    # node id no JUnit case matches. The card must not offer a category the table cannot show.
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref, passed=1, failed=1)
+    write_triage(
+        reports_root,
+        ref,
+        {
+            "tests.test_x::test_f1": _verdict("env"),
+            "tests.test_ghost": _verdict("regression"),
+        },
+        total_failures=2,
+    )
+
+    detail = FileSystemReportSource(report_root=reports_root).get_detail(ref)
+    assert detail.triage.counts == {"env": 1}
+    assert detail.triage.total_verdicts == 1
+    # ...while what pytest-triage actually saw stays visible as the "1 of 2 judged" gap.
+    assert detail.triage.total_failures == 2
+
+
+def test_reading_verdicts_does_not_reparse_the_run_meta(reports_root, monkeypatch):
+    # The heatmap calls this for every run in its window, right after test_outcomes has
+    # already parsed that run's meta.json. Parsing it a second time just to reach the
+    # roll-up cost +80% on the heatmap's read phase (100 runs x 300 tests: 14ms -> 26ms).
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref, passed=1, failed=1)
+    write_triage(reports_root, ref, {"tests.test_x::test_f1": _verdict("env")})
+    src = FileSystemReportSource(report_root=reports_root)
+
+    parses: list = []
+    real = FileSystemReportSource._load_meta
+    monkeypatch.setattr(
+        FileSystemReportSource,
+        "_load_meta",
+        staticmethod(lambda p: (parses.append(p), real(p))[1]),
+    )
+    verdicts = src.verdicts(ref)
+
+    assert verdicts["tests.test_x::test_f1"].category == "env"
+    assert parses == [], (
+        "verdicts.json is self-sufficient; meta.json need not be re-read"
+    )
+
+
+def test_a_legacy_archive_still_costs_one_meta_read(reports_root, monkeypatch):
+    # Verdicts stored inline in the roll-up have nowhere else to come from, so that (and
+    # only that) shape pays the meta parse.
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref, passed=1, failed=1)
+    write_triage(
+        reports_root, ref, {"tests.test_x::test_f1": _verdict("flaky")}, inline=True
+    )
+    src = FileSystemReportSource(report_root=reports_root)
+
+    parses: list = []
+    real = FileSystemReportSource._load_meta
+    monkeypatch.setattr(
+        FileSystemReportSource,
+        "_load_meta",
+        staticmethod(lambda p: (parses.append(p), real(p))[1]),
+    )
+    assert src.verdicts(ref)["tests.test_x::test_f1"].category == "flaky"
+    assert len(parses) == 1
+
+
+def test_a_runaway_model_name_cannot_bloat_the_list(reports_root):
+    # `model` from the roll-up lands in the /api/reports payload for EVERY triaged run, and
+    # meta.json is written on the worker by the tested project's own process. Unbounded, one
+    # corrupt run would put megabytes into a response that already carries thousands.
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref, passed=1, failed=1)
+    write_triage(reports_root, ref, {}, model="m" * 5000)
+
+    summary = FileSystemReportSource(report_root=reports_root).list_summaries()[0]
+    assert len(summary.triage["model"]) <= 200
+    # ...and a non-string is not stringified into the payload either.
+    write_triage(reports_root, ref, {}, model=None)
+    meta_path = os.path.join(ReportLayout().dir_for(reports_root, ref), META_FILENAME)
+    meta = json.load(open(meta_path, encoding="utf-8"))
+    meta["triage"]["model"] = {"nope": 1}
+    json.dump(meta, open(meta_path, "w"))
+    src = FileSystemReportSource(report_root=reports_root)
+    assert src.list_summaries()[0].triage["model"] is None
+
+
+# --- security: verdicts.json is written on the worker by arbitrary test code -----------
+# Same threat model as the Allure results: the reader opens a file whose name we chose but
+# whose CONTENT and inode a hostile (or merely broken) test controls, inside the Airflow
+# api-server that serves the rest of Airflow.
+
+
+def test_a_symlinked_verdicts_file_is_never_followed(reports_root):
+    # A test could drop `verdicts.json -> /opt/airflow/airflow.cfg` and have the reader
+    # open it. Nothing outside the run's own directory may be read.
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref, passed=1, failed=1)
+    write_triage(reports_root, ref, {"tests.test_x::test_f1": _verdict()})
+    run_dir = ReportLayout().dir_for(reports_root, ref)
+    secret = os.path.join(reports_root, "secret.json")
+    with open(secret, "w", encoding="utf-8") as fh:
+        json.dump(
+            {"verdicts": {"tests.test_x::test_f1": {"category": "regression"}}}, fh
+        )
+    target = os.path.join(run_dir, VERDICTS_FILENAME)
+    os.unlink(target)
+    os.symlink(secret, target)
+
+    detail = FileSystemReportSource(report_root=reports_root).get_detail(ref)
+    assert detail is not None  # the run still opens...
+    assert all(c.verdict is None for c in detail.cases), "a symlink was followed"
+
+
+def test_a_verdicts_fifo_does_not_hang_the_server(reports_root):
+    # open() on a FIFO blocks FOREVER waiting for a writer, pinning one api-server thread
+    # per request -- the cheapest denial of service there is.
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref, passed=1, failed=1)
+    write_triage(reports_root, ref, {"tests.test_x::test_f1": _verdict()})
+    target = os.path.join(ReportLayout().dir_for(reports_root, ref), VERDICTS_FILENAME)
+    os.unlink(target)
+    os.mkfifo(target)
+
+    finished = threading.Event()
+    result: list = []
+
+    def read() -> None:
+        result.append(FileSystemReportSource(report_root=reports_root).get_detail(ref))
+        finished.set()
+
+    threading.Thread(target=read, daemon=True).start()
+    assert finished.wait(timeout=10), "reading a FIFO blocked the request"
+    assert result[0] is not None
+    assert all(c.verdict is None for c in result[0].cases)
+
+
+def test_a_deeply_nested_verdicts_file_is_refused_not_crashed(reports_root):
+    # json.load raises RecursionError (not ValueError) on a nesting bomb, which would sail
+    # past an `except (OSError, ValueError)` and 500 the detail endpoint.
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref, passed=1, failed=1)
+    write_triage(reports_root, ref, {"tests.test_x::test_f1": _verdict()})
+    target = os.path.join(ReportLayout().dir_for(reports_root, ref), VERDICTS_FILENAME)
+    with open(target, "w", encoding="utf-8") as fh:
+        fh.write("[" * 100_000 + "]" * 100_000)
+
+    detail = FileSystemReportSource(report_root=reports_root).get_detail(ref)
+    assert detail is not None and all(c.verdict is None for c in detail.cases)
+
+
+def test_verdicts_are_never_read_from_outside_the_report_root(reports_root, tmp_path):
+    # A traversal TOKEN alone proves nothing -- the layout sanitises `..` away, so the path
+    # simply does not exist and any implementation "passes". The real escape is a symlinked
+    # run directory: it resolves outside the root, and only the realpath boundary stops the
+    # read. Planted with a genuine verdicts.json, so a missing boundary would be visible.
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / VERDICTS_FILENAME).write_text(
+        json.dumps({"verdicts": {"tests.test_x::test_f1": {"category": "regression"}}}),
+        encoding="utf-8",
+    )
+    ref = ReportRef("linked", "run", "task", 1)
+    run_dir = ReportLayout().dir_for(reports_root, ref)
+    os.makedirs(os.path.dirname(run_dir), exist_ok=True)
+    os.symlink(outside, run_dir)
+
+    src = FileSystemReportSource(report_root=reports_root)
+    assert src.verdicts(ref) == {}, "a symlinked run directory escaped the report root"
+    assert src.get_detail(ref) is None
+
+
+def test_an_orphan_verdicts_file_is_ignored_by_the_run_detail(reports_root):
+    # meta.json is the authority on whether a run was triaged. A verdicts.json with no
+    # roll-up beside it -- a leftover, or a write that crashed between the two files -- must
+    # not put verdicts on a run the archive says was never analysed.
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref, passed=1, failed=1)
+    run_dir = ReportLayout().dir_for(reports_root, ref)
+    with open(os.path.join(run_dir, VERDICTS_FILENAME), "w", encoding="utf-8") as fh:
+        json.dump({"verdicts": {"tests.test_x::test_f1": _verdict("regression")}}, fh)
+
+    detail = FileSystemReportSource(report_root=reports_root).get_detail(ref)
+    assert detail.triage is None
+    assert all(c.verdict is None for c in detail.cases)
+
+
+def test_a_reader_never_sees_a_half_written_verdicts_file(reports_root):
+    # The PRODUCER rewrites this file on a retry while the api-server may be reading it, so
+    # the writer under test is the parser's own, not the test helper's (which writes in
+    # place). temp + rename means a reader sees the old file or the new one, never a
+    # truncated one. Hammered from two threads to make a torn read observable at all.
+    from airflow_pytest_plugin.producer import ArchivingResultParser
+    from airflow_pytest_plugin.triage import TriageArchive
+
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref, passed=1, failed=1)
+    write_triage(reports_root, ref, {"tests.test_x::test_f1": _verdict("env")})
+    report_path = ReportLayout().report_path(reports_root, ref)
+    parser = ArchivingResultParser(report_root=reports_root)
+    src = FileSystemReportSource(report_root=reports_root)
+
+    small = TriageArchive(verdicts={"tests.test_x::test_f1": _verdict("env")})
+    big = TriageArchive(
+        verdicts={
+            f"tests.test_x::test_f{i}": _verdict("regression") for i in range(400)
+        }
+    )
+    stop = threading.Event()
+    torn: list = []
+
+    def rewrite() -> None:
+        while not stop.is_set():
+            parser._write_verdicts(report_path, big)
+            parser._write_verdicts(report_path, small)
+
+    def read() -> None:
+        while not stop.is_set():
+            if not src.verdicts(ref):  # either size is fine; empty means a torn parse
+                torn.append(1)
+
+    threads = [
+        threading.Thread(target=rewrite, daemon=True),
+        threading.Thread(target=read, daemon=True),
+    ]
+    for thread in threads:
+        thread.start()
+    time.sleep(1.5)
+    stop.set()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert torn == [], f"{len(torn)} torn reads -- the swap is not atomic"
+
+
+def test_an_empty_verdicts_file_does_not_trigger_the_legacy_meta_read(
+    reports_root, monkeypatch
+):
+    # A triaged run can legitimately have zero verdicts (report-only with nothing
+    # describable). Treating "empty" as "absent" sent it down the legacy fallback, paying a
+    # meta parse per heatmap column for a file that was right there and simply empty.
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref, passed=1, failed=1)
+    write_triage(reports_root, ref, {})
+    src = FileSystemReportSource(report_root=reports_root)
+
+    parses: list = []
+    real = FileSystemReportSource._load_meta
+    monkeypatch.setattr(
+        FileSystemReportSource,
+        "_load_meta",
+        staticmethod(lambda p: (parses.append(p), real(p))[1]),
+    )
+    assert src.verdicts(ref) == {}
+    assert parses == [], "an empty sidecar is still a sidecar -- no meta read needed"
+
+
+def test_capture_drops_streams_nothing_was_written_to():
+    # pytest emits a banner for EVERY stream it captured, empty ones included. Kept, they
+    # put an empty "Captured Err" heading under every test in the run.
+    clean = FileSystemReportSource._clean_capture
+
+    assert (
+        clean(
+            "------- Captured Log -------\n\n------- Captured Out -------\nPDF: 24 KB\n"
+        )
+        == "--- Captured Out ---\nPDF: 24 KB"
+    )
+    assert clean("------- Captured Err -------\n\n") == ""
+    assert clean("plain text\nno banners") == "plain text\nno banners"
+    # Two streams with content stay apart: one system-out can hold both, and the banner is
+    # the only thing separating a log line from a print.
+    assert (
+        clean(
+            "------- Captured Log -------\nWARNING boom\n------- Captured Out -------\nhi\n"
+        )
+        == "--- Captured Log ---\nWARNING boom\n--- Captured Out ---\nhi"
+    )
+
+
+def test_delete_reports_failure_instead_of_claiming_success(reports_root, monkeypatch):
+    # A delete the storage refused must not come back as True: the viewer drops the run
+    # from the list on True, so the user believes the space was reclaimed while every
+    # file is still there -- on a read-only mount, for the whole selection.
+    from airflow_pytest_plugin.sources import filesystem
+
+    ref = ReportRef("dag", "run", "task", 1)
+    out_dir = write_report(reports_root, ref)
+    src = FileSystemReportSource(report_root=reports_root)
+
+    def refuse(path, *a, **kw):
+        raise PermissionError("read-only file system")
+
+    monkeypatch.setattr(filesystem.shutil, "rmtree", refuse)
+    assert src.delete(ref) is False
+    assert os.path.isdir(out_dir)  # and it really is still there
+
+    # A partial rmtree counts as failure too: what is left behind is a truncated run.
+    monkeypatch.setattr(filesystem.shutil, "rmtree", lambda path, *a, **kw: None)
+    assert src.delete(ref) is False
+
+    monkeypatch.undo()
+    assert src.delete(ref) is True
+    assert not os.path.exists(out_dir)
+
+
+def test_captured_output_is_capped_across_the_whole_run(reports_root, monkeypatch):
+    # The per-case cap still multiplies by the number of tests. Without a run-wide budget
+    # a chatty suite becomes one enormous JSON response for the browser to hold.
+    from airflow_pytest_plugin.sources import filesystem
+
+    monkeypatch.setattr(filesystem, "_MAX_OUTPUT", 200)
+    monkeypatch.setattr(filesystem, "_MAX_RUN_OUTPUT", 500)
+    ref = ReportRef("dag", "run", "task", 1)
+    cases = "".join(
+        f'<testcase classname="t.m" name="test_{i}" time="0.1">'
+        f"<system-out>{'x' * 5000}</system-out></testcase>"
+        for i in range(10)
+    )
+    write_report_xml(
+        reports_root,
+        ref,
+        f'<testsuite name="s" tests="10" failures="0" errors="0" skipped="0">{cases}</testsuite>',
+    )
+
+    detail = FileSystemReportSource(report_root=reports_root).get_detail(ref)
+    assert detail is not None
+    total = sum(len(c.output or "") for c in detail.cases)
+    assert total <= 500 + len(filesystem._OUTPUT_BUDGET_SPENT) * 10
+    # Past the budget a test that printed something says so rather than looking silent.
+    assert detail.cases[-1].output == filesystem._OUTPUT_BUDGET_SPENT
+    assert detail.cases[0].output.endswith("…(truncated)")
+
+
+def test_failure_text_is_capped_across_the_whole_run_too(reports_root, monkeypatch):
+    # A suite that broke wide is the other way one run becomes tens of megabytes of JSON:
+    # 2,000 failures at 16KB of traceback each need no captured output to get there.
+    from airflow_pytest_plugin.sources import filesystem
+
+    monkeypatch.setattr(filesystem, "_MAX_OUTPUT", 200)
+    monkeypatch.setattr(filesystem, "_MAX_RUN_FAILURES", 500)
+    ref = ReportRef("dag", "run", "task", 1)
+    cases = "".join(
+        f'<testcase classname="t.m" name="test_{i}" time="0.1">'
+        f'<failure message="boom">{"E   assert 1 == 2" * 400}</failure></testcase>'
+        for i in range(10)
+    )
+    write_report_xml(
+        reports_root,
+        ref,
+        f'<testsuite name="s" tests="10" failures="10" errors="0" skipped="0">{cases}</testsuite>',
+    )
+
+    detail = FileSystemReportSource(report_root=reports_root).get_detail(ref)
+    assert detail is not None
+    total = sum(len(c.message or "") for c in detail.cases)
+    assert total <= 500 + len(filesystem._FAILURE_BUDGET_SPENT) * 10
+    # A test that broke is never shown as one that did not.
+    assert detail.cases[-1].message == filesystem._FAILURE_BUDGET_SPENT
+    assert detail.cases[0].message.endswith("…(truncated)")
+
+
+def test_budgets_count_utf8_bytes_not_python_characters(reports_root, monkeypatch):
+    # The response is measured in bytes; the budget used to be measured in characters, so
+    # any non-ASCII text passed at up to 4x the limit -- a suite printing emoji sent 8 MB
+    # through a 2,000,000-"character" budget. Cyrillic and CJK do the same at 2x-3x.
+    from airflow_pytest_plugin.sources import filesystem
+
+    monkeypatch.setattr(filesystem, "_MAX_OUTPUT", 400)
+    monkeypatch.setattr(filesystem, "_MAX_RUN_OUTPUT", 1000)
+    monkeypatch.setattr(filesystem, "_MAX_RUN_FAILURES", 1000)
+
+    def used(char):
+        ref = ReportRef("dag", f"run_{ord(char)}", "task", 1)
+        blob = char * 5000
+        cases = "".join(
+            f'<testcase classname="t.m" name="test_{i}" time="0.1">'
+            f'<failure message="boom">{blob}</failure>'
+            f"<system-out>{blob}</system-out></testcase>"
+            for i in range(5)
+        )
+        write_report_xml(
+            reports_root,
+            ref,
+            f'<testsuite name="s" tests="5" failures="5" errors="0" skipped="0">{cases}</testsuite>',
+        )
+        detail = FileSystemReportSource(report_root=reports_root).get_detail(ref)
+        assert detail is not None
+        texts = [t for c in detail.cases for t in (c.message, c.output) if t]
+        return sum(len(t.encode("utf-8")) for t in texts), texts
+
+    ascii_bytes, _ = used("A")
+    for wide in ("ф", "漢", "😀"):
+        wide_bytes, texts = used(wide)
+        # Within the note overhead of the ASCII case -- not 2x, 3x or 4x it.
+        assert wide_bytes <= ascii_bytes + 1000, (
+            f"{wide}: {wide_bytes} vs {ascii_bytes}"
+        )
+        # And truncation never splits a character into a replacement glyph.
+        assert all("�" not in t for t in texts)
+        assert all(t.encode("utf-8").decode("utf-8") == t for t in texts)
+
+
+def test_cap_truncates_on_a_character_boundary():
+    from airflow_pytest_plugin.sources.filesystem import _cap
+
+    text, size = _cap("😀" * 10, 6)  # 6 bytes = one emoji and a half
+    assert text.startswith("😀") and "�" not in text
+    assert text.count("😀") == 1  # the split one is dropped, not mangled
+    assert size == len(text.encode("utf-8"))
+    # A block that fits is returned untouched, with its real byte cost.
+    same, size = _cap("привет", 100)
+    assert same == "привет" and size == 12
+
+
+def test_a_partial_delete_says_the_run_is_gone_not_merely_refused(
+    reports_root, monkeypatch, caplog
+):
+    # rmtree is not atomic: when it stops on an entry it may not remove, the rest of the run
+    # is already unlinked. "Storage refused" alone would send an operator looking for a run
+    # that no longer exists, and nothing will ever clean the directory up -- without its
+    # meta.json neither the viewer nor retention can see it again.
+    from airflow_pytest_plugin.sources import filesystem
+
+    ref = ReportRef("dag", "run", "task", 1)
+    out_dir = write_report(reports_root, ref)
+    src = FileSystemReportSource(report_root=reports_root)
+
+    def half_delete(path, *a, **kw):
+        os.remove(os.path.join(path, filesystem.META_FILENAME))
+        raise PermissionError("read-only file system")
+
+    monkeypatch.setattr(filesystem.shutil, "rmtree", half_delete)
+    with caplog.at_level("ERROR"):
+        assert src.delete(ref) is False
+
+    assert "no longer readable" in caplog.text
+    assert "remove it by hand" in caplog.text
+    assert os.path.isdir(out_dir)
+    # And the run really has left the listing, which is why the message matters.
+    assert src.list_summaries() == []
+
+
+def test_losing_a_delete_race_is_not_logged_as_a_failure(
+    reports_root, monkeypatch, caplog
+):
+    # A retention sweep and a user's click routinely target the same run. The loser's
+    # FileNotFoundError is a non-event -- the run is gone, which is what both wanted -- and
+    # a page of traceback per raced run turns a clean cleanup into a scary task log.
+    from airflow_pytest_plugin.sources import filesystem
+
+    ref = ReportRef("dag", "run", "task", 1)
+    out_dir = write_report(reports_root, ref)
+    src = FileSystemReportSource(report_root=reports_root)
+    real = filesystem.shutil.rmtree
+
+    def raced(path, *a, **kw):
+        real(path, *a, **kw)  # another caller got here first
+        raise FileNotFoundError(path)
+
+    monkeypatch.setattr(filesystem.shutil, "rmtree", raced)
+    with caplog.at_level("INFO"):
+        assert src.delete(ref) is True  # the run IS gone: that is a success
+    assert not os.path.exists(out_dir)
+    assert "Traceback" not in caplog.text
+    assert "Could not delete" not in caplog.text
+
+
+def test_an_absurdly_large_report_is_refused_instead_of_parsed(
+    reports_root, monkeypatch
+):
+    # Parsing builds a tree several times the file's size, inside the Airflow api-server
+    # that serves everything else. The producer trims an archive past 32MB down to its
+    # failures, so a report near this limit was not written by a healthy run -- refusing it
+    # keeps one opened run from taking the server down with it.
+
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref, passed=1)
+    src = FileSystemReportSource(report_root=reports_root)
+    assert src.get_detail(ref) is not None  # a normal report opens
+
+    monkeypatch.setenv("AIRFLOW_PYTEST_MAX_REPORT_MIB", "0.00001")
+    assert src.get_detail(ref) is None
+    # The run itself stays listed: only opening it is refused, and the log says why.
+    assert len(src.list_summaries()) == 1
+
+
+def test_an_oversized_meta_has_its_test_rows_left_unparsed(reports_root, monkeypatch):
+    # meta.json is parsed for EVERY run on every tree scan, so one unbounded file is
+    # multiplied by the size of the archive. Past the cap the rows -- the part that made it
+    # huge -- are never decoded; only the head that identifies the run is read.
+    good = ReportRef("dag", "good", "task", 1)
+    fat = ReportRef("dag", "fat", "task", 1)
+    write_report(reports_root, good, passed=1)
+    out = write_report(reports_root, fat, passed=1)
+    meta_path = os.path.join(out, META_FILENAME)
+    with open(meta_path, encoding="utf-8") as fh:
+        meta = json.load(fh)
+    meta["tests"] = [[f"tests/t.py::test_{i}", "passed", 0.1] for i in range(20_000)]
+    with open(meta_path, "w", encoding="utf-8") as fh:
+        json.dump(meta, fh, indent=2)
+    src = FileSystemReportSource(report_root=reports_root)
+    assert len(src.test_outcomes(fat) or ()) == 20_000  # a big suite is read as it is
+
+    monkeypatch.setenv(
+        "AIRFLOW_PYTEST_MAX_META_MIB", str((os.path.getsize(meta_path) - 1) / 2**20)
+    )
+    src._invalidate_scan()
+    assert {s.ref.run_id for s in src.list_summaries()} == {"good", "fat"}
+    # The rows are gone from the cheap path: per-test data now comes from junit.xml, which
+    # carries the one case the run really has, and is bounded by its own cap.
+    assert len(src.test_outcomes(fat) or ()) == 1
+
+
+def _oversize_meta(out_dir, monkeypatch, rows=2000):
+    """Give the run at ``out_dir`` a meta.json past the parse cap; return its path."""
+    meta_path = os.path.join(out_dir, META_FILENAME)
+    with open(meta_path, encoding="utf-8") as fh:
+        meta = json.load(fh)
+    meta["tests"] = [[f"tests/t.py::test_{i}", "passed", 0.1] for i in range(rows)]
+    with open(meta_path, "w", encoding="utf-8") as fh:
+        json.dump(meta, fh, indent=2)
+    monkeypatch.setenv(
+        "AIRFLOW_PYTEST_MAX_META_MIB", str((os.path.getsize(meta_path) - 1) / 2**20)
+    )
+    return meta_path
+
+
+def test_a_run_whose_meta_is_too_large_stays_listed_and_deletable(
+    reports_root, monkeypatch
+):
+    # The rows are what make the file huge, and they sit last -- so the head still names the
+    # run. Dropping it from the list instead would also drop it from retention: its bytes
+    # would stop counting toward the size budget and no sweep would ever reclaim them.
+    ref = ReportRef("dag", "run", "task", 1)
+    out = write_report(reports_root, ref, passed=3, failed=1)
+    _oversize_meta(out, monkeypatch)
+
+    src = FileSystemReportSource(report_root=reports_root)
+    (summary,) = src.list_summaries()
+    assert summary.ref == ref  # real identity, not a placeholder
+    assert (summary.passed, summary.failed) == (3, 1)  # and the real numbers
+    assert src.report_size(ref) > 0  # so a size budget counts it
+    assert src.delete(ref) is True  # and a sweep can reclaim it
+
+
+def test_an_oversized_meta_that_is_not_ours_is_still_skipped(reports_root, monkeypatch):
+    # The head cut is for OUR shape. Anything else must fall back to being skipped rather
+    # than half-parsed into a run with invented numbers.
+    ref = ReportRef("dag", "run", "task", 1)
+    out = write_report(reports_root, ref, passed=1)
+    meta_path = os.path.join(out, META_FILENAME)
+    with open(meta_path, "w", encoding="utf-8") as fh:
+        json.dump({"junk": ["x" * 100] * 2000}, fh)
+    monkeypatch.setenv(
+        "AIRFLOW_PYTEST_MAX_META_MIB", str((os.path.getsize(meta_path) - 1) / 2**20)
+    )
+
+    assert FileSystemReportSource(report_root=reports_root).list_summaries() == []
+
+
+def test_an_oversized_meta_is_never_rewritten_by_a_sidecar_write(
+    reports_root, monkeypatch
+):
+    # record_alert / record_coverage load meta and write it back. They must not run on a
+    # file we only read the head of -- that would silently drop the per-test rows.
+    ref = ReportRef("dag", "run", "task", 1)
+    out = write_report(reports_root, ref, passed=1)
+    meta_path = _oversize_meta(out, monkeypatch)
+    before = os.path.getsize(meta_path)
+
+    src = FileSystemReportSource(report_root=reports_root)
+    assert src.record_alert(ref, {"kind": "failed", "ok": True}) is False
+    assert src.record_coverage(ref, 0.9) is False
+    assert os.path.getsize(meta_path) == before
+
+
+def test_an_oversized_meta_is_reported_once_not_on_every_scan(
+    reports_root, monkeypatch, caplog
+):
+    # The scan runs on a timer. Logging the refusal each time turns one broken file into a
+    # permanent stream of ERRORs that buries whatever else the api-server has to say.
+    ref = ReportRef("dag", "run", "task", 1)
+    out = write_report(reports_root, ref, passed=1)
+    _oversize_meta(out, monkeypatch)
+    filesystem._reported_oversized.clear()
+    src = FileSystemReportSource(report_root=reports_root)
+
+    with caplog.at_level("ERROR"):
+        for _ in range(5):
+            src._invalidate_scan()
+            src.list_summaries()
+
+    assert len([r for r in caplog.records if r.levelname == "ERROR"]) == 1
+    # A file that CHANGED size is news again: it was re-archived, or is still growing.
+    meta_path = os.path.join(out, META_FILENAME)
+    with open(meta_path, "a", encoding="utf-8") as fh:
+        fh.write(" " * 1000)
+    with caplog.at_level("ERROR"):
+        src._invalidate_scan()
+        src.list_summaries()
+    assert len([r for r in caplog.records if r.levelname == "ERROR"]) == 2
+
+
+def test_an_oversized_report_is_refused_on_every_path_that_parses_it(
+    reports_root, monkeypatch
+):
+    # Opening a run is not the only way to reach the parser: an archive without compact
+    # rows makes the list views parse junit.xml for per-test data. Guarding only the open
+    # would leave the refused report parsable through the back door.
+    ref = ReportRef("dag", "run", "task", 1)
+    out = write_report(reports_root, ref, passed=2)
+    meta_path = os.path.join(out, META_FILENAME)
+    with open(meta_path, encoding="utf-8") as fh:
+        meta = json.load(fh)
+    meta.pop("tests", None)  # the pre-0.3 shape: per-test data only in junit.xml
+    with open(meta_path, "w", encoding="utf-8") as fh:
+        json.dump(meta, fh)
+    src = FileSystemReportSource(report_root=reports_root)
+    assert src.test_outcomes(ref)  # normally the fallback reads the report
+
+    report_path = os.path.join(out, "junit.xml")
+    monkeypatch.setenv(
+        "AIRFLOW_PYTEST_MAX_REPORT_MIB", str((os.path.getsize(report_path) - 1) / 2**20)
+    )
+    assert src.get_detail(ref) is None
+    assert src.test_outcomes(ref) is None
+    assert len(src.list_summaries()) == 1  # still listed, still deletable
+
+
+def test_a_huge_summary_does_not_hide_the_run(reports_root, monkeypatch):
+    # ``summary.failed_node_ids`` is not bounded by anything, so a run with tens of thousands
+    # of failures pushes the per-test rows far into the file. Looking for them in a fixed
+    # window made exactly those runs vanish -- from the list and from retention with it.
+    ref = ReportRef("dag", "run", "task", 1)
+    out = write_report(reports_root, ref, passed=1, failed=1)
+    meta_path = os.path.join(out, META_FILENAME)
+    with open(meta_path, encoding="utf-8") as fh:
+        meta = json.load(fh)
+    meta["summary"]["failed_node_ids"] = [
+        f"tests/t.py::test_{i}[{'q' * 80}]" for i in range(5000)
+    ]
+    meta["tests"] = [[f"tests/t.py::test_{i}", "failed", 0.1] for i in range(20_000)]
+    with open(meta_path, "w", encoding="utf-8") as fh:
+        json.dump(meta, fh, indent=2)
+    monkeypatch.setenv(
+        "AIRFLOW_PYTEST_MAX_META_MIB", str((os.path.getsize(meta_path) - 1) / 2**20)
+    )
+
+    (summary,) = FileSystemReportSource(report_root=reports_root).list_summaries()
+    assert summary.ref == ref
+    assert (summary.passed, summary.failed) == (1, 1)
+
+
+def test_only_an_oversized_report_is_reported_as_too_large(reports_root, monkeypatch):
+    # "Too large" is a specific claim. A run whose report is missing or corrupt has a
+    # different problem, and naming the wrong one sends its owner to the wrong fix.
+    ref = ReportRef("dag", "run", "task", 1)
+    out = write_report(reports_root, ref, passed=1)
+    src = FileSystemReportSource(report_root=reports_root)
+    report_path = os.path.join(out, "junit.xml")
+    assert src.report_too_large(ref) is False
+
+    monkeypatch.setenv("AIRFLOW_PYTEST_MAX_REPORT_MIB", "0.00001")
+    assert src.report_too_large(ref) is True
+
+    os.remove(report_path)
+    assert src.report_too_large(ref) is False  # missing is not "too large"
+    assert src.report_too_large(ReportRef("dag", "gone", "task", 1)) is False
+
+
+def test_a_meta_that_cannot_answer_is_not_searched_on_every_scan(
+    reports_root, monkeypatch
+):
+    # Searching a file that has no per-test rows reads up to the whole budget, and the scan
+    # repeats every couple of seconds: one foreign 40 MiB file had every scan read 16 MiB to
+    # reach the same answer. The verdict is remembered until the file itself changes.
+    ref = ReportRef("dag", "run", "task", 1)
+    out = write_report(reports_root, ref, passed=1)
+    meta_path = os.path.join(out, META_FILENAME)
+    with open(meta_path, "w", encoding="utf-8") as fh:
+        json.dump({"junk": ["x" * 100] * 3000}, fh)
+    monkeypatch.setenv(
+        "AIRFLOW_PYTEST_MAX_META_MIB", str((os.path.getsize(meta_path) - 1) / 2**20)
+    )
+    filesystem._unusable_meta.clear()
+    src = FileSystemReportSource(report_root=reports_root)
+
+    reads = []
+    real_open = Path.open
+
+    def counting(self, *a, **k):
+        if self.name == META_FILENAME:
+            reads.append(str(self))
+        return real_open(self, *a, **k)
+
+    monkeypatch.setattr(Path, "open", counting)
+    for _ in range(4):
+        src._invalidate_scan()
+        assert src.list_summaries() == []
+    assert len(reads) == 1, reads  # searched once, remembered after that
+
+    # A file that CHANGED is searched again: it may have been re-archived.
+    with open(meta_path, "a", encoding="utf-8") as fh:
+        fh.write(" ")
+    src._invalidate_scan()
+    src.list_summaries()
+    assert len(reads) == 2
+
+
+def test_the_head_search_budget_counts_bytes_not_characters(reports_root, monkeypatch):
+    # The limit that sends us down this path is in bytes. Measuring the search in decoded
+    # characters instead let a file of 4-byte characters be read at several times its
+    # budget -- the amplification this path exists to avoid.
+    ref = ReportRef("dag", "run", "task", 1)
+    out = write_report(reports_root, ref, passed=1)
+    meta_path = os.path.join(out, META_FILENAME)
+    with open(meta_path, encoding="utf-8") as fh:
+        meta = json.load(fh)
+    meta["summary"]["failed_node_ids"] = ["\U0001f600" * 200 for _ in range(4000)]
+    meta["tests"] = [
+        ["tests/t.py::test_a", "passed", 0.1]
+    ]  # last, as the producer writes
+    with open(meta_path, "w", encoding="utf-8") as fh:
+        json.dump(meta, fh, ensure_ascii=False)
+
+    raw = Path(meta_path).read_bytes()
+    at_byte = raw.find(b'"tests":')
+    at_char = raw.decode("utf-8").find('"tests":')
+    assert at_char < at_byte  # the head really is mostly multi-byte
+
+    # A budget BETWEEN the two offsets: counting characters would still reach the rows,
+    # counting bytes must stop short of them.
+    monkeypatch.setenv(
+        "AIRFLOW_PYTEST_MAX_META_MIB", str(((at_char + at_byte) // 2) / 2**20)
+    )
+    filesystem._unusable_meta.clear()
+    assert FileSystemReportSource(report_root=reports_root).list_summaries() == []
+
+
+def test_a_meta_whose_head_does_not_parse_is_also_remembered(reports_root, monkeypatch):
+    # Reaching the rows and then failing to parse costs the same walk through the file as
+    # never finding them. Remembering only the second case left the first re-reading itself
+    # on every scan, which is the cost this whole path exists to avoid.
+    ref = ReportRef("dag", "run", "task", 1)
+    out = write_report(reports_root, ref, passed=1)
+    meta_path = os.path.join(out, META_FILENAME)
+    # Has the marker, but the head before it is not a JSON object we can close.
+    body = '["' + "x" * 4000 + '", ' * 100 + '"end"], "tests": [["a", "passed", 0.1]]}'
+    with open(meta_path, "w", encoding="utf-8") as fh:
+        fh.write(body)
+    monkeypatch.setenv(
+        "AIRFLOW_PYTEST_MAX_META_MIB", str((os.path.getsize(meta_path) - 1) / 2**20)
+    )
+    filesystem._unusable_meta.clear()
+    src = FileSystemReportSource(report_root=reports_root)
+
+    reads = []
+    real_open = Path.open
+
+    def counting(self, *a, **k):
+        if self.name == META_FILENAME:
+            reads.append(str(self))
+        return real_open(self, *a, **k)
+
+    monkeypatch.setattr(Path, "open", counting)
+    for _ in range(4):
+        src._invalidate_scan()
+        assert src.list_summaries() == []
+    assert len(reads) == 1, reads

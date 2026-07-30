@@ -21,6 +21,7 @@ import json
 import logging
 import math
 import os
+import re
 import shutil
 import stat
 import threading
@@ -29,18 +30,41 @@ import uuid
 import zipfile
 from collections.abc import Iterator
 from pathlib import Path
-from typing import IO, Any
+from typing import IO, Any, cast
 
 from airflow_pytest_operator import JUnitResultParser
 
-from ..config import get_reports_root, get_scan_cache_ttl, get_success_threshold
-from ..layout import ALLURE_DIRNAME, META_FILENAME, REPORT_FILENAME, ReportLayout
+from ..config import (
+    get_max_meta_bytes,
+    get_max_report_bytes,
+    get_reports_root,
+    get_scan_cache_ttl,
+    get_success_threshold,
+)
+from ..layout import (
+    ALLURE_DIRNAME,
+    META_FILENAME,
+    REPORT_FILENAME,
+    VERDICTS_FILENAME,
+    ReportLayout,
+)
 from ..models import (
     CaseView,
     ReportDetail,
     ReportRef,
     ReportSummary,
+    Verdict,
     run_succeeds,
+)
+from ..triage import (
+    CATEGORIES,
+    canonical_node_key,
+    triage_rollup,
+    triage_view,
+    verdicts_from_document,
+)
+from ..triage import (
+    label as triage_label,
 )
 from .base import ReportSource
 
@@ -55,8 +79,115 @@ except Exception:  # pragma: no cover - fallback path
 
 _log = logging.getLogger(__name__)
 
-#: Cap one case's captured output so a pathological report can't bloat a response.
+#: Cap one case's failure text and captured output (each) so a pathological report can't
+#: bloat a response. A test that logs a megabyte is exactly when the viewer must stay usable.
+#:
+#: All three caps are in UTF-8 BYTES, which is what the response is measured in. Counting
+#: Python characters instead lets any non-ASCII text through at up to four times the limit
+#: -- a suite printing emoji stayed inside a 2,000,000-"character" budget while sending
+#: 8 MB, and the same trick works with Cyrillic or CJK at 2x-3x.
 _MAX_OUTPUT = 16000
+#: Caps on a WHOLE run's text. The per-case cap still multiplies by the number of tests:
+#: 2,000 tests at 16KB each would be a 32MB JSON response either way, which is why the
+#: diagnosis gets its own, larger budget rather than none at all.
+_MAX_RUN_OUTPUT = 2_000_000
+_MAX_RUN_FAILURES = 4_000_000
+#: Shown for the cases past those budgets, so a test that printed something -- or broke --
+#: is never rendered as one that did neither.
+_OUTPUT_BUDGET_SPENT = (
+    "…(output omitted: this run's captured output exceeded the limit)"
+)
+_FAILURE_BUDGET_SPENT = (
+    "…(traceback omitted: this run's failure text exceeded the limit)"
+)
+#: pytest's banner around a captured stream: ``------- Captured Log -------``.
+_CAPTURE_RULE = re.compile(r"^-{3,}\s*(Captured [^-]*?)\s*-{3,}$")
+
+
+#: Files already reported as too large, as ``path -> size``. The scan runs on a timer, so
+#: without this one bad file writes the same ERROR every few seconds for as long as it sits
+#: in the tree -- an operator sees the problem once and then only noise. Bounded: a tree with
+#: more broken files than this has a bigger problem than a log line.
+_MAX_REPORTED_OVERSIZED = 512
+_reported_oversized: dict[str, int] = {}
+#: Oversized files already shown NOT to be one of ours, as ``path -> (size, mtime_ns)``.
+#: Looking for the rows in a file that has none reads up to the whole budget, and the scan
+#: repeats every couple of seconds: without this, one 40MiB foreign file had every scan read
+#: 16MiB to reach the same answer, forever. Re-checked whenever the file changes.
+_unusable_meta: dict[str, tuple[int, int]] = {}
+
+
+def _parsable_report(report_path: str) -> bool:
+    """Whether ``report_path`` exists and is small enough for the viewer to parse.
+
+    Parsing builds a tree that measures up to 5x the file on disk -- 45MiB of case-dense XML
+    peaked at 220MiB and 5.2s of CPU -- inside the Airflow api-server shared with everything
+    else it serves. The producer trims an archive past 32MB down to its failures, so a report
+    near the limit was not written by a healthy run: refuse it rather than let one run take
+    the server down with it. The limit is :func:`get_max_report_bytes`
+    (``AIRFLOW_PYTEST_MAX_REPORT_MIB``, ``0`` = none), because an operator who really does
+    archive more should be able to say so.
+
+    Every path that parses a report goes through here -- opening a run and the per-test
+    fallback for archives without compact rows -- so the bound cannot be walked around by
+    asking a different question.
+    """
+    try:
+        report_bytes = os.path.getsize(report_path)
+    except OSError:  # missing or unreadable
+        return False
+    cap = get_max_report_bytes()
+    if not cap or report_bytes <= cap:
+        return True
+    key = str(report_path)
+    first_time = _reported_oversized.get(key) != report_bytes
+    if first_time:
+        if len(_reported_oversized) >= _MAX_REPORTED_OVERSIZED:
+            _reported_oversized.clear()
+        _reported_oversized[key] = report_bytes
+    log = _log.error if first_time else _log.debug
+    log(
+        "Refusing to open %s: %.0f MiB of JUnit XML is past the %.0f MiB the viewer will "
+        "parse. Archive the suite with logs=False or logs_only_fail=True, or raise "
+        "AIRFLOW_PYTEST_MAX_REPORT_MIB.",
+        report_path,
+        report_bytes / 2**20,
+        cap / 2**20,
+    )
+    return False
+
+
+def _cap(text: str, limit: int = -1) -> tuple[str, int]:
+    """Truncate one block to ``limit`` UTF-8 bytes; return it and the bytes it costs.
+
+    Never splits a character: the tail of a clipped multi-byte sequence is dropped rather
+    than emitted as a replacement glyph. ``limit`` defaults to :data:`_MAX_OUTPUT`.
+    """
+    if not text:
+        return "", 0
+    cap = _MAX_OUTPUT if limit < 0 else limit
+    raw = text.encode("utf-8")
+    if len(raw) <= cap:
+        return text, len(raw)
+    clipped = raw[:cap].decode("utf-8", "ignore") + "\n…(truncated)"
+    return clipped, len(clipped.encode("utf-8"))
+
+
+#: How far the identity-only reader will look for the per-test rows when the ``meta.json``
+#: cap (:func:`get_max_meta_bytes`, ``AIRFLOW_PYTEST_MAX_META_MIB``) is switched off. Nothing
+#: is refused then, but that search still needs a ceiling.
+_MAX_META_BYTES_FALLBACK = 64 * 1024 * 1024
+#: Chunk size when looking for the per-test rows in an oversized ``meta.json``. Everything
+#: before them -- identity, timestamps, the summary -- is normally a few hundred bytes, but
+#: ``summary.failed_node_ids`` is not bounded by anything: a run with tens of thousands of
+#: failures pushes the rows well past any fixed window, and reading only a fixed head made
+#: exactly those runs vanish from the list (and from retention). So the search walks the file
+#: in chunks instead, bounded by the same limit that refused the parse in the first place.
+_META_HEAD_CHUNK = 256 * 1024
+#: Cap on a run's verdicts sidecar before it is parsed. The producer's own caps put the
+#: worst case near 500KB (200 verdicts x two 1000-char fields); anything far past that was
+#: not written by us, and this parse happens inside the api-server on every detail request.
+_MAX_VERDICTS_BYTES = 4 * 1024 * 1024
 
 
 class _ZipSink:
@@ -98,40 +229,50 @@ def _safe_allure_files(allure_dir: str) -> list[str]:
     ]
 
 
-def _open_allure_file(path: str) -> IO[bytes] | None:
-    """Open one Allure result for reading, or ``None`` if it isn't safe to.
+def open_archived_file(path: str, kind: str, *, mode: str = "rb") -> IO[Any] | None:
+    """Open a file the WORKER wrote inside a run's archive, or ``None`` if it isn't safe to.
 
-    Three hazards, all closed atomically at ``open`` rather than by a prior check that an
-    attacker could invalidate in between:
+    Every one of these is named by us but created by arbitrary pytest code on the worker,
+    so the same three hazards apply to all of them -- Allure results, the verdicts sidecar,
+    anything added later. All are closed atomically at ``open`` rather than by a prior check
+    an attacker could invalidate in between:
 
     * ``O_NOFOLLOW`` -- a symlink is never followed, so a test cannot point an entry at the
-      Fernet key or ``/etc/passwd`` and have the reader package it up. This also removes the
+      Fernet key or ``/etc/passwd`` and have the reader read it out. This also removes the
       swap-after-validation race entirely: there is no window to swap into.
     * ``O_NONBLOCK`` + ``S_ISREG`` -- a FIFO would otherwise block ``open`` FOREVER waiting
-      for a writer, pinning a server thread per download; devices and sockets are refused
-      for the same reason. Non-blocking has no effect on the regular files we keep.
+      for a writer, pinning a server thread per request; devices and sockets are refused for
+      the same reason. Non-blocking has no effect on the regular files we keep.
     """
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
         fd = os.open(path, flags)
     except OSError:  # symlink (ELOOP), vanished, or unreadable
         _log.warning(
-            "skipping Allure entry that is a link or unreadable: %s",
+            "skipping %s that is a link or unreadable: %s",
+            kind,
             " ".join(str(path).split())[:200],
         )
         return None
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             _log.warning(
-                "skipping non-regular Allure entry (fifo/device/socket): %s",
+                "skipping non-regular %s (fifo/device/socket): %s",
+                kind,
                 " ".join(str(path).split())[:200],
             )
             os.close(fd)
             return None
-        return os.fdopen(fd, "rb")
+        return os.fdopen(fd, mode, encoding=None if "b" in mode else "utf-8")
     except OSError:
         os.close(fd)
         return None
+
+
+def _open_allure_file(path: str) -> IO[bytes] | None:
+    """One Allure result, opened under the archive-file guarantees above."""
+    handle = open_archived_file(path, "Allure entry")
+    return cast("IO[bytes] | None", handle)
 
 
 class FileSystemReportSource(ReportSource):
@@ -165,6 +306,78 @@ class FileSystemReportSource(ReportSource):
         """Whether JUnit XML is parsed with the hardened ``defusedxml`` parser."""
         return _SECURE_XML
 
+    @staticmethod
+    def _meta_identity_only(meta_file: Path) -> dict[str, Any] | None:
+        """Identity and summary from a meta.json too large to parse, or ``None``.
+
+        The reason the file is huge is the per-test rows we write LAST, and everything the
+        run list needs sits before them -- so the head is read and closed off there, and the
+        rows are never decoded. Without this a run whose meta crossed the cap would vanish
+        from the list, and with it from retention: its bytes would stop counting toward the
+        size budget and no sweep would ever reclaim them, which is how a tree ends up
+        permanently over its limit. Returns ``None`` for anything not shaped like ours, so
+        the caller still skips a genuinely foreign file.
+        """
+        key = str(meta_file)
+        try:
+            st = os.stat(meta_file)
+        except OSError:
+            return None
+        if _unusable_meta.get(key) == (st.st_size, st.st_mtime_ns):
+            return None  # already searched this exact file and it has no rows
+        # The KEY, not the substring: a node id inside the rows cannot contain an unescaped
+        # quote, so the first '"tests":' in the file is always the key we cut at.
+        #
+        # Read as BYTES. Decoding as we go would measure the budget in characters while the
+        # limit that sent us here is in bytes: a file of 4-byte characters then read four
+        # times its budget -- an 8MiB limit peaked at 72MiB -- which is the amplification
+        # this whole path exists to avoid.
+        marker = b'"tests":'
+        budget = get_max_meta_bytes() or _MAX_META_BYTES_FALLBACK
+        # bytearray, not bytes: ``+=`` on bytes copies the whole buffer each time, so the
+        # last chunk before the budget briefly holds it twice.
+        head = bytearray()
+        cut = -1
+        try:
+            with meta_file.open("rb") as fh:
+                while len(head) < budget:
+                    chunk = fh.read(_META_HEAD_CHUNK)
+                    if not chunk:
+                        break  # no rows at all: not our shape
+                    head += chunk
+                    cut = head.find(marker)
+                    if cut >= 0:
+                        break
+        except OSError:
+            return None
+
+        def give_up() -> None:
+            """Remember that this exact file cannot answer, so later scans skip the read.
+
+            EVERY failure ends here, not just a missing marker: the rows being further in
+            than we will read, a head that does not parse, a head that is not an object.
+            All of them cost the same walk through the file, and the scan repeats every few
+            seconds -- one unreadable file would otherwise re-read itself forever.
+            """
+            if len(_unusable_meta) >= _MAX_REPORTED_OVERSIZED:
+                _unusable_meta.clear()
+            _unusable_meta[key] = (st.st_size, st.st_mtime_ns)
+
+        if cut <= 0:  # not our shape, or the rows are past the budget
+            give_up()
+            return None
+        # The cut is at a key boundary, so the prefix is whole UTF-8 -- but the file was
+        # written by something else if it is not, and that is a skip, not a crash.
+        try:
+            data = json.loads(head[:cut].decode("utf-8").rstrip().rstrip(",") + "}")
+        except (ValueError, UnicodeDecodeError):
+            give_up()
+            return None
+        if not isinstance(data, dict):
+            give_up()
+            return None
+        return data
+
     def _scan_disk(self) -> list[ReportSummary]:
         """Walk the tree and build every summary, newest first (uncached)."""
         root = Path(self._report_root)
@@ -174,6 +387,10 @@ class FileSystemReportSource(ReportSource):
         threshold = get_success_threshold()  # once per scan
         for meta_file in root.rglob(META_FILENAME):
             meta = self._load_meta(meta_file)
+            if meta is None:
+                # Refused (almost always: too large to parse). Keep the run listed if its
+                # head still identifies it -- see :meth:`_meta_identity_only`.
+                meta = self._meta_identity_only(meta_file)
             if meta is None:
                 continue
             summary = self._summary_from_meta(meta, threshold)
@@ -236,7 +453,7 @@ class FileSystemReportSource(ReportSource):
         if report_dir is None:
             return None
         report_path = os.path.join(report_dir, REPORT_FILENAME)
-        if not os.path.exists(report_path):
+        if not _parsable_report(report_path):
             return None
 
         # Prefer stored counts; success is re-derived from the pass-rate threshold.
@@ -265,8 +482,14 @@ class FileSystemReportSource(ReportSource):
                 created_at=None,
             )
 
-        # The parser keeps only the short message; read the XML for full per-case output.
-        outputs = self._case_outputs(report_path)
+        # The parser keeps only the short message; read the XML for the full traceback and
+        # whatever the test printed or logged.
+        details = self._case_details(report_path)
+        # AI verdicts are keyed by the canonical dotted node id, which is the form the JUnit
+        # parser already reconstructs -- re-canonicalizing here costs nothing and keeps the
+        # join working for a source whose cases arrive in pytest's native slash form.
+        rollup = triage_rollup(meta)
+        verdicts = self._load_verdicts(report_dir, rollup) if rollup is not None else {}
         cases = tuple(
             CaseView(
                 node_id=c.node_id,
@@ -274,7 +497,10 @@ class FileSystemReportSource(ReportSource):
                 classname=c.classname,
                 outcome=c.outcome,
                 time=c.time,
-                message=outputs.get((c.classname, c.name), c.message),
+                message=details.get((c.classname, c.name), (c.message or "", ""))[0]
+                or c.message,
+                output=details.get((c.classname, c.name), ("", ""))[1] or None,
+                verdict=verdicts.get(canonical_node_key(c.node_id)),
             )
             for c in result.cases
         )
@@ -284,7 +510,28 @@ class FileSystemReportSource(ReportSource):
             alerts=_alerts_from_meta(meta),
             coverage=_coverage_from_meta(meta),
             coverage_threshold=_coverage_threshold_from_meta(meta),
+            # Summarised over the verdicts actually attached, so the run-level card can
+            # never advertise a category the case table has no row for.
+            triage=triage_view(rollup, [c.verdict for c in cases if c.verdict]),
         )
+
+    def verdicts(self, ref: ReportRef) -> dict[str, Verdict]:
+        report_dir = self._safe_dir(ref)
+        if report_dir is None:
+            return {}
+        # verdicts.json first, and usually last: it is self-sufficient. Reading meta.json
+        # here as well would double the parse for every run of a heatmap window -- and that
+        # file, not this one, is the expensive read (it carries a row per test). Measured at
+        # 100 runs x 300 tests: 14ms -> 26ms. Only an archive written before the split, which
+        # keeps its verdicts inline in the roll-up, pays for the meta parse -- and it is the
+        # sidecar's PRESENCE that decides, not its contents: a triaged run with nothing to
+        # judge has an empty one, and reading meta for it would put the cost right back.
+        if os.path.exists(os.path.join(report_dir, VERDICTS_FILENAME)):
+            return self._load_verdicts(report_dir, None)
+        rollup = triage_rollup(
+            self._load_meta(Path(os.path.join(report_dir, META_FILENAME)))
+        )
+        return self._load_verdicts(report_dir, rollup) if rollup else {}
 
     def test_outcomes(self, ref: ReportRef) -> dict[str, dict[str, Any]] | None:
         report_dir = self._safe_dir(ref)
@@ -307,9 +554,11 @@ class FileSystemReportSource(ReportSource):
                         dur = 0.0
                     out[str(row[0])] = {"outcome": str(row[1]), "duration": dur}
             return out
-        # Older archive lacking the per-test map: parse junit.xml on demand.
+        # Older archive lacking the per-test map: parse junit.xml on demand. Same guard as
+        # opening a run -- this path is reached from the list views, so leaving it out would
+        # have made one refused report parsable through the back door.
         report_path = os.path.join(report_dir, REPORT_FILENAME)
-        if not os.path.isfile(report_path):
+        if not _parsable_report(report_path):
             return None
         try:
             result = self._parser.parse(report_path)
@@ -326,10 +575,51 @@ class FileSystemReportSource(ReportSource):
         }
 
     def delete(self, ref: ReportRef) -> bool:
+        """Remove one run's directory. ``True`` only when it is really gone.
+
+        Storage errors are reported, not swallowed: the viewer drops a deleted run from
+        the list, and a delete that silently failed would leave the user believing space
+        was reclaimed while the files stay behind -- on a read-only mount or an NFS share
+        that lost its lock, for every run they picked. A partial ``rmtree`` also counts as
+        a failure, since what is left behind is a truncated run.
+        """
         target = self._safe_dir(ref)
         if target is None or not os.path.isdir(target):
             return False
-        shutil.rmtree(target, ignore_errors=True)
+        failure: OSError | None = None
+        try:
+            shutil.rmtree(target)
+        except OSError as exc:
+            # Logged below, and only if it mattered: two callers deleting the same run --
+            # a retention sweep while someone clicks delete -- race here constantly, and
+            # the loser's FileNotFoundError is a non-event, not a page of traceback.
+            failure = exc
+        # The tree walk can fail per entry, so confirm rather than trust the return.
+        if os.path.exists(target):
+            self._invalidate_scan()  # a partial delete still changed the run
+            # rmtree is not atomic: by the time it hits an entry it may not remove, it has
+            # already unlinked the rest. Saying only "storage refused" would leave an
+            # operator looking for a run that no longer exists -- the two outcomes need
+            # different actions, so name which one happened.
+            if os.path.exists(os.path.join(target, META_FILENAME)):
+                _log.error(
+                    "Report %s still exists after delete: storage refused the removal "
+                    "and the run is intact",
+                    target,
+                    exc_info=failure,
+                )
+            else:
+                _log.error(
+                    "Report %s was only partially deleted: storage refused part of the "
+                    "removal and the run is no longer readable. Its directory is now "
+                    "invisible to the viewer and to retention -- remove it by hand",
+                    target,
+                    exc_info=failure,
+                )
+            return False
+        if failure is not None:
+            # Gone, but not by us: another deleter finished first. Nothing to report.
+            _log.debug("Report %s vanished while being deleted: %s", target, failure)
         # Remove now-empty ancestors so the tree doesn't accumulate orphan dirs.
         self._prune_empty_parents(
             os.path.dirname(target), os.path.realpath(self._report_root)
@@ -392,6 +682,29 @@ class FileSystemReportSource(ReportSource):
             return True
         except Exception:
             _log.exception("Failed to record coverage in %s", meta_file)
+            return False
+
+    def exists(self, ref: ReportRef) -> bool:
+        """Whether the run's directory is still there (one stat, no parsing)."""
+        target = self._safe_dir(ref)
+        return target is not None and os.path.isdir(target)
+
+    def report_too_large(self, ref: ReportRef) -> bool:
+        """Whether this run's ``junit.xml`` is past :func:`get_max_report_bytes`.
+
+        Asked ONLY to explain a refusal, so it never inspects anything else: a run whose
+        report is missing or corrupt is not "too large", and saying so would send its owner
+        after the wrong problem.
+        """
+        report_dir = self._safe_dir(ref)
+        if report_dir is None:
+            return False
+        cap = get_max_report_bytes()
+        if not cap:
+            return False
+        try:
+            return os.path.getsize(os.path.join(report_dir, REPORT_FILENAME)) > cap
+        except OSError:  # missing or unreadable -> a different problem entirely
             return False
 
     def report_size(self, ref: ReportRef) -> int:
@@ -529,18 +842,60 @@ class FileSystemReportSource(ReportSource):
     # -- internals -------------------------------------------------------
 
     @staticmethod
-    def _case_outputs(report_path: str) -> dict[tuple[str, str], str]:
-        """Map ``(classname, name) -> full captured output`` from the XML (best-effort)."""
+    def _clean_capture(text: str) -> str:
+        """Trim pytest's banner rules out of a captured stream.
+
+        pytest brackets each stream with a full-width rule
+        (``------- Captured Log -------``). The viewer gives the block its own heading, so
+        the rule is redundant width -- on a phone it is the widest line on the page. The
+        stream NAME is kept: one ``system-out`` can hold both log and stdout, and the
+        boundary between them is the only thing separating them.
+        """
+        # [heading or None, body lines] per stream. pytest emits a rule for every stream it
+        # was asked to capture, including the ones nothing wrote to -- a heading with an
+        # empty body under it is noise the reader has to scroll past on every single test.
+        sections: list[tuple[str | None, list[str]]] = [(None, [])]
+        for line in text.splitlines():
+            m = _CAPTURE_RULE.match(line)
+            if m:
+                sections.append((f"--- {m.group(1).strip()} ---", []))
+            else:
+                sections[-1][1].append(line)
+        kept: list[str] = []
+        for heading, body in sections:
+            if not any(ln.strip() for ln in body):
+                continue
+            if heading:
+                kept.append(heading)
+            kept.append("\n".join(body).strip("\n"))
+        return "\n".join(kept).strip()
+
+    @classmethod
+    def _case_details(cls, report_path: str) -> dict[tuple[str, str], tuple[str, str]]:
+        """Map ``(classname, name) -> (failure text, captured output)`` (best-effort).
+
+        Kept apart on purpose: the failure is the diagnosis and the capture is the
+        evidence, they are read in that order, and only the first should decide how
+        failures cluster.
+
+        Both halves are bounded twice: :data:`_MAX_OUTPUT` per case, and a run-wide budget
+        (:data:`_MAX_RUN_OUTPUT` / :data:`_MAX_RUN_FAILURES`). The per-case cap alone still
+        multiplies by the number of tests, so without the second one a chatty suite -- or a
+        suite that broke wide -- is a JSON response of tens of megabytes for the browser to
+        hold. The diagnosis gets the larger budget and is spent last.
+        """
+        budget = _MAX_RUN_OUTPUT
+        fail_budget = _MAX_RUN_FAILURES
         try:
             tree = _xml_parse(report_path)
         except Exception:
             return {}
         root = tree.getroot()
         suites = list(root.iter("testsuite")) if root.tag == "testsuites" else [root]
-        out: dict[tuple[str, str], str] = {}
+        out: dict[tuple[str, str], tuple[str, str]] = {}
         for suite in suites:
             for tc in suite.findall("testcase"):
-                sections: list[str] = []
+                failure = ""
                 # Element truthiness is child-based, so test ``is not None`` explicitly.
                 for tag in ("failure", "error", "skipped"):
                     node = tc.find(tag)
@@ -549,29 +904,121 @@ class FileSystemReportSource(ReportSource):
                     parts = [
                         p for p in (node.get("message"), (node.text or "").strip()) if p
                     ]
-                    body = "\n".join(parts).strip()
-                    if body:
-                        sections.append(body)
+                    failure = "\n".join(parts).strip()
                     break
-                # Captured logs -- present even for passed tests under junit_logging=all.
+                # Captured streams -- present for passed tests too, but only when the run
+                # was archived with ``junit_logging`` on (which the parser guarantees).
+                sections: list[str] = []
                 for tag, label in (
                     ("system-out", "Captured stdout / log"),
                     ("system-err", "Captured stderr"),
                 ):
                     node = tc.find(tag)
-                    body = (node.text or "").strip() if node is not None else ""
-                    if body:
-                        sections.append(f"--- {label} ---\n{body}")
-                if not sections:
+                    # Slice before cleaning: past the per-case cap the text is discarded
+                    # anyway, and splitting a megabyte into lines to throw it away is the
+                    # expensive half of parsing a chatty report.
+                    raw = (
+                        (node.text or "")[: _MAX_OUTPUT + 1] if node is not None else ""
+                    )
+                    body = cls._clean_capture(raw) if raw.strip() else ""
+                    if not body:
+                        continue
+                    # pytest names each stream itself ("Captured Log", "Captured Out"),
+                    # and one system-out can hold both. Adding our own heading on top of
+                    # that stacks three titles over one block, so label only what arrived
+                    # unlabelled.
+                    sections.append(
+                        body
+                        if body.startswith("--- Captured")
+                        else f"--- {label} ---\n{body}"
+                    )
+                failure, cost = _cap(failure)
+                if failure:
+                    if fail_budget <= 0:
+                        failure = _FAILURE_BUDGET_SPENT
+                    elif cost > fail_budget:
+                        failure, _ = _cap(failure, fail_budget)
+                        fail_budget = 0
+                    else:
+                        fail_budget -= cost
+                captured, cost = _cap("\n\n".join(sections))
+                if captured:
+                    if budget <= 0:
+                        # Say it rather than showing an empty block: a test that printed
+                        # something must not look like a test that printed nothing.
+                        captured = _OUTPUT_BUDGET_SPENT
+                    elif cost > budget:
+                        captured, _ = _cap(captured, budget)
+                        budget = 0
+                    else:
+                        budget -= cost
+                if not failure and not captured:
                     continue
-                text = "\n\n".join(sections)
-                if len(text) > _MAX_OUTPUT:
-                    text = text[:_MAX_OUTPUT] + "\n…(truncated)"
-                out[(tc.get("classname", ""), tc.get("name", ""))] = text
+                out[(tc.get("classname", ""), tc.get("name", ""))] = (failure, captured)
         return out
 
     @staticmethod
+    def _load_verdicts(
+        report_dir: str, rollup: dict[str, Any] | None
+    ) -> dict[str, Verdict]:
+        """The run's per-test AI verdicts from its ``verdicts.json``.
+
+        The file is named by us but written on the worker by the tested project's own
+        process, and this parse happens per detail request inside the Airflow api-server --
+        so it is opened under the archive-file guarantees (never a symlink, never a FIFO;
+        see :func:`open_archived_file`), sized on the descriptor already held rather than on
+        the path, and parsed defensively. Falls back to verdicts stored inline in the
+        roll-up, which is where archives written before the split keep them.
+        """
+        path = os.path.join(report_dir, VERDICTS_FILENAME)
+        document: Any = None
+        handle = open_archived_file(path, VERDICTS_FILENAME, mode="r")
+        if handle is not None:
+            try:
+                with handle:
+                    size = os.fstat(handle.fileno()).st_size
+                    if size > _MAX_VERDICTS_BYTES:
+                        _log.warning(
+                            "Ignoring oversized %s (%d bytes) in %s",
+                            VERDICTS_FILENAME,
+                            size,
+                            report_dir,
+                        )
+                    else:
+                        # RecursionError, not ValueError: a nesting bomb ("[[[[…") is how
+                        # json.load fails on one, and it would otherwise 500 the endpoint.
+                        document = json.load(handle)
+            except (OSError, ValueError, RecursionError):
+                _log.debug(
+                    "No readable %s in %s", VERDICTS_FILENAME, report_dir, exc_info=True
+                )
+        return verdicts_from_document(document, fallback=rollup)
+
+    @staticmethod
     def _load_meta(meta_file: Path) -> dict[str, Any] | None:
+        try:
+            meta_bytes = os.path.getsize(meta_file)
+        except OSError as exc:
+            _log.warning("Skipping unreadable %s: %s", meta_file, exc)
+            return None
+        meta_cap = get_max_meta_bytes()
+        if meta_cap and meta_bytes > meta_cap:
+            key = str(meta_file)
+            first_time = _reported_oversized.get(key) != meta_bytes
+            if first_time:
+                if len(_reported_oversized) >= _MAX_REPORTED_OVERSIZED:
+                    _reported_oversized.clear()
+                _reported_oversized[key] = meta_bytes
+            log = _log.error if first_time else _log.debug
+            log(
+                "Leaving the test rows in %s unparsed: %.0f MiB is past the %.0f MiB "
+                "(AIRFLOW_PYTEST_MAX_META_MIB) a tree scan will decode for one run. The run "
+                "stays listed; its per-test data comes from junit.xml instead.",
+                meta_file,
+                meta_bytes / 2**20,
+                meta_cap / 2**20,
+            )
+            return None
         try:
             with meta_file.open("r", encoding="utf-8") as fh:
                 data = json.load(fh)
@@ -622,6 +1069,10 @@ class FileSystemReportSource(ReportSource):
             created_at=_opt_str(meta.get("created_at")),
             logical_date=_opt_str(meta.get("logical_date")),
             has_allure=bool(meta.get("allure")),
+            # A triaged run, even one whose provider produced nothing: the list marks it so
+            # "which runs were analysed" is answerable without opening each of them.
+            has_triage=isinstance(meta.get("triage"), dict),
+            triage=_triage_mix_from_meta(meta),
         )
 
 
@@ -659,6 +1110,39 @@ def _unit_fraction(value: Any) -> float | None:
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         return float(value) if 0.0 <= value <= 1.0 else None
     return None
+
+
+def _triage_mix_from_meta(meta: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The run's verdict mix for the LIST view, straight from the stored roll-up.
+
+    Deliberately tiny -- categories with a count, plus whether the pass broke. The scan
+    parses every run's meta, so anything bigger here is paid on every dashboard load.
+    """
+    rollup = triage_rollup(meta)
+    if rollup is None:
+        return None
+    raw = rollup.get("counts")
+    counts = (
+        {
+            name: int(raw[name])
+            for name in CATEGORIES
+            if isinstance(raw, dict)
+            and isinstance(raw.get(name), int)
+            and raw[name] > 0
+        }
+        if isinstance(raw, dict)
+        else {}
+    )
+    incomplete = rollup.get("incomplete")
+    # The model name distinguishes the three states the list marks: a provider judged this
+    # run (named model), the pass broke (incomplete), or it was report-only (neither).
+    # Normalised through the same clip the detail view uses -- this string is echoed once
+    # per triaged run in a response that already carries thousands of them.
+    return {
+        "model": triage_label(rollup.get("model")),
+        "counts": counts,
+        "incomplete": bool(incomplete),
+    }
 
 
 def _coverage_from_meta(meta: dict[str, Any] | None) -> float | None:

@@ -30,6 +30,8 @@ import re
 import pytest
 from playwright.sync_api import expect
 
+from conftest import _load_dash  # type: ignore[import-not-found]
+
 pytestmark = pytest.mark.ui
 
 
@@ -1413,3 +1415,101 @@ def test_panel_prefs_follow_a_change_made_in_another_tab(dash, base_url):
         expect(page.locator("#chart-card")).to_be_hidden(timeout=5000)
     finally:
         other.close()
+
+
+def test_case_row_shows_what_the_test_printed_apart_from_its_traceback(dash):
+    # The archive is the only copy of a test's own prints and log lines, and reading them
+    # is most of diagnosing a failure -- but glued onto the traceback they read as part of
+    # the stack, and on a PASSING test there is no traceback for them to hide behind.
+    page = dash.page
+    page.click("tr.lgrp:has-text('alpha')")
+    page.locator("tr.clickable").first.click()
+    expect(page.locator("dialog#detail")).to_be_visible()
+    page.wait_for_selector("#case-head th.sortable[data-key='outcome']")
+    page.click("#case-head th.sortable[data-key='outcome']")  # broken tests first
+
+    failed = page.locator("#d-body tbody tr.case").first
+    failed.click()
+    row = page.locator("#d-body tbody tr.case-exp").first
+    trace = row.locator("pre.tb").first
+    capture = row.locator(".case-cap")
+    expect(capture).to_be_visible()
+    expect(capture.locator(".case-cap-h")).not_to_be_empty()  # labelled, not appended
+    assert "printed before" in capture.inner_text()
+    assert "printed before" not in trace.inner_text()
+    # pytest's full-width banner rules are trimmed; the stream names they carry are not.
+    assert "Captured Log" in capture.inner_text()
+    assert "-----------" not in capture.inner_text()
+    # An empty stderr opens no block: every test would otherwise carry a blank one.
+    assert "Captured Err" not in capture.inner_text()
+    assert dash.errors == []
+
+
+def test_a_chatty_test_scrolls_inside_its_own_block(page, base_url):
+    # A test that logged a thousand lines must not push the rest of the run off the
+    # screen: the expanded row has to stay browsable, so the capture scrolls in place.
+    def loud(route):
+        response = route.fetch()
+        body = response.json()
+        for case in body["cases"]:
+            case["output"] = "\n".join(
+                f"line {i:04d} of captured output" for i in range(400)
+            )
+        route.fulfill(json=body)
+
+    page.goto(base_url)
+    page.wait_for_selector("#kpis")
+    page.route("**/api/reports/*", loud)
+    page.click("tr.lgrp:has-text('alpha')")
+    page.locator("tr.clickable").first.click()
+    expect(page.locator("dialog#detail")).to_be_visible()
+
+    row = page.locator("#d-body tbody tr.case").first
+    row.click()
+    capture = page.locator("#d-body .case-cap pre.tb").first
+    expect(capture).to_be_visible()
+
+    box = capture.evaluate(
+        "el => ({h: el.clientHeight, sh: el.scrollHeight, oy: getComputedStyle(el).overflowY})"
+    )
+    assert box["oy"] == "auto"
+    assert box["h"] <= 260, f"capture block is {box['h']}px tall"
+    assert box["sh"] > box["h"], "nothing to scroll: the fixture is not long enough"
+    # And the row it lives in stays a row, not a page.
+    expanded = page.locator("#d-body tbody tr.case-exp").first
+    assert expanded.bounding_box()["height"] <= 700
+
+
+def test_email_outside_the_allowed_domains_says_why(page, restricted_email_base_url):
+    # The dialog accepts any syntactically valid address, so the domain bound is the
+    # server's. A refusal must reach the person typing -- a blank "could not send" would
+    # read as an outage and send them to the logs of a service they cannot see.
+    dash = _load_dash(page, restricted_email_base_url)
+    _open_first_run(page)
+    page.click("#d-email")
+    expect(page.locator("dialog#email-dlg")).to_be_visible()
+
+    page.fill("#em-to", "attacker@evil.net")
+    page.click("#em-send")
+    expect(page.locator("#em-status.err")).to_be_visible()
+    status = page.locator("#em-status").inner_text()
+    assert "evil.net" in status  # names the address that was refused
+    assert "AIRFLOW_PYTEST_ALERTS_EMAIL_DOMAINS" in status  # and the setting behind it
+    # The browser logs the 400 itself; nothing else broke, and the dialog stays open so the
+    # address can be corrected rather than retyped from scratch.
+    assert all("400" in e for e in dash.errors), dash.errors
+    expect(page.locator("dialog#email-dlg")).to_be_visible()
+    assert page.input_value("#em-to") == "attacker@evil.net"
+
+
+def test_a_run_too_large_to_open_explains_itself(page, tiny_limit_base_url):
+    # The run is in the list, so "Failed to load report: HTTP 404" would read as a bug or a
+    # vanished run. The dialog must carry the server's reason and the way out.
+    dash = _load_dash(page, tiny_limit_base_url)
+    _open_first_run(page)
+    body = page.locator("#d-body")
+    expect(body).to_contain_text("too large")
+    assert "logs_only_fail" in body.inner_text()
+    assert "AIRFLOW_PYTEST_MAX_REPORT_MIB" in body.inner_text()
+    assert "404" not in body.inner_text()
+    assert all("413" in e for e in dash.errors), dash.errors

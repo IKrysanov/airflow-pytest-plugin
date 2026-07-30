@@ -17,7 +17,14 @@ from __future__ import annotations
 import json
 import os
 
-from airflow_pytest_plugin.layout import COVERAGE_FILENAME, META_FILENAME, ReportLayout
+from airflow_pytest_plugin.layout import (
+    COVERAGE_FILENAME,
+    META_FILENAME,
+    REPORT_FILENAME,
+    TRIAGE_FILENAME,
+    VERDICTS_FILENAME,
+    ReportLayout,
+)
 from airflow_pytest_plugin.models import ReportRef
 from airflow_pytest_plugin.producer import ArchivingResultParser, archiving_parser
 from airflow_pytest_plugin.sources import FileSystemReportSource
@@ -170,6 +177,54 @@ def test_logical_date_variants():
     )
 
 
+def test_captured_output_is_requested_so_the_archive_holds_prints_and_logs(
+    monkeypatch, reports_root
+):
+    # pytest's junit_logging defaults to "no": without this the archive keeps tracebacks
+    # and silently drops everything the test itself printed or logged, which is usually
+    # the only explanation of the failure the worker ever produced.
+    ti = FakeTI(dag_id="d", task_id="t", run_id="run1", try_number=1)
+    _patch_context(monkeypatch, {"ti": ti})
+
+    req = ArchivingResultParser(report_root=reports_root).report_request("/x")
+
+    assert archiving_parser._ini_value(req.pytest_args, "junit_logging") == "all"
+
+
+def test_captured_output_setting_wins_and_is_never_stated_twice(
+    monkeypatch, reports_root
+):
+    ti = FakeTI(dag_id="d", task_id="t", run_id="run1", try_number=1)
+    _patch_context(monkeypatch, {"ti": ti})
+
+    # pytest honours the LAST setting, so the parser's value must land last -- whatever
+    # spelling an operator version or a plugin used before it. Reading them all is the
+    # difference between a deliberate setting and a duplicate nobody can explain.
+    for existing in (
+        ("-o", "junit_logging=out-err"),
+        ("-ojunit_logging=log",),
+        ("--override-ini=junit_logging=system-out",),
+    ):
+        args = archiving_parser._with_junit_logging(
+            ("--junitxml=/x/junit.xml", *existing), "all"
+        )
+        assert archiving_parser._ini_value(args, "junit_logging") == "all", args
+
+    # Idempotent: asking for what is already set adds nothing.
+    same = ("--junitxml=/x/junit.xml", "-o", "junit_logging=all")
+    assert archiving_parser._with_junit_logging(same, "all") == same
+
+    # logs=False is a decision, not a no-op: it pins "no" even though the operator base
+    # asks for "all", so the archive size is predictable rather than version-dependent.
+    off = ArchivingResultParser(report_root=reports_root, logs=False)
+    assert (
+        archiving_parser._ini_value(
+            off.report_request("/x").pytest_args, "junit_logging"
+        )
+        == "no"
+    )
+
+
 def test_allure_dir_appended_when_enabled(monkeypatch, reports_root):
     ti = FakeTI(dag_id="d", task_id="t", run_id="run1", try_number=1)
     _patch_context(monkeypatch, {"ti": ti})
@@ -220,6 +275,39 @@ def test_parse_allure_false_when_no_results(monkeypatch, reports_root):
     parser.parse(req.report_path)  # no allure-results dir was created
     meta = json.load(open(os.path.join(rd, META_FILENAME), encoding="utf-8"))
     assert meta["allure"] is False
+
+
+def test_missing_allure_results_are_explained_in_the_task_log(
+    monkeypatch, reports_root, caplog
+):
+    # A run archived with allure=True and no download button is indistinguishable from a
+    # broken viewer unless the producer says which of the two things happened.
+    ti = FakeTI(dag_id="d", task_id="t", run_id="run1", try_number=1)
+    _patch_context(monkeypatch, {"ti": ti})
+    parser = ArchivingResultParser(report_root=reports_root, allure=True)
+    rd, req = _run_with_report(parser, reports_root)
+
+    with caplog.at_level("WARNING"):
+        parser.parse(req.report_path)
+    # No directory at all: our --alluredir lost to one in the task's own pytest_args.
+    assert "does not exist" in caplog.text
+    assert "--alluredir" in caplog.text
+
+    caplog.clear()
+    os.makedirs(os.path.join(rd, "allure-results"), exist_ok=True)
+    with caplog.at_level("WARNING"):
+        parser.parse(req.report_path)
+    # Directory but nothing in it: pytest ran and collected nothing worth exporting.
+    assert "is empty" in caplog.text
+
+    caplog.clear()
+    with open(
+        os.path.join(rd, "allure-results", "x-result.json"), "w", encoding="utf-8"
+    ) as fh:
+        fh.write("{}")
+    with caplog.at_level("WARNING"):
+        parser.parse(req.report_path)
+    assert "allure" not in caplog.text.lower()  # results archived: nothing to report
 
 
 def test_executor_json_has_buildurl_with_base_url(monkeypatch):
@@ -464,3 +552,673 @@ def test_coverage_json_lives_inside_the_run_archive(monkeypatch, reports_root):
     cov_path = parser._coverage_path(req.report_path)
     assert os.path.dirname(cov_path) == os.path.dirname(req.report_path)
     assert os.path.abspath(cov_path).startswith(os.path.abspath(reports_root))
+
+
+# --- AI triage (triage=True / triage_provider=...) ----------------------------------------
+def _write_triage_json(report_path, payload):
+    """Stand in for pytest-triage writing its report next to the junit file."""
+    path = os.path.join(os.path.dirname(report_path), TRIAGE_FILENAME)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(payload if isinstance(payload, str) else json.dumps(payload))
+    return path
+
+
+def _triage_payload(*, category="regression", nodeid="tests/test_x.py::test_f1"):
+    return {
+        "schema_version": 1,
+        "ai_model": "claude-sonnet-5",
+        "triage_duration": 4.12,
+        "pytest_args": [nodeid],
+        "failures": [
+            {
+                "nodeid": nodeid,
+                "pytest_args": [nodeid],
+                "phase": "call",
+                "outcome": "failed",
+                "exc_type": "AssertionError",
+                "exc_message": "boom 1 != 2",
+                "traceback": "assert 1 == 2",
+                "verdict": {
+                    "category": category,
+                    "hypothesis": "the loader stopped de-duplicating rows",
+                    "confidence": "high",
+                    "suggested_fix": "restore the DISTINCT clause",
+                },
+            }
+        ],
+        "total_failures": 1,
+        "total_verdicts": 1,
+    }
+
+
+def test_no_triage_flags_without_the_opt_in(monkeypatch, reports_root):
+    ti = FakeTI(dag_id="d", task_id="t", run_id="r", try_number=1)
+    _patch_context(monkeypatch, {"ti": ti})
+    parser = ArchivingResultParser(report_root=reports_root)  # triage defaults False
+    req = parser.report_request("/runner/tmp")
+    assert not any(a.startswith("--ai-") for a in req.pytest_args)
+
+
+def test_triage_alone_asks_for_the_report_but_no_provider(monkeypatch, reports_root):
+    # Report-only: pytest-triage describes every failure (exc type, rerun selector) with
+    # no provider, no network and no cost. Turning the LLM on is a separate decision.
+    ti = FakeTI(dag_id="d", task_id="t", run_id="r", try_number=1)
+    _patch_context(monkeypatch, {"ti": ti})
+    parser = ArchivingResultParser(report_root=reports_root, triage=True)
+    req = parser.report_request("/runner/tmp")
+
+    expected = os.path.join(os.path.dirname(req.report_path), TRIAGE_FILENAME)
+    assert f"--ai-report={expected}" in req.pytest_args
+    assert "--ai-triage=on" not in req.pytest_args
+    assert not any(a.startswith("--ai-provider") for a in req.pytest_args)
+
+
+def test_a_provider_implies_the_report_and_turns_triage_on(monkeypatch, reports_root):
+    # One argument is enough for the whole feature: naming a provider without also
+    # remembering triage=True must not silently produce a report with no verdicts.
+    ti = FakeTI(dag_id="d", task_id="t", run_id="r", try_number=1)
+    _patch_context(monkeypatch, {"ti": ti})
+    parser = ArchivingResultParser(
+        report_root=reports_root, triage_provider="anthropic"
+    )
+    req = parser.report_request("/runner/tmp")
+    assert "--ai-triage=on" in req.pytest_args
+    assert "--ai-provider=anthropic" in req.pytest_args
+    assert any(a.startswith("--ai-report=") for a in req.pytest_args)
+
+
+def test_budget_and_timeout_are_passed_only_when_pinned(monkeypatch, reports_root):
+    ti = FakeTI(dag_id="d", task_id="t", run_id="r", try_number=1)
+    _patch_context(monkeypatch, {"ti": ti})
+    bare = ArchivingResultParser(report_root=reports_root, triage_provider="fake")
+    args = bare.report_request("/runner/tmp").pytest_args
+    # Unset -> pytest-triage's own defaults stay in force.
+    assert not any(a.startswith("--ai-budget") for a in args)
+    assert not any(a.startswith("--ai-timeout") for a in args)
+
+    pinned = ArchivingResultParser(
+        report_root=reports_root,
+        triage_provider="fake",
+        triage_budget=25,
+        triage_timeout=45.0,
+    )
+    args = pinned.report_request("/runner/tmp").pytest_args
+    assert "--ai-budget=25" in args
+    # Formatted without a trailing ".0": pytest-triage parses either, but the command line
+    # is echoed into task logs and reads as a number a human wrote.
+    assert "--ai-timeout=45" in args
+
+
+def test_budget_and_timeout_are_only_sent_with_a_provider(monkeypatch, reports_root):
+    # They bound the LLM pass; without one there is nothing for them to bound.
+    ti = FakeTI(dag_id="d", task_id="t", run_id="r", try_number=1)
+    _patch_context(monkeypatch, {"ti": ti})
+    parser = ArchivingResultParser(
+        report_root=reports_root, triage=True, triage_budget=25, triage_timeout=45.0
+    )
+    args = parser.report_request("/runner/tmp").pytest_args
+    assert not any(
+        a.startswith("--ai-budget") or a.startswith("--ai-timeout") for a in args
+    )
+
+
+def test_bogus_budget_or_timeout_falls_back_to_the_defaults(monkeypatch, reports_root):
+    # Rejected, not clamped: a task that meant 20 but wrote "20" (or 0, which would
+    # disable the pass entirely) should get pytest-triage's default, not a silent surprise.
+    ti = FakeTI(dag_id="d", task_id="t", run_id="r", try_number=1)
+    _patch_context(monkeypatch, {"ti": ti})
+    for budget in (0, -5, "20", True, 1.5):
+        parser = ArchivingResultParser(
+            report_root=reports_root, triage_provider="fake", triage_budget=budget
+        )
+        assert parser._triage_budget is None, budget
+    for timeout in (0, -1, float("nan"), float("inf"), "30", True):
+        parser = ArchivingResultParser(
+            report_root=reports_root, triage_provider="fake", triage_timeout=timeout
+        )
+        assert parser._triage_timeout is None, timeout
+
+
+def test_a_blank_provider_reads_as_no_provider(monkeypatch, reports_root):
+    ti = FakeTI(dag_id="d", task_id="t", run_id="r", try_number=1)
+    _patch_context(monkeypatch, {"ti": ti})
+    parser = ArchivingResultParser(report_root=reports_root, triage_provider="   ")
+    assert parser._triage is False
+    assert not any(
+        a.startswith("--ai-") for a in parser.report_request("/t").pytest_args
+    )
+
+
+def test_triage_report_lives_inside_the_run_archive(monkeypatch, reports_root):
+    # Like the coverage report: this run's directory, so concurrent tasks can't overwrite
+    # each other's verdicts through a shared path.
+    ti = FakeTI(dag_id="d", task_id="t", run_id="r", try_number=1)
+    _patch_context(monkeypatch, {"ti": ti})
+    parser = ArchivingResultParser(report_root=reports_root, triage_provider="fake")
+    req = parser.report_request("/runner/tmp")
+    path = parser._triage_path(req.report_path)
+    assert os.path.dirname(path) == os.path.dirname(req.report_path)
+    assert os.path.abspath(path).startswith(os.path.abspath(reports_root))
+
+
+def test_verdicts_are_archived_at_archive_time(monkeypatch, reports_root):
+    ti = FakeTI(dag_id="d", task_id="t", run_id="r", try_number=1)
+    _patch_context(monkeypatch, {"ti": ti})
+    parser = ArchivingResultParser(
+        report_root=reports_root, triage_provider="anthropic"
+    )
+    rd, req = _run_with_report(parser, reports_root)
+    _write_triage_json(req.report_path, _triage_payload())
+
+    parser.parse(req.report_path)
+    # The roll-up rides in meta.json (which every tree scan parses)...
+    meta = json.load(open(os.path.join(rd, META_FILENAME), encoding="utf-8"))
+    assert meta["triage"]["model"] == "claude-sonnet-5"
+    assert meta["triage"]["counts"] == {"regression": 1}
+    assert "verdicts" not in meta["triage"]
+    # ...the per-test judgements in their own file, keyed by the reader's dotted node id so
+    # the join to a JUnit case needs no guessing.
+    doc = json.load(open(os.path.join(rd, VERDICTS_FILENAME), encoding="utf-8"))
+    assert doc["schema_version"] == 1
+    assert doc["verdicts"]["tests.test_x::test_f1"]["confidence"] == "high"
+
+
+def test_triage_survives_a_failed_run(monkeypatch, reports_root):
+    # The runs worth triaging are exactly the ones the operator raises on, so the verdicts
+    # must be archived by parse() -- before that raise -- not pushed through XCom after it.
+    ti = FakeTI(dag_id="d", task_id="t", run_id="r", try_number=1)
+    _patch_context(monkeypatch, {"ti": ti})
+    parser = ArchivingResultParser(
+        report_root=reports_root, triage_provider="anthropic"
+    )
+    req = parser.report_request("/runner/tmp")
+    rd = os.path.dirname(req.report_path)
+    os.makedirs(rd, exist_ok=True)
+    with open(req.report_path, "w", encoding="utf-8") as fh:
+        fh.write(junit_xml(passed=1, failed=1))
+    _write_triage_json(req.report_path, _triage_payload(category="env"))
+
+    result = parser.parse(req.report_path, exit_code=1)
+    meta = json.load(open(os.path.join(rd, META_FILENAME), encoding="utf-8"))
+    assert result.failed == 1
+    assert meta["triage"]["counts"] == {"env": 1}
+
+
+def test_a_missing_or_unreadable_triage_report_costs_nothing(monkeypatch, reports_root):
+    # pytest-triage not installed, or the run died before its session finished: the archive
+    # must still be written, just without an AI section.
+    ti = FakeTI(dag_id="d", task_id="t", run_id="r", try_number=1)
+    _patch_context(monkeypatch, {"ti": ti})
+    parser = ArchivingResultParser(
+        report_root=reports_root, triage_provider="anthropic"
+    )
+    rd, req = _run_with_report(parser, reports_root)
+    assert parser._read_triage(req.report_path) is None  # nothing written at all
+
+    for payload in ("{not json", "[]", '"a string"', "null"):
+        _write_triage_json(req.report_path, payload)
+        assert parser._read_triage(req.report_path) is None, payload
+
+    parser.parse(req.report_path)
+    meta = json.load(open(os.path.join(rd, META_FILENAME), encoding="utf-8"))
+    assert meta["triage"] is None and meta["summary"]["total"] == 1
+
+
+def test_a_stale_triage_report_is_ignored_without_the_opt_in(monkeypatch, reports_root):
+    # A report left in the archive dir by an earlier, triaged try must not resurrect
+    # verdicts for a run whose task no longer asks for them.
+    ti = FakeTI(dag_id="d", task_id="t", run_id="r", try_number=1)
+    _patch_context(monkeypatch, {"ti": ti})
+    parser = ArchivingResultParser(report_root=reports_root)
+    rd, req = _run_with_report(parser, reports_root)
+    _write_triage_json(req.report_path, _triage_payload())
+
+    parser.parse(req.report_path)
+    meta = json.load(open(os.path.join(rd, META_FILENAME), encoding="utf-8"))
+    assert meta["triage"] is None
+
+
+def test_meta_stays_small_when_a_run_is_richly_triaged(monkeypatch, reports_root):
+    # Every summary endpoint pays `_scan_disk()`, which json.loads EVERY run's meta.json in
+    # full -- so anything stored there is parsed on every scan of the whole tree, by every
+    # dashboard load. Measured A/B at 3000 runs x 200 verdicts: keeping verdicts in meta.json
+    # made a cold scan 4.4x slower (300ms -> 1325ms) and grew the scanned corpus from 48MB to
+    # 1.3GB. The verdicts belong beside the run, not in the file the scan reads.
+    ti = FakeTI(dag_id="d", task_id="t", run_id="r", try_number=1)
+    _patch_context(monkeypatch, {"ti": ti})
+    parser = ArchivingResultParser(
+        report_root=reports_root, triage_provider="anthropic"
+    )
+    rd, req = _run_with_report(parser, reports_root)
+    _write_triage_json(
+        req.report_path,
+        {
+            "ai_model": "claude-sonnet-5",
+            "failures": [
+                {
+                    "nodeid": f"tests/test_x.py::test_{i}",
+                    "pytest_args": [f"tests/test_x.py::test_{i}"],
+                    "exc_type": "AssertionError",
+                    "verdict": {
+                        "category": "regression",
+                        "hypothesis": "h" * 1000,
+                        "confidence": "high",
+                        "suggested_fix": "f" * 1000,
+                    },
+                }
+                for i in range(200)
+            ],
+            "total_failures": 200,
+            "total_verdicts": 200,
+        },
+    )
+    parser.parse(req.report_path)
+
+    meta_size = os.path.getsize(os.path.join(rd, META_FILENAME))
+    assert meta_size < 4096, (
+        f"meta.json grew to {meta_size}B -- the scan reads this file"
+    )
+    # The judgements are still archived in full, just not in the scanned sidecar.
+    verdicts = json.load(open(os.path.join(rd, VERDICTS_FILENAME), encoding="utf-8"))
+    assert len(verdicts["verdicts"]) == 200
+
+
+def test_a_failed_verdicts_write_never_costs_the_run_its_meta(
+    monkeypatch, reports_root
+):
+    # verdicts.json is written while meta.json is being built. A full disk, a read-only
+    # volume or a serialisation slip must degrade to "no per-test analysis", not to an
+    # archive the reader cannot see at all.
+    ti = FakeTI(dag_id="d", task_id="t", run_id="r", try_number=1)
+    _patch_context(monkeypatch, {"ti": ti})
+    parser = ArchivingResultParser(report_root=reports_root, triage_provider="fake")
+    rd, req = _run_with_report(parser, reports_root)
+    _write_triage_json(req.report_path, _triage_payload())
+
+    real_open = open
+
+    def explode(path, *a, **kw):
+        if VERDICTS_FILENAME in str(path):
+            raise OSError("no space left on device")
+        return real_open(path, *a, **kw)
+
+    monkeypatch.setattr("builtins.open", explode)
+    parser.parse(req.report_path)
+    monkeypatch.undo()
+
+    meta = json.load(open(os.path.join(rd, META_FILENAME), encoding="utf-8"))
+    assert meta["summary"]["total"] == 1  # the archive is intact
+    assert meta["triage"]["model"] == "claude-sonnet-5"  # and still reads as triaged
+    assert not os.path.exists(os.path.join(rd, VERDICTS_FILENAME))
+    # No temp litter left behind in the run's directory.
+    assert [n for n in os.listdir(rd) if n.startswith(f".{VERDICTS_FILENAME}")] == []
+
+
+def test_verdicts_are_written_atomically(monkeypatch, reports_root):
+    # A reader scanning the tree concurrently must never open a half-written file, so the
+    # bytes land under a temp name and are renamed into place.
+    ti = FakeTI(dag_id="d", task_id="t", run_id="r", try_number=1)
+    _patch_context(monkeypatch, {"ti": ti})
+    parser = ArchivingResultParser(report_root=reports_root, triage_provider="fake")
+    rd, req = _run_with_report(parser, reports_root)
+    _write_triage_json(req.report_path, _triage_payload())
+
+    renames = []
+    real_replace = os.replace
+    monkeypatch.setattr(
+        os, "replace", lambda a, b: (renames.append((a, b)), real_replace(a, b))[1]
+    )
+    parser.parse(req.report_path)
+
+    targets = [os.path.basename(b) for _a, b in renames]
+    assert VERDICTS_FILENAME in targets and META_FILENAME in targets
+    assert all(
+        os.path.basename(a).startswith(".") and a.endswith(".tmp") for a, _b in renames
+    )
+    # The raw report is gone once distilled, so the archive keeps exactly three files.
+    assert sorted(os.listdir(rd)) == sorted(
+        [META_FILENAME, REPORT_FILENAME, VERDICTS_FILENAME]
+    )
+
+
+def test_the_raw_report_is_removed_once_it_has_been_distilled(
+    monkeypatch, reports_root
+):
+    # pytest-triage's own report is the LARGEST file in a run's archive (measured: 10.1KB
+    # against junit.xml's 8.5KB) and duplicates tracebacks that junit.xml already has. It is
+    # written owner-only, so the reader can never open it -- keeping it only grows the tree
+    # and eats the retention budget.
+    ti = FakeTI(dag_id="d", task_id="t", run_id="r", try_number=1)
+    _patch_context(monkeypatch, {"ti": ti})
+    parser = ArchivingResultParser(report_root=reports_root, triage_provider="fake")
+    rd, req = _run_with_report(parser, reports_root)
+    _write_triage_json(req.report_path, _triage_payload())
+
+    parser.parse(req.report_path)
+    assert not os.path.exists(os.path.join(rd, TRIAGE_FILENAME))
+    # ...and everything worth keeping was kept.
+    doc = json.load(open(os.path.join(rd, VERDICTS_FILENAME), encoding="utf-8"))
+    assert doc["verdicts"]["tests.test_x::test_f1"]["category"] == "regression"
+
+
+def test_an_undistillable_report_is_kept_as_evidence(monkeypatch, reports_root):
+    # If we could not read it, deleting it would destroy the only copy of what went wrong.
+    ti = FakeTI(dag_id="d", task_id="t", run_id="r", try_number=1)
+    _patch_context(monkeypatch, {"ti": ti})
+    parser = ArchivingResultParser(report_root=reports_root, triage_provider="fake")
+    rd, req = _run_with_report(parser, reports_root)
+    _write_triage_json(req.report_path, "{not json")
+
+    parser.parse(req.report_path)
+    assert os.path.exists(os.path.join(rd, TRIAGE_FILENAME))
+    meta = json.load(open(os.path.join(rd, META_FILENAME), encoding="utf-8"))
+    assert meta["triage"] is None
+
+
+def test_an_unparseable_triage_report_does_not_cost_the_run_its_meta(
+    monkeypatch, reports_root
+):
+    # json.load raises RecursionError (not ValueError) on a nesting bomb. Uncaught here it
+    # escapes _write_meta, whose caller swallows it -- and the run loses meta.json entirely,
+    # which is the file that makes it VISIBLE in the viewer at all. Losing the AI section is
+    # acceptable; losing the run is not.
+    ti = FakeTI(dag_id="d", task_id="t", run_id="r", try_number=1)
+    _patch_context(monkeypatch, {"ti": ti})
+    parser = ArchivingResultParser(report_root=reports_root, triage_provider="fake")
+    rd, req = _run_with_report(parser, reports_root)
+    _write_triage_json(req.report_path, "[" * 60_000 + "]" * 60_000)
+
+    parser.parse(req.report_path)
+    meta_path = os.path.join(rd, META_FILENAME)
+    assert os.path.exists(meta_path), "the run vanished from the archive"
+    meta = json.load(open(meta_path, encoding="utf-8"))
+    assert meta["summary"]["total"] == 1 and meta["triage"] is None
+
+
+def test_the_raw_report_survives_a_failed_verdicts_write(monkeypatch, reports_root):
+    # Deleting the original is only safe once the distilled copy is actually on disk.
+    # Dropping both leaves a run that claims to be triaged with nothing behind it, and no
+    # evidence left to work out why.
+    ti = FakeTI(dag_id="d", task_id="t", run_id="r", try_number=1)
+    _patch_context(monkeypatch, {"ti": ti})
+    parser = ArchivingResultParser(report_root=reports_root, triage_provider="fake")
+    rd, req = _run_with_report(parser, reports_root)
+    _write_triage_json(req.report_path, _triage_payload())
+
+    real_open = open
+
+    def explode(path, *a, **kw):
+        if VERDICTS_FILENAME in str(path):
+            raise OSError("read-only file system")
+        return real_open(path, *a, **kw)
+
+    monkeypatch.setattr("builtins.open", explode)
+    parser.parse(req.report_path)
+    monkeypatch.undo()
+
+    assert os.path.exists(os.path.join(rd, TRIAGE_FILENAME)), (
+        "the only surviving copy of the verdicts was deleted"
+    )
+    assert not os.path.exists(os.path.join(rd, VERDICTS_FILENAME))
+
+
+def test_logs_only_fail_never_asks_pytest_to_drop_passing_capture(
+    monkeypatch, reports_root
+):
+    # pytest's junit_log_passing_tests looks like the obvious lever and is the wrong one:
+    # it also drops the capture of an ERRORED test (a setup failure has no call phase), and
+    # that output is exactly what explains the error. The archive is narrowed after the run
+    # instead, so the flag must never appear on the command line.
+    ti = FakeTI(dag_id="d", task_id="t", run_id="run1", try_number=1)
+    _patch_context(monkeypatch, {"ti": ti})
+    ini = archiving_parser._ini_value
+
+    for parser in (
+        ArchivingResultParser(report_root=reports_root),
+        ArchivingResultParser(report_root=reports_root, logs_only_fail=True),
+        ArchivingResultParser(
+            report_root=reports_root, logs=False, logs_only_fail=True
+        ),
+    ):
+        args = parser.report_request("/x").pytest_args
+        assert ini(args, "junit_log_passing_tests") is None, args
+
+    on = ArchivingResultParser(report_root=reports_root, logs_only_fail=True)
+    assert ini(on.report_request("/x").pytest_args, "junit_logging") == "all"
+    off = ArchivingResultParser(report_root=reports_root, logs=False)
+    assert ini(off.report_request("/x").pytest_args, "junit_logging") == "no"
+
+
+def _mixed_report(path, *, chunk="Z" * 64):
+    """A report with every outcome, each carrying captured output."""
+    cases = []
+    for i in range(3):
+        cases.append(
+            f'<testcase classname="t.m" name="test_pass_{i}" time="0.1">'
+            f"<system-out>{chunk}</system-out><system-err>{chunk}</system-err></testcase>"
+        )
+        cases.append(
+            f'<testcase classname="t.m" name="test_skip_{i}" time="0.1"><skipped/>'
+            f"<system-out>{chunk}</system-out></testcase>"
+        )
+    cases.append(
+        '<testcase classname="t.m" name="test_fail" time="0.1">'
+        '<failure message="boom">boom</failure>'
+        f"<system-out>{chunk}</system-out></testcase>"
+    )
+    cases.append(
+        '<testcase classname="t.m" name="test_err" time="0.1">'
+        '<error message="kaboom">kaboom</error>'
+        f"<system-out>{chunk}</system-out></testcase>"
+    )
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(
+            '<?xml version="1.0" encoding="utf-8"?>'
+            '<testsuites><testsuite name="pytest" tests="8" failures="1" errors="1" '
+            'skipped="3" time="1.0">' + "".join(cases) + "</testsuite></testsuites>"
+        )
+
+
+def _streams_by_outcome(path):
+    import xml.etree.ElementTree as ET
+
+    counts = {"passed": 0, "skipped": 0, "broken": 0}
+    for case in ET.parse(path).getroot().iter("testcase"):
+        if case.find("failure") is not None or case.find("error") is not None:
+            kind = "broken"
+        elif case.find("skipped") is not None:
+            kind = "skipped"
+        else:
+            kind = "passed"
+        counts[kind] += sum(1 for c in case if c.tag.startswith("system-"))
+    return counts
+
+
+def test_logs_only_fail_also_drops_the_capture_of_skipped_tests(
+    monkeypatch, reports_root
+):
+    # pytest can only be told to skip the capture of PASSING tests, so a skipped test
+    # still writes its own -- 500 skips printing 32KB each left a 6MB report that this
+    # setting promised not to keep.
+    ti = FakeTI(dag_id="d", task_id="t", run_id="run1", try_number=1)
+    _patch_context(monkeypatch, {"ti": ti})
+    parser = ArchivingResultParser(report_root=reports_root, logs_only_fail=True)
+    rd, req = _run_with_report(parser, reports_root)
+    _mixed_report(req.report_path)
+
+    parser.parse(req.report_path)
+
+    # Failures AND errors keep theirs: they are why the capture is archived at all, and
+    # an errored test's output is the material that explains the error.
+    assert _streams_by_outcome(req.report_path) == {
+        "passed": 0,
+        "skipped": 0,
+        "broken": 2,
+    }
+
+
+def test_capture_is_kept_by_default_and_trimmed_when_the_report_gets_huge(
+    monkeypatch, reports_root, caplog
+):
+    ti = FakeTI(dag_id="d", task_id="t", run_id="run1", try_number=1)
+    _patch_context(monkeypatch, {"ti": ti})
+    parser = ArchivingResultParser(report_root=reports_root)
+    rd, req = _run_with_report(parser, reports_root)
+    _mixed_report(req.report_path)
+
+    parser.parse(req.report_path)
+    kept = _streams_by_outcome(req.report_path)
+    assert kept["passed"] and kept["skipped"]  # default keeps everything
+
+    # The safety net: past the archive limit even a default run is trimmed to the
+    # failures, because every viewer that opens the run reads this file whole.
+    monkeypatch.setattr(archiving_parser, "_MAX_ARCHIVED_REPORT", 100)
+    with caplog.at_level("INFO"):
+        parser.parse(req.report_path)
+    assert _streams_by_outcome(req.report_path) == {
+        "passed": 0,
+        "skipped": 0,
+        "broken": 2,
+    }
+    assert "exceeded the archive limit" in caplog.text
+
+    # ...but trimming parses the report, so an absurd one is refused, not attempted.
+    _mixed_report(req.report_path)
+    monkeypatch.setattr(archiving_parser, "_MAX_TRIMMABLE_REPORT", 10)
+    caplog.clear()
+    with caplog.at_level("ERROR"):
+        parser.parse(req.report_path)
+    assert _streams_by_outcome(req.report_path)["passed"] == 6  # left alone
+    assert "too large to trim safely" in caplog.text
+
+
+def test_triage_false_wins_over_a_configured_provider(
+    monkeypatch, reports_root, caplog
+):
+    # `triage=False, triage_provider="anthropic"` used to run the LLM pass anyway: the
+    # provider implied the feature and the explicit False was ignored. An "off" switch
+    # that still calls a paid API is the one reading nobody can defend, so False wins --
+    # and says so, since the task clearly meant to use the provider at some point.
+    ti = FakeTI(dag_id="d", task_id="t", run_id="run1", try_number=1)
+    _patch_context(monkeypatch, {"ti": ti})
+
+    with caplog.at_level("WARNING"):
+        off = ArchivingResultParser(
+            report_root=reports_root, triage=False, triage_provider="anthropic"
+        )
+    args = off.report_request("/x").pytest_args
+    assert not any("--ai-" in a for a in args), args  # nothing for pytest-triage at all
+    assert "triage=False overrides" in caplog.text
+
+    # Unset (the default) still infers the feature from the provider: that one-argument
+    # form is the documented way to turn triage on.
+    inferred = ArchivingResultParser(
+        report_root=reports_root, triage_provider="anthropic"
+    ).report_request("/x")
+    assert "--ai-triage=on" in inferred.pytest_args
+    assert "--ai-provider=anthropic" in inferred.pytest_args
+
+    # ...and triage=True without a provider stays the report-only level.
+    report_only = ArchivingResultParser(
+        report_root=reports_root, triage=True
+    ).report_request("/x")
+    assert any(a.startswith("--ai-report=") for a in report_only.pytest_args)
+    assert not any(a.startswith("--ai-provider") for a in report_only.pytest_args)
+
+
+def test_only_failed_and_errored_tests_are_ever_sent_to_a_provider(
+    monkeypatch, reports_root
+):
+    # What reaches the model is pytest-triage's failure set, and a skipped test is not in
+    # it -- neither a marker skip, a runtime skip, nor an xfail. Pinned here because the
+    # cost of the feature is "one call per failing test": if skips ever joined that set, a
+    # suite that skips half its tests would quietly multiply the bill.
+    ti = FakeTI(dag_id="d", task_id="t", run_id="run1", try_number=1)
+    _patch_context(monkeypatch, {"ti": ti})
+    parser = ArchivingResultParser(report_root=reports_root, triage=True)
+    rd, req = _run_with_report(parser, reports_root)
+    report = os.path.join(rd, TRIAGE_FILENAME)
+    # A report as pytest-triage writes it: only the two broken tests are listed.
+    with open(report, "w", encoding="utf-8") as fh:
+        json.dump(
+            {
+                "schema_version": 1,
+                "ai_model": "m",
+                "total_failures": 2,
+                "total_verdicts": 2,
+                "failures": [
+                    {
+                        "nodeid": "t.py::test_broken",
+                        "outcome": "failed",
+                        "exc_type": "AssertionError",
+                        "verdict": {"category": "regression", "confidence": "high"},
+                    },
+                    {
+                        "nodeid": "t.py::test_error",
+                        "outcome": "error",
+                        "exc_type": "RuntimeError",
+                        "verdict": {"category": "environment", "confidence": "low"},
+                    },
+                ],
+            },
+            fh,
+        )
+
+    parser.parse(req.report_path)
+
+    meta = json.load(open(os.path.join(rd, META_FILENAME), encoding="utf-8"))
+    assert meta["triage"]["total_failures"] == 2
+    verdicts = json.load(open(os.path.join(rd, VERDICTS_FILENAME), encoding="utf-8"))
+    judged = {v["node_id"] if isinstance(v, dict) else v for v in verdicts["verdicts"]}
+    assert not any("skip" in str(n) for n in judged)
+
+
+def test_logs_only_fail_keeps_a_real_errored_test_s_output(
+    monkeypatch, reports_root, tmp_path
+):
+    # End-to-end against real pytest, because this is where the promise was broken: the
+    # obvious lever (junit_log_passing_tests) made pytest itself drop the capture of an
+    # ERRORED test, so a fixture that logged why it could not set the test up archived
+    # nothing. Synthetic XML cannot catch that -- only a real run can.
+    import subprocess
+    import sys
+    import xml.etree.ElementTree as ET
+
+    (tmp_path / "test_e.py").write_text(
+        "import pytest\n"
+        "@pytest.fixture\n"
+        "def broken_fixture():\n"
+        "    print('could not reach the payment gateway')\n"
+        "    raise RuntimeError('gateway down')\n"
+        "def test_errors(broken_fixture):\n"
+        "    pass\n"
+        "def test_passes():\n"
+        "    print('quiet')\n",
+        encoding="utf-8",
+    )
+    ti = FakeTI(dag_id="d", task_id="t", run_id="run1", try_number=1)
+    _patch_context(monkeypatch, {"ti": ti})
+    parser = ArchivingResultParser(report_root=reports_root, logs_only_fail=True)
+    req = parser.report_request(str(tmp_path))
+    os.makedirs(os.path.dirname(req.report_path), exist_ok=True)
+    subprocess.run(
+        [sys.executable, "-m", "pytest", "test_e.py", "-p", "no:cacheprovider", "-q"]
+        + list(req.pytest_args),
+        cwd=tmp_path,
+        capture_output=True,
+        check=False,
+    )
+
+    parser.parse(req.report_path, exit_code=1)
+
+    cases = {
+        tc.get("name"): [c.tag for c in tc]
+        for tc in ET.parse(req.report_path).getroot().iter("testcase")
+    }
+    assert "system-out" in cases["test_errors"], cases
+    assert "system-out" not in cases["test_passes"], cases
+    detail = FileSystemReportSource(report_root=reports_root).get_detail(
+        ReportRef("d", "run1", "t", 1)
+    )
+    errored = next(c for c in detail.cases if c.outcome == "error")
+    assert "could not reach the payment gateway" in errored.output

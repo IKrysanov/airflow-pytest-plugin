@@ -20,7 +20,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from typing import Any
 
-from ..models import ReportDetail, ReportRef, ReportSummary
+from ..models import ReportDetail, ReportRef, ReportSummary, Verdict
 
 
 class ReportSource(ABC):
@@ -45,6 +45,17 @@ class ReportSource(ABC):
     def delete(self, ref: ReportRef) -> bool:
         """Permanently remove the report for ``ref``; ``True`` if one was removed."""
         raise NotImplementedError
+
+    def verdicts(self, ref: ReportRef) -> dict[str, Verdict]:
+        """One run's AI verdicts, keyed by canonical node id (``{}`` when it has none).
+
+        Split out from :meth:`get_detail` because the cross-run views want the judgement
+        without the JUnit parse: the heatmap marks a cell as a regression by reading this
+        for each run in its window, measured at +8 ms over a 100-run window of 300-test
+        runs -- cheap precisely because it touches neither ``junit.xml`` nor ``meta.json``.
+        Optional; default empty.
+        """
+        return {}
 
     def allure_archive(
         self, ref: ReportRef, *, max_bytes: int | None = None
@@ -78,6 +89,26 @@ class ReportSource(ABC):
         Powers cross-run views (compare/flaky/history). Optional; default unsupported.
         """
         return None
+
+    def exists(self, ref: ReportRef) -> bool:
+        """Whether this run is still stored, without reading or parsing it.
+
+        Lets a caller tell "already gone" from "the store refused to remove it" after a
+        failed delete -- the two need different words in front of a user, and asking
+        :meth:`get_detail` would parse a whole report to answer a yes/no question.
+        Default falls back to that parse for sources that can't answer cheaply.
+        """
+        return self.get_detail(ref) is not None
+
+    def report_too_large(self, ref: ReportRef) -> bool:
+        """Whether this run is stored but past the size this source will parse.
+
+        Only reason a stored run can refuse to open. Lets the API say that instead of
+        "not found", which sends the person who archived it looking for a run that is
+        right there in the list. Default ``False``: a source with no such limit never
+        has this problem.
+        """
+        return False
 
     def report_size(self, ref: ReportRef) -> int:
         """Bytes one report occupies on the backing store (``0`` if unknown).

@@ -19,6 +19,7 @@ import pytest
 pytest.importorskip("fastapi")
 
 from fastapi import FastAPI  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
 
 from airflow_pytest_plugin import plugin as plugin_mod  # noqa: E402
 from airflow_pytest_plugin.plugin import (  # noqa: E402
@@ -38,6 +39,16 @@ def test_fastapi_app_registered():
     assert entry["url_prefix"] == URL_PREFIX
     assert entry["name"]
     assert isinstance(entry["app"], FastAPI)
+
+
+def test_help_is_available_under_plugin_mount():
+    host = FastAPI()
+    host.mount(URL_PREFIX, PytestReportsPlugin.fastapi_apps[0]["app"])
+
+    response = TestClient(host).get(f"{URL_PREFIX}/help")
+
+    assert response.status_code == 200
+    assert 'id="help-content"' in response.text
 
 
 def test_external_view_href_has_trailing_slash():

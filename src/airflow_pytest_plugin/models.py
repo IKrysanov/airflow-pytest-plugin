@@ -98,6 +98,14 @@ class ReportSummary:
     created_at: str | None = None
     logical_date: str | None = None
     has_allure: bool = False
+    has_triage: bool = False
+    #: The producer's own tally of this run's verdicts: ``{category: count}``, the ``model``
+    #: that judged them, and ``incomplete`` when the pass itself broke. Read straight from
+    #: the roll-up in ``meta.json``, so the list can show a run's MIX -- and which of the
+    #: three mark states it is in -- without opening anything else. The detail view recounts
+    #: from the verdicts it can actually display, which is why this carries no "N of M"
+    #: total that could contradict it.
+    triage: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -117,6 +125,8 @@ class ReportSummary:
             "created_at": self.created_at,
             "logical_date": self.logical_date,
             "has_allure": self.has_allure,
+            "has_triage": self.has_triage,
+            "triage": dict(self.triage) if self.triage else None,
         }
 
 
@@ -134,8 +144,81 @@ def run_succeeds(passed: int, failed: int, errors: int, threshold: float) -> boo
 
 
 @dataclass(frozen=True)
+class Verdict:
+    """One AI triage verdict for a failed test, as produced by ``pytest-triage``.
+
+    ``category`` is the frozen machine-readable judgement -- ``regression`` (the product
+    code broke), ``flaky``, ``env`` (the environment, not the code), ``test_bug`` (the
+    test itself is wrong) or ``unknown``; ``None`` when the failure was reported but never
+    judged (a report-only run, or one past its ``--ai-budget``), which still carries the
+    exception type and a rerun selector. ``hypothesis`` and ``suggested_fix`` are the
+    model's prose and may be in the provider's own language (GigaChat answers in Russian);
+    ``selector`` is the ready-to-run pytest argument for rerunning just this test.
+    """
+
+    category: str | None = None
+    hypothesis: str | None = None
+    confidence: str | None = None  # "low" | "medium" | "high"
+    suggested_fix: str | None = None
+    exc_type: str | None = None
+    selector: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "category": self.category,
+            "hypothesis": self.hypothesis,
+            "confidence": self.confidence,
+            "suggested_fix": self.suggested_fix,
+            "exc_type": self.exc_type,
+            "selector": self.selector,
+        }
+
+
+@dataclass(frozen=True)
+class TriageSummary:
+    """Run-level roll-up of an AI triage pass.
+
+    ``model`` and ``duration`` are ``None`` when the run was archived with a report but no
+    provider (``triage=True`` alone) -- every failure is described, none is judged.
+    ``counts`` holds only the categories actually seen, biggest-first ordering left to the
+    UI. ``total_failures`` counts what pytest-triage saw; ``total_verdicts`` how many of
+    them are actually judged here.
+    ``incomplete``: why the pass produced fewer verdicts than there were failures, when the
+    cause was the triage pass itself -- a rejected API key, a timeout, an exhausted budget,
+    a provider that kept failing. ``None`` when nothing went wrong.
+    """
+
+    model: str | None = None
+    duration: float | None = None
+    total_failures: int = 0
+    total_verdicts: int = 0
+    counts: dict[str, int] = field(default_factory=dict)
+    incomplete: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "model": self.model,
+            "duration": self.duration,
+            "total_failures": self.total_failures,
+            "total_verdicts": self.total_verdicts,
+            "counts": dict(self.counts),
+            "incomplete": self.incomplete,
+        }
+
+
+@dataclass(frozen=True)
 class CaseView:
-    """One test case, flattened for the detail table."""
+    """One test case, flattened for the detail table.
+
+    ``message``: the failure, error or skip text -- the traceback for a broken test.
+
+    ``output``: whatever the test itself printed or logged, kept apart from the failure so
+    the diagnosis is not buried under it. Present for passing tests too.
+
+    ``verdict``: the AI triage judgement for this test, when the run was archived with
+    ``ArchivingResultParser(triage_provider=...)`` and the provider reached it. Only
+    failed/errored cases can carry one.
+    """
 
     node_id: str
     name: str
@@ -143,6 +226,8 @@ class CaseView:
     outcome: str  # "passed" | "failed" | "error" | "skipped"
     time: float
     message: str | None = None
+    output: str | None = None
+    verdict: Verdict | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -152,6 +237,8 @@ class CaseView:
             "outcome": self.outcome,
             "time": self.time,
             "message": self.message,
+            "output": self.output,
+            "verdict": self.verdict.to_dict() if self.verdict else None,
         }
 
 
@@ -166,6 +253,8 @@ class ReportDetail:
     ``coverage_threshold``: the bar THIS run's coverage should be read against, when the
     producer pinned one (``ArchivingResultParser(coverage_threshold=...)``); ``None`` lets
     the reader fall back to ``AIRFLOW_PYTEST_SUCCESS_COVERAGE``.
+    ``triage``: the run-level AI triage roll-up (the per-test judgements ride on
+    :attr:`CaseView.verdict`); ``None`` when the run wasn't triaged.
     """
 
     summary: ReportSummary
@@ -173,10 +262,12 @@ class ReportDetail:
     alerts: tuple[dict[str, Any], ...] = field(default_factory=tuple)
     coverage: float | None = None
     coverage_threshold: float | None = None
+    triage: TriageSummary | None = None
 
     def to_dict(self) -> dict[str, Any]:
         data = self.summary.to_dict()
         data["cases"] = [c.to_dict() for c in self.cases]
         data["alerts"] = list(self.alerts)
         data["coverage"] = self.coverage
+        data["triage"] = self.triage.to_dict() if self.triage else None
         return data

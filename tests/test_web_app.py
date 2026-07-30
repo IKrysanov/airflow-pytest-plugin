@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -22,9 +23,16 @@ import subprocess
 import pytest
 
 from airflow_pytest_plugin.compat import airflow_auth_available
+from airflow_pytest_plugin.layout import META_FILENAME, ReportLayout
 from airflow_pytest_plugin.models import ReportRef
 from airflow_pytest_plugin.sources import FileSystemReportSource
-from conftest import write_allure, write_report, write_report_xml, write_tests
+from conftest import (
+    write_allure,
+    write_report,
+    write_report_xml,
+    write_tests,
+    write_triage,
+)
 
 fastapi = pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
@@ -96,11 +104,198 @@ def test_index_serves_html(client):
     assert "no-store" in r.headers.get("cache-control", "")
 
 
+def test_help_serves_user_guide(client):
+    r = client.get("/help")
+
+    assert r.status_code == 200
+    assert "no-cache" in r.headers.get("cache-control", "")
+    assert r.headers["x-content-type-options"] == "nosniff"
+    assert r.headers["x-frame-options"] == "SAMEORIGIN"
+    assert r.headers["referrer-policy"] == "no-referrer"
+    assert r.headers["permissions-policy"] == (
+        "camera=(), microphone=(), geolocation=()"
+    )
+    csp = r.headers["content-security-policy"]
+    assert "default-src 'none'" in csp
+    assert "frame-ancestors 'self'" in csp
+    assert "object-src 'none'" in csp
+    assert 'id="help-content"' in r.text
+    assert 'class="help-sidebar"' in r.text
+    assert 'href="#getting-started"' in r.text
+    assert 'href="#setup"' in r.text
+    assert 'href="#dashboard"' in r.text
+    assert 'href="#run-details"' in r.text
+    assert 'href="#flaky"' in r.text
+    assert 'href="#ai-triage"' in r.text
+    assert 'href="#email"' in r.text
+    assert 'href="#access"' in r.text
+    assert 'href="#faq"' in r.text
+    assert 'id="help-github-link"' in r.text
+    assert 'id="help-api-link"' in r.text
+    assert 'id="footer-github-link"' in r.text
+    assert 'href="https://github.com/IKrysanov/airflow-pytest-plugin"' in r.text
+    assert 'rel="noopener noreferrer"' in r.text
+    assert "secure-xml" in r.text
+
+
+def test_help_shows_the_installed_plugin_version(client):
+    # The version is the first thing a bug report is asked for, and the UI had nowhere to
+    # read it. It must follow the installed distribution -- a page naming the version it
+    # was written against would be worse than no version at all.
+    from airflow_pytest_plugin.version import __version__
+
+    body = client.get("/help").text
+
+    assert f">v{__version__}<" in body
+    assert "__APX_VERSION__" not in body  # the placeholder is always substituted
+
+
+def test_help_serves_the_trailing_slash_without_a_redirect(client):
+    # A bookmarked "/help/" must not cost a 307 first: that is a second round trip on
+    # every open, and it reads as two document requests for one visit.
+    r = client.get("/help/", follow_redirects=False)
+
+    assert r.status_code == 200
+    assert 'id="help-content"' in r.text
+    assert r.headers["etag"] == client.get("/help").headers["etag"]
+
+
+def test_help_revalidates_with_an_etag_instead_of_resending_the_page(client):
+    first = client.get("/help")
+    etag = first.headers["etag"]
+    assert etag.startswith('"') and etag.endswith('"')
+
+    again = client.get("/help", headers={"If-None-Match": etag})
+
+    assert again.status_code == 304
+    assert again.content == b""
+    assert again.headers["etag"] == etag
+    # A 304 still carries the framing/sniffing guards: the browser reuses the cached
+    # body under whatever the revalidation response says.
+    assert again.headers["x-frame-options"] == "SAMEORIGIN"
+    assert again.headers["x-content-type-options"] == "nosniff"
+    assert "default-src 'none'" in again.headers["content-security-policy"]
+    # Cached under a tag from another build -> the reader must get the current page,
+    # never a stale guide describing a UI that no longer exists.
+    stale = client.get("/help", headers={"If-None-Match": '"0123456789abcdef"'})
+    assert stale.status_code == 200
+    assert 'id="help-content"' in stale.text
+    # Chrome sends the tag it stored plus weak forms; both must be recognised.
+    for header in (f"W/{etag}", f'"other", {etag}', "*"):
+        assert client.get("/help", headers={"If-None-Match": header}).status_code == 304
+
+
+def test_help_etag_changes_when_the_guide_changes(monkeypatch):
+    from airflow_pytest_plugin.web import app as app_module
+
+    monkeypatch.setattr(app_module, "_HELP_ETAG_CACHE", None)
+    monkeypatch.setattr(app_module, "help_html", lambda: "<p>edited guide</p>")
+
+    assert app_module._help_etag() != '"unchanged"'
+    edited = app_module._help_etag()
+
+    monkeypatch.setattr(app_module, "_HELP_ETAG_CACHE", None)
+    monkeypatch.setattr(app_module, "help_html", lambda: "<p>edited guide 2</p>")
+    assert app_module._help_etag() != edited
+
+
+def test_help_is_static_and_available_when_report_reads_are_denied(reports_root):
+    app = make_app(reports_root, read_authorizer=lambda dag_id, user: False)
+    c = TestClient(app)
+
+    assert c.get("/help").status_code == 200
+    assert c.get("/api/version").status_code == 200
+    assert c.get("/api/reports").json()["reports"] == []
+
+
+def test_help_follows_airflow_locale_theme_and_accessibility(client):
+    html = client.get("/help").text
+
+    for marker in (
+        'class="skip-link"',
+        'aria-label="Help sections"',
+        'data-i18n="back"',
+        'data-i18n="title"',
+        "i18nextLng",
+        "parentWin",
+        "MutationObserver",
+        "activeNavIcon",
+        "apx-nav-style",
+        "updateCurrentSection",
+        "atPageEnd",
+        "bindAirflowNavReturn",
+        "openHelpLink",
+        "prefers-color-scheme: dark",
+        "prefers-reduced-motion: reduce",
+        'document.documentElement.setAttribute("lang", LOCALE)',
+        'aria-current="true"',
+    ):
+        assert marker in html
+
+
+def test_help_inline_script_is_syntactically_valid(client, tmp_path):
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node unavailable to syntax-check the inline JS")
+    html = client.get("/help").text
+    scripts = re.findall(r"<script>(.*?)</script>", html, re.S)
+    assert scripts, "no inline <script> found in the help page"
+    for i, code in enumerate(scripts):
+        script = tmp_path / f"help_{i}.js"
+        script.write_text(code, encoding="utf-8")
+        result = subprocess.run(
+            [node, "--check", str(script)], capture_output=True, text=True
+        )
+        assert result.returncode == 0, f"script #{i}: {result.stderr}"
+
+
+def test_help_i18n_locales_have_identical_keys(client, tmp_path):
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node unavailable to evaluate the help translations")
+    html = client.get("/help").text
+    start = html.index("{", html.index("var HELP_I18N = "))
+    depth = 0
+    end = None
+    for i in range(start, len(html)):
+        if html[i] == "{":
+            depth += 1
+        elif html[i] == "}":
+            depth -= 1
+            if depth == 0:
+                end = i + 1
+                break
+    assert end is not None, "could not brace-match HELP_I18N"
+    script = tmp_path / "help_i18n.js"
+    script.write_text(
+        "const I18N = " + html[start:end] + ";\n"
+        "const en = Object.keys(I18N.en), ru = Object.keys(I18N.ru);\n"
+        "console.log(JSON.stringify({"
+        "keys: en,"
+        "missing_in_ru: en.filter(k => !(k in I18N.ru)),"
+        "missing_in_en: ru.filter(k => !(k in I18N.en))}));\n",
+        encoding="utf-8",
+    )
+    result = subprocess.run([node, str(script)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    translations = json.loads(result.stdout)
+    assert translations["missing_in_ru"] == []
+    assert translations["missing_in_en"] == []
+    used = set(re.findall(r'data-i18n(?:-html|-al)?="([^"]+)"', html))
+    assert used <= set(translations["keys"])
+
+
+def test_help_stays_out_of_openapi(client):
+    assert "/help" not in client.get("/api/openapi.json").json()["paths"]
+
+
 def test_index_has_feature_markers(client):
     # Regression guard that the UI feature markers are all present in the page.
     html = client.get("/").text
     for marker in (
         "data-i18n",
+        'id="help-btn"',
+        "openHelp",
         'id="chart"',
         'id="d-copy"',
         "setReportParam",
@@ -223,6 +418,24 @@ def test_index_has_feature_markers(client):
         "surface-glass",
     ):
         assert marker in html
+    assert 'id="help-btn" class="menu-item"' in html
+
+
+def test_links_menu_uses_a_question_mark_and_code_icons(client):
+    html = client.get("/").text
+
+    help_start = html.index('id="help-btn"')
+    help_item = html[help_start : html.index("</button>", help_start)]
+    # A question mark in a circle, not a book: the menu's own button is already a book,
+    # and two books in a row name neither of the things they point at.
+    assert 'data-icon="circle-question"' in help_item
+    assert "<circle" in help_item
+    assert 'd="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"' not in help_item  # the old book path
+
+    api_start = html.index('data-api="docs"')
+    api_item = html[api_start : html.index("</button>", api_start)]
+    assert 'data-icon="code"' in api_item
+    assert 'd="m8 9-3 3 3 3M16 9l3 3-3 3M14 5l-4 14"' in api_item
 
 
 def test_inline_script_is_syntactically_valid(client, tmp_path):
@@ -240,6 +453,55 @@ def test_inline_script_is_syntactically_valid(client, tmp_path):
             [node, "--check", str(script)], capture_output=True, text=True
         )
         assert result.returncode == 0, f"script #{i}: {result.stderr}"
+
+
+def _js_function(html, name):
+    """The source of one named JS function from the viewer page, by brace matching."""
+    i = html.index("{", html.index("function " + name + "("))
+    start = html.rindex("function " + name + "(", 0, i)
+    depth = 0
+    for j in range(i, len(html)):
+        if html[j] == "{":
+            depth += 1
+        elif html[j] == "}":
+            depth -= 1
+            if depth == 0:
+                return html[start : j + 1]
+    raise AssertionError("could not brace-match function " + name)
+
+
+def test_stat_dot_escapes_its_value_and_colour(client, tmp_path):
+    # statDot puts a count into markup and a CSS variable name into a quoted style
+    # attribute. Every caller passes a server-coerced integer, so nothing reaches it
+    # hostile today -- this runs the real function under Node with markup in both slots so
+    # the escaping cannot be dropped again without a red test.
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node unavailable to evaluate statDot")
+    html = client.get("/").text
+    script = tmp_path / "statdot.js"
+    script.write_text(
+        _js_function(html, "esc") + "\n" + _js_function(html, "statDot") + "\n"
+        "console.log(JSON.stringify({\n"
+        '  value: statDot("--pass", "passed", \'<img src=x onerror=alert(1)>\'),\n'
+        "  colour: statDot('--pass)\"></i><script>alert(1)</scr' + 'ipt><i x=\"',"
+        ' "passed", 3),\n'
+        '  label: statDot("--pass", "<b>passed</b>", 3),\n'
+        '  plain: statDot("--pass", "passed", 7)}));\n',
+        encoding="utf-8",
+    )
+    result = subprocess.run([node, str(script)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    out = json.loads(result.stdout)
+    # Markup in any slot survives only as escaped text ...
+    for slot in ("value", "colour", "label"):
+        assert "<img" not in out[slot] and "<script" not in out[slot], slot
+        assert "&lt;" in out[slot], slot
+    # ... and the style attribute is never broken out of.
+    assert out["colour"].count('"') == 2
+    assert "onerror=alert(1)&gt;" in out["value"]
+    # An ordinary integer count renders exactly as before the fix.
+    assert out["plain"] == '<span><i style="background:var(--pass)"></i>7 passed</span>'
 
 
 def test_i18n_locales_have_identical_keys(client, tmp_path):
@@ -324,6 +586,40 @@ def test_openapi_and_docs_serve(client):
     ]:
         codes = set(paths[path][method]["responses"])
         assert {"400", "403", "404"} <= codes, (path, method, codes)
+
+
+def test_bulk_delete_openapi_documents_body_limits_and_permission_policy(client):
+    from airflow_pytest_plugin.web.routes.common import MAX_BULK_DELETE_BODY_BYTES
+
+    doc = client.get("/api/openapi.json").json()
+    operation = doc["paths"]["/api/reports/delete"]["post"]
+
+    request_body = operation["requestBody"]
+    assert request_body["required"] is True
+    content = request_body["content"]["application/json"]
+    assert content["examples"]["selection"]["value"]["ids"]
+
+    schema_name = content["schema"]["$ref"].rsplit("/", 1)[-1]
+    schema = doc["components"]["schemas"][schema_name]
+    ids = schema["properties"]["ids"]
+    assert ids["type"] == "array"
+    assert ids["minItems"] == 1 and ids["maxItems"] == 200
+    assert ids["items"]["type"] == "string"
+    assert ids["items"]["maxLength"] == 4096
+    assert operation["responses"]["413"]["description"] == "Request body exceeds 1 MiB."
+    assert (
+        operation["responses"]["413"]["content"]["application/json"]["example"][
+            "detail"
+        ]
+        == f"request body too large (max {MAX_BULK_DELETE_BODY_BYTES} bytes)"
+    )
+
+    # Swagger must answer the destructive-action question without requiring source access:
+    # bulk uses the same per-DAG trigger permission as the single DELETE endpoint.
+    description = operation["description"].lower()
+    assert "permission policy" in description
+    assert "trigger" in description and "every referenced dag" in description
+    assert "batch-wide" in description
 
 
 def test_icon_routes(client):
@@ -557,6 +853,313 @@ def test_delete_endpoint_removes_report(client):
     # Gone from both list and detail.
     assert client.get("/api/reports").json()["reports"] == []
     assert client.get(f"/api/reports/{token}").status_code == 404
+
+
+def test_bulk_delete_removes_every_run_in_one_request(reports_root):
+    for i in range(25):
+        write_report(reports_root, ReportRef("dag", f"run{i:02d}", "task", 1), passed=1)
+    c = TestClient(make_app(reports_root))
+    ids = [r["id"] for r in c.get("/api/reports").json()["reports"]]
+
+    r = c.post("/api/reports/delete", json={"ids": ids})
+
+    assert r.status_code == 200
+    assert r.json() == {
+        "deleted": 25,
+        "failed": [],
+        "forbidden": [],
+        "missing": [],
+        "invalid": 0,
+    }
+    assert c.get("/api/reports").json()["reports"] == []
+
+
+def test_bulk_delete_checks_permission_per_dag_and_keeps_refused_runs(reports_root):
+    write_report(reports_root, ReportRef("mine", "r", "t", 1), passed=1)
+    write_report(reports_root, ReportRef("theirs", "r", "t", 1), passed=1)
+    c = TestClient(
+        make_app(reports_root, authorizer=lambda dag_id, user: dag_id == "mine")
+    )
+    by_dag = {r["dag_id"]: r["id"] for r in c.get("/api/reports").json()["reports"]}
+
+    r = c.post("/api/reports/delete", json={"ids": list(by_dag.values())})
+
+    body = r.json()
+    assert body["deleted"] == 1
+    # A batch must not become a way around the per-DAG check that guards single deletes.
+    assert body["forbidden"] == [by_dag["theirs"]]
+    left = [x["dag_id"] for x in c.get("/api/reports").json()["reports"]]
+    assert left == ["theirs"]
+
+
+def test_bulk_delete_uses_current_user_and_checks_authorization_once_per_dag(
+    reports_root,
+):
+    mine = [
+        ReportRef("mine", "r1", "t", 1),
+        ReportRef("mine", "r2", "t", 1),
+    ]
+    theirs = ReportRef("theirs", "r1", "t", 1)
+    for ref in [*mine, theirs]:
+        write_report(reports_root, ref, passed=1)
+    calls = []
+
+    def authorize(dag_id, user):
+        calls.append((dag_id, user))
+        return dag_id == "mine"
+
+    c = TestClient(make_app(reports_root, authorizer=authorize))
+    response = c.post(
+        "/api/reports/delete",
+        json={"ids": [mine[0].token, theirs.token, mine[1].token]},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "deleted": 2,
+        "failed": [],
+        "forbidden": [theirs.token],
+        "missing": [],
+        "invalid": 0,
+    }
+    assert calls == [("mine", _TEST_USER), ("theirs", _TEST_USER)]
+    assert os.path.isdir(ReportLayout().dir_for(reports_root, theirs))
+
+
+def test_bulk_delete_cannot_delete_any_run_when_trigger_permission_is_denied(
+    reports_root,
+):
+    refs = [ReportRef("a", "r", "t", 1), ReportRef("b", "r", "t", 1)]
+    for ref in refs:
+        write_report(reports_root, ref, passed=1)
+    c = TestClient(make_app(reports_root, authorizer=lambda dag_id, user: False))
+
+    response = c.post("/api/reports/delete", json={"ids": [r.token for r in refs]})
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "deleted": 0,
+        "failed": [],
+        "forbidden": [r.token for r in refs],
+        "missing": [],
+        "invalid": 0,
+    }
+    assert all(os.path.isdir(ReportLayout().dir_for(reports_root, ref)) for ref in refs)
+
+
+def test_bulk_delete_rejects_an_unusable_body_and_an_oversized_batch(client):
+    from airflow_pytest_plugin.web.routes.reports import (
+        _MAX_DELETE_BATCH,
+        _MAX_REPORT_TOKEN_LENGTH,
+    )
+
+    for body in ({}, {"ids": []}, {"ids": "tok"}, {"ids": {}}):
+        assert client.post("/api/reports/delete", json=body).status_code == 422
+    too_many = {"ids": ["tok"] * (_MAX_DELETE_BATCH + 1)}
+    assert client.post("/api/reports/delete", json=too_many).status_code == 422
+    private_value = "must-not-be-reflected-" + "x" * _MAX_REPORT_TOKEN_LENGTH
+    response = client.post("/api/reports/delete", json={"ids": [private_value]})
+    assert response.status_code == 422
+    assert private_value not in response.text
+    assert all("input" not in error for error in response.json()["detail"])
+
+
+def test_bulk_delete_rejects_a_large_body_before_json_validation(client):
+    from airflow_pytest_plugin.web.routes.common import MAX_BULK_DELETE_BODY_BYTES
+
+    marker = b"must-not-be-reflected"
+    raw = b'{"ids":["' + marker + b"x" * MAX_BULK_DELETE_BODY_BYTES + b'"]}'
+
+    response = client.post(
+        "/api/reports/delete",
+        content=raw,
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 413
+    assert marker not in response.content
+    assert len(response.content) < 200
+    assert len(client.get("/api/reports").json()["reports"]) == 1
+
+
+def test_bulk_delete_enforces_the_body_limit_without_content_length(client):
+    from airflow_pytest_plugin.web.routes.common import MAX_BULK_DELETE_BODY_BYTES
+
+    marker = b"chunked-must-not-be-reflected"
+
+    def chunks():
+        yield b'{"ids":["'
+        yield marker + b"x" * MAX_BULK_DELETE_BODY_BYTES
+        yield b'"]}'
+
+    response = client.post(
+        "/api/reports/delete",
+        content=chunks(),
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 413
+    assert marker not in response.content
+    assert len(response.content) < 200
+    assert len(client.get("/api/reports").json()["reports"]) == 1
+
+
+def test_bulk_delete_body_limit_applies_under_the_airflow_mount(reports_root):
+    from airflow_pytest_plugin.web.routes.common import MAX_BULK_DELETE_BODY_BYTES
+
+    write_report(reports_root, ReportRef("dag", "run", "task", 1), passed=1)
+    host = fastapi.FastAPI()
+    host.mount("/pytest-reports", make_app(reports_root))
+    mounted = TestClient(host)
+    marker = b"mounted-must-not-be-reflected"
+    raw = b'{"ids":["' + marker + b"x" * MAX_BULK_DELETE_BODY_BYTES + b'"]}'
+
+    response = mounted.post(
+        "/pytest-reports/api/reports/delete",
+        content=raw,
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 413
+    assert marker not in response.content
+    assert len(response.content) < 200
+    assert len(mounted.get("/pytest-reports/api/reports").json()["reports"]) == 1
+
+
+def test_bulk_delete_rejects_a_non_string_id_before_deleting_anything(client):
+    good = client.get("/api/reports").json()["reports"][0]["id"]
+
+    response = client.post("/api/reports/delete", json={"ids": [good, 42]})
+
+    assert response.status_code == 422
+    assert len(client.get("/api/reports").json()["reports"]) == 1
+
+
+def test_bulk_delete_deduplicates_ids(client):
+    good = client.get("/api/reports").json()["reports"][0]["id"]
+
+    response = client.post("/api/reports/delete", json={"ids": [good, good]})
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "deleted": 1,
+        "failed": [],
+        "forbidden": [],
+        "missing": [],
+        "invalid": 0,
+    }
+
+
+def test_bulk_delete_reports_bad_and_missing_ids_instead_of_failing_the_batch(client):
+    # One unusable id must not cost the caller the runs it could delete: a cleanup of
+    # thousands would otherwise be blocked by a single stale row in the browser's list.
+    good = client.get("/api/reports").json()["reports"][0]["id"]
+    gone = ReportRef("nope", "nope", "nope", 9).token
+
+    r = client.post("/api/reports/delete", json={"ids": [good, gone, "!!bad"]})
+
+    body = r.json()
+    assert r.status_code == 200 and body["deleted"] == 1
+    # A run that is already gone is reported apart from one storage refused to remove:
+    # only the second is worth keeping in the list and retrying.
+    assert body["missing"] == [gone]
+    assert body["failed"] == []
+    # An id the server cannot decode is counted, never echoed: reflecting it would hand
+    # a caller a way to make the response as large as the request.
+    assert body["invalid"] == 1
+    assert "!!bad" not in r.text
+    assert client.get("/api/reports").json()["reports"] == []
+
+
+def test_single_delete_reports_a_storage_failure_as_such_not_as_missing(
+    reports_root, monkeypatch
+):
+    # 404 tells the caller the run is gone. When storage refused the removal every file
+    # is still there -- and the bulk endpoint says so for the same run, so the two
+    # answers must not contradict each other.
+    from airflow_pytest_plugin.sources import filesystem
+
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref, passed=1)
+    c = TestClient(make_app(reports_root))
+    token = c.get("/api/reports").json()["reports"][0]["id"]
+    monkeypatch.setattr(
+        filesystem.shutil,
+        "rmtree",
+        lambda *a, **kw: (_ for _ in ()).throw(PermissionError("read-only")),
+    )
+
+    stuck = c.delete(f"/api/reports/{token}")
+    bulk = c.post("/api/reports/delete", json={"ids": [token]}).json()
+
+    assert stuck.status_code == 500
+    assert "not found" not in stuck.text
+    assert bulk["failed"] == [token] and bulk["missing"] == []
+    assert os.path.isdir(ReportLayout().dir_for(reports_root, ref))
+
+    # A run that really is gone still answers 404.
+    monkeypatch.undo()
+    assert c.delete(f"/api/reports/{token}").status_code == 200
+    assert c.delete(f"/api/reports/{token}").status_code == 404
+
+
+def test_bulk_delete_keeps_going_when_one_id_raises(reports_root):
+    # A batch is a partial operation by design: one exploding authorizer must not throw
+    # away the answer for the runs that were already deleted.
+    refs = [ReportRef("dag", f"run{i}", "t", 1) for i in range(3)]
+    for ref in refs:
+        write_report(reports_root, ref, passed=1)
+
+    boom = refs[1].token
+
+    c = TestClient(make_app(reports_root))
+    ids = [r["id"] for r in c.get("/api/reports").json()["reports"]]
+
+    from airflow_pytest_plugin.sources.filesystem import FileSystemReportSource
+
+    real_delete = FileSystemReportSource.delete
+
+    def exploding(self, ref):
+        if ref.token == boom:
+            raise RuntimeError("backing store went away")
+        return real_delete(self, ref)
+
+    FileSystemReportSource.delete = exploding
+    try:
+        r = c.post("/api/reports/delete", json={"ids": ids})
+    finally:
+        FileSystemReportSource.delete = real_delete
+
+    body = r.json()
+    assert r.status_code == 200
+    assert body["deleted"] == 2  # the other two really went
+    assert body["failed"] == [boom]
+
+
+def test_bulk_delete_separates_a_storage_failure_from_an_already_gone_run(
+    reports_root, monkeypatch
+):
+    # Both leave a row in the viewer, but only one is worth retrying -- and telling the
+    # user "no permission" for a read-only mount sends them to fix Airflow roles.
+    from airflow_pytest_plugin.sources import filesystem
+
+    stuck = ReportRef("dag", "stuck", "t", 1)
+    write_report(reports_root, stuck, passed=1)
+    c = TestClient(make_app(reports_root))
+    stuck_id = c.get("/api/reports").json()["reports"][0]["id"]
+    gone_id = ReportRef("dag", "gone", "t", 1).token
+
+    monkeypatch.setattr(
+        filesystem.shutil,
+        "rmtree",
+        lambda *a, **kw: (_ for _ in ()).throw(PermissionError("read-only")),
+    )
+    body = c.post("/api/reports/delete", json={"ids": [stuck_id, gone_id]}).json()
+
+    assert body["deleted"] == 0
+    assert body["failed"] == [stuck_id]  # still on disk, retrying may work
+    assert body["missing"] == [gone_id]  # nothing to retry
+    assert os.path.isdir(ReportLayout().dir_for(reports_root, stuck))
 
 
 def test_delete_unknown_is_404(client):
@@ -2348,3 +2951,536 @@ def test_allure_download_falls_back_for_a_source_without_streaming(reports_root)
     tok = ReportRef("dag", "run", "task", 1, -1).token
     r = c.get(f"/api/reports/{tok}/allure.zip")
     assert r.status_code == 200 and r.content[:2] == b"PK"
+
+
+# --- AI triage in the API ---------------------------------------------------------------
+def _triage_verdict(category="regression"):
+    return {
+        "category": category,
+        "hypothesis": "the loader stopped de-duplicating rows",
+        "confidence": "high",
+        "suggested_fix": "restore the DISTINCT clause",
+        "exc_type": "AssertionError",
+        "selector": "tests/test_x.py::test_f1",
+    }
+
+
+def test_report_detail_carries_the_ai_analysis(reports_root):
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref, passed=1, failed=1)
+    write_triage(
+        reports_root, ref, {"tests/test_x.py::test_f1": _triage_verdict("env")}
+    )
+    client = TestClient(make_app(reports_root))
+
+    body = client.get(f"/api/reports/{ref.token}").json()
+    assert body["triage"]["model"] == "claude-sonnet-5"
+    assert body["triage"]["counts"] == {"env": 1}
+    verdicts = {c["node_id"]: c["verdict"] for c in body["cases"]}
+    assert verdicts["tests.test_x::test_f1"]["category"] == "env"
+    assert verdicts["tests.test_x::test_f1"]["selector"] == "tests/test_x.py::test_f1"
+    assert verdicts["tests.test_x::test_p0"] is None
+
+
+def test_report_detail_without_triage_says_so_explicitly(reports_root):
+    # The key is always present: the UI branches on null, not on a missing field.
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref, passed=1, failed=1)
+    client = TestClient(make_app(reports_root))
+
+    body = client.get(f"/api/reports/{ref.token}").json()
+    assert body["triage"] is None
+    assert all(c["verdict"] is None for c in body["cases"])
+
+
+def test_run_list_flags_triaged_runs(reports_root):
+    triaged = ReportRef("dag", "run1", "task", 1)
+    plain = ReportRef("dag", "run2", "task", 1)
+    write_report(reports_root, triaged, passed=1, failed=1)
+    write_report(reports_root, plain, passed=1, failed=1)
+    write_triage(reports_root, triaged, {"tests.test_x::test_f1": _triage_verdict()})
+    client = TestClient(make_app(reports_root))
+
+    flags = {
+        r["run_id"]: r["has_triage"]
+        for r in client.get("/api/reports").json()["reports"]
+    }
+    assert flags == {"run1": True, "run2": False}
+
+
+def test_the_documented_examples_match_the_real_response(reports_root):
+    # The OpenAPI examples are hand-written, so they drift: `incomplete` was added to the
+    # triage payload and the example kept the old shape until a reader noticed. Pin them to
+    # what the endpoint actually returns, key for key.
+    from airflow_pytest_plugin.web.routes import reports as reports_routes
+
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref, passed=1, failed=1)
+    write_triage(reports_root, ref, {"tests.test_x::test_f1": _triage_verdict()})
+    client = TestClient(make_app(reports_root))
+
+    body = client.get(f"/api/reports/{ref.token}").json()
+    real_case = next(c for c in body["cases"] if c["verdict"])
+    listed = client.get("/api/reports").json()["reports"][0]
+    for name, example, actual in (
+        ("triage", reports_routes._EX_TRIAGE, body["triage"]),
+        ("verdict", reports_routes._EX_VERDICT, real_case["verdict"]),
+        ("case", reports_routes._EX_CASE, real_case),
+        ("detail", reports_routes._EX_DETAIL, body),
+        ("summary", reports_routes._EX_SUMMARY, listed),
+    ):
+        missing = set(actual) - set(example)
+        extra = set(example) - set(actual)
+        assert not missing, (
+            f"{name} example is missing documented keys: {sorted(missing)}"
+        )
+        assert not extra, (
+            f"{name} example documents keys the API never returns: {sorted(extra)}"
+        )
+
+
+def test_the_run_list_carries_the_verdict_mix_not_just_a_flag(reports_root):
+    # A flag answers "was it analysed"; the list should answer "analysed into WHAT" without
+    # opening each run. Comes from the stored roll-up, so the scan pays nothing extra.
+    triaged = ReportRef("dag", "run1", "task", 1)
+    plain = ReportRef("dag", "run2", "task", 1)
+    write_report(reports_root, triaged, passed=1, failed=1)
+    write_report(reports_root, plain, passed=1, failed=1)
+    write_triage(
+        reports_root, triaged, {"tests.test_x::test_f1": _triage_verdict("env")}
+    )
+    client = TestClient(make_app(reports_root))
+
+    rows = {r["run_id"]: r for r in client.get("/api/reports").json()["reports"]}
+    assert rows["run1"]["triage"] == {
+        "model": "claude-sonnet-5",
+        "counts": {"env": 1},
+        "incomplete": False,
+    }
+    assert rows["run2"]["triage"] is None and rows["run2"]["has_triage"] is False
+
+
+def test_the_list_flags_a_run_whose_triage_pass_broke(reports_root):
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref, passed=1, failed=1)
+    write_triage(reports_root, ref, {})
+    meta_path = os.path.join(ReportLayout().dir_for(reports_root, ref), META_FILENAME)
+    meta = json.load(open(meta_path, encoding="utf-8"))
+    meta["triage"]["incomplete"] = "triage provider error: 401"
+    json.dump(meta, open(meta_path, "w"))
+    client = TestClient(make_app(reports_root))
+
+    row = client.get("/api/reports").json()["reports"][0]
+    assert row["triage"] == {
+        "model": "claude-sonnet-5",
+        "counts": {},
+        "incomplete": True,
+    }
+
+
+def test_the_heatmap_marks_which_cells_the_ai_judged(reports_root):
+    # Hovering a cell should say what KIND of failure it was, not just that it was one.
+    for i, category in enumerate(("regression", "env")):
+        ref = ReportRef("dag", f"r{i}", "task", 1)
+        write_report(
+            reports_root,
+            ref,
+            passed=1,
+            failed=1,
+            created_at=f"2026-06-2{i}T10:00:00+00:00",
+        )
+        write_triage(
+            reports_root, ref, {"tests.test_x::test_f1": _triage_verdict(category)}
+        )
+    client = TestClient(make_app(reports_root))
+
+    body = client.get("/api/heatmap?dag_id=dag&task_id=task").json()
+    rows = {t["node_id"]: t for t in body["tests"]}
+    # Columns run oldest -> newest, so the categories follow the runs in order.
+    assert rows["tests.test_x::test_f1"]["cats"] == {"0": "regression", "1": "env"}
+    # A test with no verdict carries no `cats` key at all -- the payload stays sparse.
+    assert "cats" not in rows["tests.test_x::test_p0"]
+
+
+def test_the_heatmap_of_an_untriaged_dagtask_reads_no_verdict_files(
+    reports_root, monkeypatch
+):
+    # The window can be 100 runs; an untriaged dag·task must not pay a file read per run.
+    for i in range(3):
+        write_report(
+            reports_root,
+            ReportRef("dag", f"r{i}", "task", 1),
+            passed=1,
+            failed=1,
+            created_at=f"2026-06-2{i}T10:00:00+00:00",
+        )
+    src = FileSystemReportSource(report_root=reports_root)
+    reads: list = []
+    real = src.verdicts
+    monkeypatch.setattr(
+        src, "verdicts", lambda ref: (reads.append(ref), real(ref))[1], raising=False
+    )
+    client = TestClient(
+        create_app(
+            src,
+            authorizer=lambda d, u: True,
+            read_authorizer=lambda d, u: True,
+            user_dependency=lambda: _TEST_USER,
+        )
+    )
+
+    body = client.get("/api/heatmap?dag_id=dag&task_id=task").json()
+    assert body["tests"] and reads == []
+    assert all("cats" not in t for t in body["tests"])
+
+
+def test_the_list_names_the_model_that_judged_a_run(reports_root):
+    # The list mark is coloured by state and names its model on hover, so both have to
+    # reach the summary: the model is what tells "a provider judged this" apart from
+    # "report-only, nothing was judged".
+    judged = ReportRef("dag", "run1", "task", 1)
+    reported = ReportRef("dag", "run2", "task", 1)
+    write_report(reports_root, judged, passed=1, failed=1)
+    write_report(reports_root, reported, passed=1, failed=1)
+    write_triage(
+        reports_root, judged, {"tests.test_x::test_f1": _triage_verdict("env")}
+    )
+    # Report-only: a described failure, no model, no counts.
+    write_triage(
+        reports_root,
+        reported,
+        {"tests.test_x::test_f1": {**_triage_verdict(), "category": None}},
+        model=None,
+    )
+    client = TestClient(make_app(reports_root))
+
+    rows = {
+        r["run_id"]: r["triage"] for r in client.get("/api/reports").json()["reports"]
+    }
+    assert rows["run1"] == {
+        "model": "claude-sonnet-5",
+        "counts": {"env": 1},
+        "incomplete": False,
+    }
+    # No model -> the UI shows the grey "report only" state rather than a blue judged one.
+    assert rows["run2"] == {"model": None, "counts": {}, "incomplete": False}
+
+
+def test_a_provider_without_a_model_name_still_reads_as_judged(reports_root):
+    # Not every provider names its model -- pytest-triage's offline `fake` one exposes none,
+    # and a custom provider need not either. Keying "was this judged" off the model name
+    # made such a run read as "report only (no AI)" while its card showed real verdicts.
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref, passed=1, failed=1)
+    write_triage(
+        reports_root, ref, {"tests.test_x::test_f1": _triage_verdict("env")}, model=None
+    )
+    client = TestClient(make_app(reports_root))
+
+    row = client.get("/api/reports").json()["reports"][0]
+    # The mix is what says a model judged this run; the name is extra when there is one.
+    assert row["triage"] == {"model": None, "counts": {"env": 1}, "incomplete": False}
+
+
+def test_bulk_delete_refuses_rather_than_holding_every_worker_thread(reports_root):
+    # FastAPI serves sync endpoints from one bounded pool. Several callers clearing their
+    # history at once would otherwise hold every thread for the length of their batches,
+    # and health/list requests -- which answer in microseconds -- would queue behind them.
+    from airflow_pytest_plugin.web.routes import reports as routes
+
+    write_report(reports_root, ReportRef("dag", "run", "t", 1), passed=1)
+    c = TestClient(make_app(reports_root))
+    token = c.get("/api/reports").json()["reports"][0]["id"]
+
+    held = [
+        routes._bulk_delete_slots.acquire()
+        for _ in range(routes._MAX_CONCURRENT_BULK_DELETES)
+    ]
+    try:
+        r = c.post("/api/reports/delete", json={"ids": [token]})
+        assert r.status_code == 503
+        assert r.headers["retry-after"] == "5"
+        # Refused, not partially applied: the same batch can simply be sent again.
+        assert len(c.get("/api/reports").json()["reports"]) == 1
+    finally:
+        for _ in held:
+            routes._bulk_delete_slots.release()
+
+    # The slot is returned even when the batch raises, so the endpoint cannot leak them.
+    assert c.post("/api/reports/delete", json={"ids": [token]}).json()["deleted"] == 1
+
+
+def test_help_documents_every_parser_option(client):
+    # The guide is where an operator looks up what a parser argument does; an option the
+    # table forgets is an option nobody turns on. Pinned against the real signature so a
+    # new argument cannot ship undocumented.
+    import inspect
+
+    from airflow_pytest_plugin.producer import ArchivingResultParser
+
+    body = client.get("/help").text
+    options = [
+        name
+        for name in inspect.signature(ArchivingResultParser.__init__).parameters
+        if name != "self"
+    ]
+
+    assert len(options) == 14, "signature changed -- update the guide's table too"
+    for name in options:
+        assert f"<code>{name}</code>" in body, f"{name} is missing from the help table"
+    # Each row states a default, so nobody has to read the source to learn what unset does.
+    for default in ("<code>None</code>", "<code>True</code>", "<code>False</code>"):
+        assert default in body
+
+
+def test_help_explains_automatic_retention(client):
+    body = client.get("/help").text
+
+    for knob in (
+        "AIRFLOW_PYTEST_RETENTION_MAX_AGE_DAYS",
+        "AIRFLOW_PYTEST_RETENTION_MAX_RUNS",
+        "AIRFLOW_PYTEST_RETENTION_MAX_TOTAL_MB",
+    ):
+        assert knob in body
+    # The two rules that decide whether a team can trust the cleanup at all.
+    assert "prune_reports" in body
+    assert "dry_run=True" in body
+    assert "newest run of every DAG" in body
+
+
+def test_help_explains_what_each_airflow_role_can_do(client):
+    # "Why can't I delete this?" is the most common question a viewer asks, and the answer
+    # lives in Airflow's roles, not in the plugin. The guide has to state the mapping, both
+    # permissions, and the two rules that surprise people: per-DAG scope and fail-closed.
+    body = client.get("/help").text
+
+    assert "airflow role" in body.lower()
+    for row in ("See a run in the list", "Delete a report", "trigger (run the DAG)"):
+        assert row in body
+    assert "per DAG, not per plugin" in body
+    assert "refuses <em>everyone</em>" in body  # fail-closed, stated plainly
+
+
+def test_help_links_to_the_release_notes_for_this_exact_version(client):
+    # The changelog lives in the GitHub releases, one summary per release. The guide has to
+    # point at THIS install's release, not a generic page, or the reader has to work out
+    # which version they are on before they can read what changed.
+    from airflow_pytest_plugin.version import __version__
+
+    body = client.get("/help").text
+
+    base = "https://github.com/IKrysanov/airflow-pytest-plugin/releases"
+    assert f'href="{base}/tag/v{__version__}"' in body
+    assert f'href="{base}"' in body  # and the full list, for older versions
+    assert "__APX_VERSION__" not in body
+
+
+def test_failures_list_does_not_reparse_every_report(reports_root):
+    # node_id and outcome already live in each run's meta.json; only the failure MESSAGE
+    # needs junit.xml. Reading the report for the plain list meant one XML parse per
+    # failing run on every dashboard load -- the thing that turns a few simultaneous
+    # viewers into a stalled API server.
+    import builtins
+
+    for i in range(6):
+        ref = ReportRef("dag", f"run{i}", "task", 1)
+        out = write_tests(
+            reports_root,
+            ref,
+            [["tests/t.py::test_a", "failed"], ["tests/t.py::test_b", "passed"]],
+            created_at=f"2026-06-{i + 1:02d}T00:00:00+00:00",
+        )
+        meta_path = os.path.join(out, META_FILENAME)
+        meta = json.load(open(meta_path, encoding="utf-8"))
+        meta["summary"] = {
+            "total": 2,
+            "passed": 1,
+            "failed": 1,
+            "skipped": 0,
+            "errors": 0,
+            "duration": 1.0,
+            "success": False,
+        }
+        json.dump(meta, open(meta_path, "w", encoding="utf-8"))
+    c = TestClient(make_app(reports_root))
+    c.get("/api/reports")  # warm the scan
+
+    real_open, opened = builtins.open, []
+    builtins.open = lambda *a, **kw: (opened.append(a[0]), real_open(*a, **kw))[1]
+    try:
+        plain = c.get("/api/failures?latest=0").json()
+    finally:
+        builtins.open = real_open
+
+    assert plain["total"] == 6
+    assert opened == [], f"re-read {len(opened)} files"
+    assert {f["node_id"] for f in plain["failures"]} == {"tests/t.py::test_a"}
+
+
+def test_failures_still_work_for_runs_archived_without_compact_rows(reports_root):
+    # A report from before meta.json carried its test rows (or a source that cannot serve
+    # them) must still list its failures -- the fast path falls back to the full read.
+    ref = ReportRef("dag", "old", "task", 1)
+    write_report(reports_root, ref, passed=1, failed=1)
+    meta_path = os.path.join(ReportLayout().dir_for(reports_root, ref), META_FILENAME)
+    meta = json.load(open(meta_path, encoding="utf-8"))
+    meta.pop("tests", None)
+    json.dump(meta, open(meta_path, "w", encoding="utf-8"))
+
+    body = TestClient(make_app(reports_root)).get("/api/failures?latest=0").json()
+
+    assert body["total"] == 1
+    assert body["failures"][0]["outcome"] in ("failed", "error")
+
+
+def test_failure_clusters_bounds_how_many_reports_it_reads(reports_root):
+    # Clusters need the failure MESSAGE, which only junit.xml holds, so this is the one
+    # path that still parses reports. With one failure per run the item cap never bites:
+    # 2,000 sparsely-failing runs meant 2,000 parses. The newest reports already answer
+    # "what is the common cause", so the read count is bounded and the result says so.
+    from airflow_pytest_plugin.web.routes.failures import _CLUSTER_READ_CAP
+
+    for i in range(_CLUSTER_READ_CAP + 20):
+        write_report(
+            reports_root,
+            ReportRef("dag", f"run{i:04d}", "task", 1),
+            passed=1,
+            failed=1,
+            created_at=f"2026-06-01T{i // 60:02d}:{i % 60:02d}:00+00:00",
+        )
+    c = TestClient(make_app(reports_root))
+
+    body = c.get("/api/failure-clusters?latest=0").json()
+
+    assert body["capped"] is True
+    assert sum(cl["count"] for cl in body["clusters"]) == _CLUSTER_READ_CAP
+    # The plain list needs no messages, so it is not bounded by the read cap.
+    assert c.get("/api/failures?latest=0").json()["total"] == _CLUSTER_READ_CAP + 20
+
+
+def test_email_domain_allowlist_refuses_outside_recipients(client, monkeypatch):
+    # Manual send takes recipients from the request body, so read access to ONE dag was
+    # enough to have the organisation's SMTP server deliver a run -- captured output and
+    # Allure attachment included -- to any address. The allowlist bounds where it can go.
+    import airflow_pytest_plugin.web.routes.reports as reports_mod
+
+    spy = _SpyMailer()
+    monkeypatch.setattr(reports_mod, "build_mailer", lambda: spy)
+    monkeypatch.setenv("AIRFLOW_PYTEST_ALERTS_EMAIL_DOMAINS", "corp.io")
+    token = _first_token(client)
+
+    r = client.post(
+        f"/api/reports/{token}/email", json={"recipients": ["attacker@evil.net"]}
+    )
+    assert r.status_code == 400
+    assert "AIRFLOW_PYTEST_ALERTS_EMAIL_DOMAINS" in r.json()["detail"]
+    assert spy.sent == []  # refused before the mailer is ever built
+
+    # One blocked address refuses the whole request: a 200 that quietly mailed fewer
+    # people than asked would be worse than a no.
+    assert (
+        client.post(
+            f"/api/reports/{token}/email",
+            json={"recipients": ["qa@corp.io", "attacker@evil.net"]},
+        ).status_code
+        == 400
+    )
+    assert spy.sent == []
+
+    # Subdomains of a listed domain are in; a lookalike that merely ends with it is not.
+    assert (
+        client.post(
+            f"/api/reports/{token}/email", json={"recipients": ["qa@ci.corp.io"]}
+        ).status_code
+        == 200
+    )
+    assert (
+        client.post(
+            f"/api/reports/{token}/email", json={"recipients": ["a@corp.io.evil.net"]}
+        ).status_code
+        == 400
+    )
+    assert [s["recipients"] for s in spy.sent] == [["qa@ci.corp.io"]]
+
+
+def test_email_without_an_allowlist_still_mails_anywhere(client, monkeypatch):
+    # The knob is opt-in: unset, the endpoint behaves exactly as it did before 0.7.0.
+    import airflow_pytest_plugin.web.routes.reports as reports_mod
+
+    spy = _SpyMailer()
+    monkeypatch.setattr(reports_mod, "build_mailer", lambda: spy)
+    monkeypatch.delenv("AIRFLOW_PYTEST_ALERTS_EMAIL_DOMAINS", raising=False)
+    r = client.post(
+        f"/api/reports/{_first_token(client)}/email",
+        json={"recipients": ["someone@elsewhere.example"]},
+    )
+    assert r.status_code == 200 and spy.sent[0]["recipients"] == [
+        "someone@elsewhere.example"
+    ]
+
+
+def test_a_report_too_large_to_open_says_so_instead_of_404(client, monkeypatch):
+    # The run is in the list and on disk. Answering "not found" would send its owner looking
+    # for a deleted run instead of at the report that is simply too big to parse.
+    token = _first_token(client)
+    assert client.get(f"/api/reports/{token}").status_code == 200
+
+    monkeypatch.setenv("AIRFLOW_PYTEST_MAX_REPORT_MIB", "0.00001")
+    r = client.get(f"/api/reports/{token}")
+    assert r.status_code == 413
+    assert "AIRFLOW_PYTEST_MAX_REPORT_MIB" in r.json()["detail"]
+    assert "logs_only_fail" in r.json()["detail"]
+    # A token that really is missing still answers 404.
+    gone = ReportRef("nope", "nope", "nope", 1).token
+    assert client.get(f"/api/reports/{gone}").status_code == 404
+
+
+def test_the_report_size_limit_is_configurable(client, monkeypatch):
+    # The default is a guard rail, not a wall: an operator who really does archive more can
+    # raise it, and 0 removes it entirely.
+    token = _first_token(client)
+    monkeypatch.setenv("AIRFLOW_PYTEST_MAX_REPORT_MIB", "0.00001")
+    assert client.get(f"/api/reports/{token}").status_code == 413
+
+    monkeypatch.setenv("AIRFLOW_PYTEST_MAX_REPORT_MIB", "512")
+    assert client.get(f"/api/reports/{token}").status_code == 200
+
+    monkeypatch.setenv("AIRFLOW_PYTEST_MAX_REPORT_MIB", "0")  # unlimited
+    assert client.get(f"/api/reports/{token}").status_code == 200
+
+
+def test_a_run_whose_report_is_missing_still_answers_404(
+    client, monkeypatch, reports_root
+):
+    # 413 says "too large", which is a claim about a file that is there. A run whose report
+    # was never written -- the task died before pytest produced one -- is a different
+    # problem, and answering "too large" would send its owner to the wrong setting.
+    token = _first_token(client)
+    for base, _dirs, names in os.walk(reports_root):
+        for name in names:
+            if name == "junit.xml":
+                os.remove(os.path.join(base, name))
+    r = client.get(f"/api/reports/{token}")
+    assert r.status_code == 404 and r.json()["detail"] == "report not found"
+
+
+def test_a_missing_hardened_xml_parser_is_announced_at_startup(reports_root, caplog):
+    # /api/health carries `secure_xml`, but nobody reads health until something is wrong.
+    # The default install has no defusedxml, so the one moment an operator can act on it is
+    # the log line the server writes when it comes up.
+    class _Plain(FileSystemReportSource):
+        secure_xml = False  # type: ignore[assignment]
+
+    with caplog.at_level("WARNING"):
+        create_app(
+            _Plain(report_root=reports_root),
+            authorizer=lambda dag_id, user: True,
+            read_authorizer=lambda dag_id, user: True,
+            user_dependency=lambda: _TEST_USER,
+        )
+    assert "defusedxml" in caplog.text and "secure-xml" in caplog.text
+
+    caplog.clear()
+    with caplog.at_level("WARNING"):
+        make_app(reports_root)  # the dev/test install HAS it -> silence
+    assert "defusedxml" not in caplog.text

@@ -1215,3 +1215,50 @@ def test_is_valid_email_linear_on_adversarial_input():
     for address in hostile * 200:
         assert is_valid_email(address) is False
     assert time.perf_counter() - start < 0.5  # 600 hostile inputs, far under a second
+
+
+def test_domain_allowlist_matches_labels_not_suffixes(monkeypatch):
+    from airflow_pytest_plugin.notifications import domain_allowed
+
+    monkeypatch.delenv("AIRFLOW_PYTEST_ALERTS_EMAIL_DOMAINS", raising=False)
+    assert domain_allowed("anyone@anywhere.example")  # opt-in: unset = unrestricted
+
+    # "@corp.io", ".corp.io" and "corp.io" all mean the same thing.
+    monkeypatch.setenv("AIRFLOW_PYTEST_ALERTS_EMAIL_DOMAINS", "@corp.io, .team.dev")
+    for good in ("qa@corp.io", "qa@CORP.IO", "a@ci.corp.io", "b@team.dev"):
+        assert domain_allowed(good), good
+    for bad in ("a@evil.net", "a@corp.io.evil.net", "a@notcorp.io", "a@io"):
+        assert not domain_allowed(bad), bad
+
+
+def test_configured_recipients_outside_the_allowlist_are_dropped(monkeypatch, caplog):
+    from airflow_pytest_plugin.notifications import AlertPolicy
+
+    monkeypatch.setenv("AIRFLOW_PYTEST_ALERTS_EMAIL_TO", "team@corp.io,out@evil.net")
+    monkeypatch.setenv("AIRFLOW_PYTEST_ALERTS_EMAIL_DOMAINS", "corp.io")
+    with caplog.at_level("WARNING"):
+        policy = AlertPolicy.from_config()
+    # The automatic path is bounded too -- otherwise the allowlist would only cover the
+    # button and not the nightly alert it shares its recipients with.
+    assert policy.recipients == ("team@corp.io",)
+    assert "out@evil.net" in caplog.text
+
+
+def test_an_allowlist_that_names_no_domain_allows_nothing(monkeypatch, caplog):
+    from airflow_pytest_plugin.config import _warned_domain_values
+    from airflow_pytest_plugin.notifications import domain_allowed
+
+    # Someone who configured an allowlist asked for a restriction. A value that parses to
+    # no usable domain ("@", a stray comma) used to allow the whole internet -- the one
+    # outcome they did not ask for. It now allows nothing, and says so once.
+    for bad in ("@", ".", ",", " , ", "@."):
+        _warned_domain_values.clear()
+        monkeypatch.setenv("AIRFLOW_PYTEST_ALERTS_EMAIL_DOMAINS", bad)
+        with caplog.at_level("ERROR"):
+            assert not domain_allowed("attacker@evil.net"), bad
+            assert not domain_allowed("qa@corp.io"), bad
+        assert "AIRFLOW_PYTEST_ALERTS_EMAIL_DOMAINS" in caplog.text
+
+    # Absent is still unrestricted -- the knob is opt-in.
+    monkeypatch.delenv("AIRFLOW_PYTEST_ALERTS_EMAIL_DOMAINS")
+    assert domain_allowed("attacker@evil.net")

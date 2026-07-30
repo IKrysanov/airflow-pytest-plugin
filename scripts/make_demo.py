@@ -19,7 +19,7 @@ Nothing here is staged: it boots a REAL Airflow 3, triggers two DAGs that run py
 the plugin embedded in Airflow's own UI. Needs an interpreter that has Airflow, the operator,
 Playwright and ffmpeg on PATH -- i.e. the throwaway Airflow venv, not the plugin's:
 
-    .venv-airflow/bin/pip install allure-pytest pytest-cov
+    .venv-airflow/bin/pip install allure-pytest pytest-cov pytest-triage
     .venv-airflow/bin/python scripts/make_demo.py
 
 Two settings are easy to get wrong and cost hours:
@@ -54,7 +54,12 @@ VENV_BIN = pathlib.Path(sys.executable).parent
 DAGS = ("etl_daily_tests", "api_gateway_tests")
 
 SUITES = {
+    # Two of these fail, on purpose and in different ways: a stale expectation and an
+    # unreachable service. That is what gives the AI triage card something to judge, and it
+    # is also what a real board looks like -- the demo would be a poor showcase if every run
+    # were green.
     "test_checkout.py": """
+import socket
 import time
 
 def test_cart_totals():
@@ -65,9 +70,16 @@ def test_discount_applied():
     time.sleep(0.04)
     assert True
 
-def test_tax_rounding():
+def test_line_total_applies_discount_once():
+    # The expectation is stale: shipping joined the total two releases ago.
+    subtotal, tax, shipping = 100.0, 8.5, 5.0
     time.sleep(0.03)
-    assert round(1.005, 2) == 1.0
+    assert subtotal + tax + shipping == 108.5
+
+def test_payments_service_is_reachable():
+    with socket.socket() as s:
+        s.settimeout(0.3)
+        s.connect(("127.0.0.1", 59999))  # nothing listens here
 
 def test_currency_format():
     time.sleep(0.03)
@@ -115,7 +127,18 @@ for dag_id, path in (
         PytestOperator(
             task_id="suite",
             test_path=path,
-            parser=ArchivingResultParser(allure=True, coverage=True, coverage_source="."),
+            parser=ArchivingResultParser(
+                allure=True,
+                coverage=True,
+                coverage_source=".",
+                # pytest-triage's OFFLINE provider: real verdicts, no key, no network, no
+                # cost -- so the demo stays reproducible and nothing in it is staged. A real
+                # provider only changes which name appears on the card.
+                triage_provider="fake",
+            ),
+            # The failures are the point of the demo, not a broken pipeline: the outcome is
+            # in the report either way (same choice as examples/example_dag.py).
+            fail_on_test_failure=False,
         )
     globals()[dag_id] = dag
 """
@@ -221,7 +244,7 @@ with sync_playwright() as p:
             break
         pg.wait_for_timeout(1000)
     pg.reload()
-    pg.wait_for_timeout(2600)  # the rows go green
+    pg.wait_for_timeout(2600)  # the runs land
 
     # 4. Into the plugin, from Airflow's own sidebar.
     pg.click('a[href="/plugin/pytest-reports"]')
@@ -244,7 +267,26 @@ with sync_playwright() as p:
     pg.wait_for_timeout(1100)
     frame.locator("tr.clickable").first.click()  # newest run = the one just triggered
     frame.locator(".donut-pct").wait_for(timeout=20000)
-    pg.wait_for_timeout(2800)
+    pg.wait_for_timeout(2200)
+
+    # 5b. AI triage: the run-level card, then one failure's verdict in full.
+    card = frame.locator(".tri-card")
+    if card.count():
+        card.scroll_into_view_if_needed()
+        pg.wait_for_timeout(2000)
+        chips = frame.locator(".tri-filters button")
+        if chips.count() > 1:
+            chips.nth(1).click()  # filter the table to one category
+            pg.wait_for_timeout(1800)
+            frame.locator('.tri-filters button[data-tri=""]').click()
+            pg.wait_for_timeout(800)
+        row = frame.locator("tr.case:has(.case-tri)")
+        if row.count():
+            row.first.click()  # hypothesis + suggested fix + rerun command
+            pg.wait_for_timeout(3000)
+            row.first.click()
+            pg.wait_for_timeout(500)
+
     frame.locator("#flk-btn").click()  # flaky tests
     pg.wait_for_timeout(2400)
     pg.keyboard.press("Escape")
@@ -268,9 +310,10 @@ proc.terminate()
 webm = next(video_dir.glob("*.webm"))
 print("  video:", round(webm.stat().st_size / 1024 / 1024, 1), "MiB")
 
-# WebP keeps the 11 fps cadence while encoding unchanged regions efficiently. At README
-# display sizes, 800 px and the text preset keep the UI legible without GIF's palette cost.
-vf = "fps=11,scale=800:-2:flags=lanczos"
+# WebP keeps a steady cadence while encoding unchanged regions efficiently. At README display
+# sizes 760 px and the text preset keep the UI legible without GIF's palette cost; 9 fps and
+# quality 62 hold the whole tour -- now including the AI triage card -- under 2 MB.
+vf = "fps=9,scale=760:-2:flags=lanczos"
 OUT.parent.mkdir(parents=True, exist_ok=True)
 subprocess.run(
     [
@@ -287,7 +330,7 @@ subprocess.run(
         "-preset",
         "text",
         "-quality",
-        "75",
+        "62",
         "-loop",
         "0",
         "-an",

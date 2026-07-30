@@ -17,9 +17,11 @@ optional raw Allure results for TestOps)."""
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import json
 import logging
+import math
 import os
 import uuid
 from datetime import datetime, timezone
@@ -28,6 +30,11 @@ from urllib.parse import quote
 
 from airflow_pytest_operator import JUnitResultParser, ReportRequest, TestRunResult
 
+try:  # prefer the hardened parser, exactly as the reader does
+    from defusedxml.ElementTree import parse as _xml_parse
+except Exception:  # pragma: no cover - fallback path
+    from xml.etree.ElementTree import parse as _xml_parse
+
 from ..compat import get_conf_value, get_current_context
 from ..config import get_reports_root
 from ..layout import (
@@ -35,38 +42,116 @@ from ..layout import (
     COVERAGE_FILENAME,
     META_FILENAME,
     REPORT_FILENAME,
+    TRIAGE_FILENAME,
+    VERDICTS_FILENAME,
     ReportLayout,
 )
 from ..models import ReportRef
+from ..triage import TriageArchive, distill_report
 
 _log = logging.getLogger(__name__)
 
 #: Bumped when the meta.json shape changes incompatibly.
 META_SCHEMA_VERSION = 1
 
+#: Past this, an archived report is trimmed to failures-only capture even when the task
+#: asked to keep everything: the file is read whole by every viewer that opens the run, so
+#: an unbounded one is a problem for the reader, not just for the disk it sits on.
+_MAX_ARCHIVED_REPORT = 32 * 1024 * 1024
+#: ...but trimming parses the report on the worker, so past this it is refused and logged
+#: rather than risking the task's memory to save disk.
+_MAX_TRIMMABLE_REPORT = 512 * 1024 * 1024
+
+
+def _ini_value(args: tuple[str, ...], key: str) -> str | None:
+    """The value these args currently give pytest ini option ``key``, if any.
+
+    pytest keeps the LAST ``-o``/``--override-ini`` for a key, so that is what this
+    reports. All three accepted spellings are recognised, including the two-argv form
+    the operator base uses.
+    """
+    prefix = f"{key}="
+    found: str | None = None
+    for i, arg in enumerate(args):
+        if arg == "-o" and i + 1 < len(args):
+            arg = args[i + 1]
+        elif arg.startswith("-o"):
+            arg = arg[2:]
+        elif arg.startswith("--override-ini="):
+            arg = arg[len("--override-ini=") :]
+        else:
+            continue
+        if arg.startswith(prefix):
+            found = arg.split("=", 1)[1]
+    return found
+
+
+def _with_ini(args: tuple[str, ...], key: str, value: str) -> tuple[str, ...]:
+    """Pin one pytest ini option for this run.
+
+    Used for the capture settings the archive depends on. ``junit_logging`` defaults to
+    ``no``, and without it the archive holds tracebacks and nothing else -- a test's own
+    prints and log lines, usually the thing that actually explains the failure, are dropped
+    on the floor. The archive is the only copy (the worker's console is gone by the time
+    anyone opens the viewer), so this parser states what it needs instead of inheriting
+    whatever the operator version or the project's ini happens to set.
+
+    Appended only when it would change something, so the task log does not show the same
+    override twice. The task's own ``pytest_args`` are spliced after these and pytest
+    honours the last setting, so an explicit ``-o <key>=...`` in the DAG still wins.
+    """
+    if _ini_value(args, key) == value:
+        return args
+    return (*args, "-o", f"{key}={value}")
+
+
+def _with_junit_logging(args: tuple[str, ...], value: str) -> tuple[str, ...]:
+    """How much of each test's captured output pytest writes into the JUnit report."""
+    return _with_ini(args, "junit_logging", value)
+
 
 # The operator base is Any when its package ships without type info, concretely typed
 # otherwise, so the misc subclass error fires only sometimes. `unused-ignore` keeps this
 # quiet either way.
 class ArchivingResultParser(JUnitResultParser):  # type: ignore[misc, unused-ignore]
-    """Archive each run under the reports layout: the operator's JUnit result,
-    plus (with ``allure=True``) raw Allure results for TestOps export."""
+    """Archive each run under the reports layout: the operator's JUnit result, plus
+    (with ``allure=True``) raw Allure results for TestOps export, (with ``coverage=True``)
+    the run's coverage, and (with ``triage=True`` / ``triage_provider=...``) an AI verdict
+    per failed test."""
 
     def __init__(
         self,
         *,
         report_root: str | None = None,
         layout: ReportLayout | None = None,
+        logs: bool = True,
+        logs_only_fail: bool = False,
         allure: bool = False,
         coverage: bool = False,
         coverage_source: str | None = None,
         coverage_threshold: float | None = None,
+        triage: bool | None = None,
+        triage_provider: str | None = None,
+        triage_budget: int | None = None,
+        triage_timeout: float | None = None,
         email: bool = False,
         email_only_fail: bool = False,
     ) -> None:
         super().__init__()  # base report_dir stays None; we compute per-run
         self._report_root = os.path.abspath(report_root or get_reports_root())
         self._layout = layout or ReportLayout()
+        # Archive each test's own prints and log lines (see :func:`_with_junit_logging`).
+        # On by default: an archived run whose output was dropped is the one case where the
+        # viewer cannot answer "why did this fail?". False pins ``junit_logging=no`` for a
+        # suite whose logging would dwarf its report -- deterministic either way, rather
+        # than depending on the operator version or the project's ini. Tracebacks are
+        # unaffected; a DAG-level ``-o junit_logging=...`` still overrides both.
+        self._logs = logs
+        # Keep the capture, but only for tests that failed. The archive is dominated by
+        # the passing majority -- a suite printing a few KB per test writes more captured
+        # text than it does test results -- and their output is the part nobody reads.
+        # Ignored when logs=False (there is nothing to narrow).
+        self._logs_only_fail = logs_only_fail
         # When True, also pass pytest ``--alluredir`` (requires allure-pytest in the
         # worker, else pytest errors on the unknown arg) so raw Allure results land
         # beside junit.xml for TestOps export.
@@ -93,6 +178,40 @@ class ArchivingResultParser(JUnitResultParser):  # type: ignore[misc, unused-ign
         # single reader-side env var cannot express. Presentational only: like the env var
         # it tints the card and never fails a run (that is the operator's cov_fail_under).
         self._coverage_threshold = _unit_fraction_or_none(coverage_threshold)
+        # AI failure triage (pytest-triage on the worker; needs the package installed, else
+        # pytest aborts on the unrecognized flags -- exactly like allure/coverage above).
+        # Two levels, both opt-in and both self-contained:
+        #   triage=True                -> pytest writes its failure report into the archive
+        #                                 dir. No provider, no network, every verdict null;
+        #                                 the run still gets exc_type + a rerun selector per
+        #                                 failure.
+        #   triage_provider="anthropic" -> ALSO turns the LLM pass on, so each failure gets a
+        #                                 category / hypothesis / suggested fix. Naming a
+        #                                 provider implies the report, so one argument is
+        #                                 enough for the full feature.
+        # ``triage`` is tri-state on purpose. Left unset it is inferred from the provider,
+        # which is what makes the one-argument form work; written out as False it is an
+        # instruction and WINS over the provider. Anything else means a task that says
+        # `triage=False, triage_provider="anthropic"` -- a switch someone flipped off while
+        # leaving templated config in place -- still calls the model and still spends money.
+        # An explicit "off" that costs money is the one behaviour nobody can defend.
+        # The verdicts are read at ARCHIVE time, so (like coverage) they survive a FAILED run
+        # -- the parser runs before the operator raises. The roll-up lands in meta.json; the
+        # per-test verdicts in their own verdicts.json, which the tree scan never opens.
+        self._triage_provider = (triage_provider or "").strip() or None
+        if triage is False and self._triage_provider is not None:
+            _log.warning(
+                "triage=False overrides triage_provider=%r: no failure report is archived "
+                "and the provider is never called. Drop triage=False to use it.",
+                self._triage_provider,
+            )
+            self._triage_provider = None
+        self._triage = bool(triage) or self._triage_provider is not None
+        # Max provider calls per run (pytest-triage's own default is 10) and the wall-clock
+        # cap per call. Left unset, pytest-triage's defaults apply -- which is what a suite
+        # with a handful of failures wants; raise the budget for a suite that breaks wide.
+        self._triage_budget = _positive_int_or_none(triage_budget)
+        self._triage_timeout = _positive_float_or_none(triage_timeout)
         # Per-task switches for automatic email (both need
         # ``AIRFLOW_PYTEST_ALERTS_EMAIL_TO`` recipients + a mail transport):
         #   email=True           -> mail after EVERY run (styled by outcome).
@@ -127,6 +246,18 @@ class ArchivingResultParser(JUnitResultParser):  # type: ignore[misc, unused-ign
             self._report_dir,
         )
         req = super().report_request(report_dir)
+        req = dataclasses.replace(
+            req,
+            pytest_args=_with_junit_logging(
+                req.pytest_args, "all" if self._logs else "no"
+            ),
+        )
+        # NOTE: ``logs_only_fail`` deliberately does NOT set pytest's
+        # ``junit_log_passing_tests=False``. That option drops the capture of an *errored*
+        # test too -- a setup or teardown failure has no call phase, and its output is
+        # exactly the material that explains it. The archive is narrowed afterwards
+        # instead (see :meth:`_trim_capture`), which keeps failures and errors and costs
+        # only a larger report on the worker for the length of the task.
         if self._allure and req.report_path:
             allure_dir = os.path.join(os.path.dirname(req.report_path), ALLURE_DIRNAME)
             req = dataclasses.replace(
@@ -149,10 +280,20 @@ class ArchivingResultParser(JUnitResultParser):  # type: ignore[misc, unused-ign
                     f"--cov-report=json:{self._coverage_path(req.report_path)}",
                 ),
             )
+        if self._triage and req.report_path:
+            req = dataclasses.replace(
+                req, pytest_args=(*req.pytest_args, *self._triage_args(req.report_path))
+            )
         return req
 
     def parse(self, report_path: str, *, exit_code: int = 0) -> TestRunResult:
         result = super().parse(report_path, exit_code=exit_code)
+        # Runs before the sidecar, so meta.json is written next to the archive as it will
+        # be read. Best-effort like everything else here: never masks the test outcome.
+        try:
+            self._trim_capture(report_path)
+        except Exception:
+            _log.exception("Could not trim captured output in %s", report_path)
         # Best-effort sidecar: a write failure must never mask the test outcome.
         try:
             self._write_meta(report_path, result)
@@ -176,10 +317,156 @@ class ArchivingResultParser(JUnitResultParser):  # type: ignore[misc, unused-ign
 
     # -- internals -------------------------------------------------------
 
+    def _trim_capture(self, report_path: str) -> None:
+        """Drop captured output from cases that did not fail, when asked or when huge.
+
+        pytest can only be told to skip the capture of *passing* tests
+        (``junit_log_passing_tests``); a skipped test still gets its own, so 500 skips
+        printing 32KB each wrote a 6MB report that ``logs_only_fail=True`` promised not
+        to. Whatever pytest left is removed here, which is also the only place that can
+        keep the archive bounded: without it the report grows with whatever the suite
+        decided to print, and every viewer that opens the run pays for it.
+
+        Two triggers, both leaving failures and errors untouched -- they are the reason
+        the capture is archived at all:
+
+        * ``logs_only_fail=True`` -- the setting, applied exactly.
+        * a report past :data:`_MAX_ARCHIVED_REPORT` -- the safety net, so a chatty suite
+          cannot leave an unbounded file behind. Reported in the task log.
+        """
+        if not self._logs:
+            return  # nothing was captured to begin with
+        try:
+            size = os.path.getsize(report_path)
+        except OSError:
+            return
+        oversized = size > _MAX_ARCHIVED_REPORT
+        if not self._logs_only_fail and not oversized:
+            return
+        if size > _MAX_TRIMMABLE_REPORT:
+            # Rewriting means holding the tree in memory on the worker. Past this the
+            # cure is worse than the disease -- say so instead of risking the task.
+            _log.error(
+                "%s is %.1f MB of captured output and too large to trim safely; archive "
+                "it with logs=False or make the suite quieter",
+                report_path,
+                size / 1e6,
+            )
+            return
+        tree = _xml_parse(report_path)
+        removed = 0
+        for suite in tree.getroot().iter("testsuite"):
+            for case in suite.findall("testcase"):
+                if case.find("failure") is not None or case.find("error") is not None:
+                    continue
+                for tag in ("system-out", "system-err"):
+                    for node in case.findall(tag):
+                        case.remove(node)
+                        removed += 1
+        if not removed:
+            return
+        # Atomic: a reader scanning this directory never sees a half-written report.
+        tmp = f"{report_path}.{uuid.uuid4().hex}.tmp"
+        tree.write(tmp, encoding="utf-8", xml_declaration=True)
+        os.replace(tmp, report_path)
+        _log.info(
+            "Trimmed captured output from %d non-failing case streams in %s (%.1f -> %.1f MB)%s",
+            removed,
+            report_path,
+            size / 1e6,
+            os.path.getsize(report_path) / 1e6,
+            " because it exceeded the archive limit" if oversized else "",
+        )
+
     @staticmethod
     def _coverage_path(report_path: str) -> str:
         """Where pytest-cov should write the run's JSON coverage report."""
         return os.path.join(os.path.dirname(report_path), COVERAGE_FILENAME)
+
+    @staticmethod
+    def _triage_path(report_path: str) -> str:
+        """Where pytest-triage should write the run's failure report."""
+        return os.path.join(os.path.dirname(report_path), TRIAGE_FILENAME)
+
+    def _triage_args(self, report_path: str) -> tuple[str, ...]:
+        """pytest-triage flags for this run, aimed at the archive directory.
+
+        ``--ai-report`` alone gives the report with null verdicts; ``--ai-triage=on``
+        plus a provider adds the LLM pass. Budget and timeout are only passed when the
+        task pinned them, so pytest-triage's own defaults stay in force otherwise.
+        """
+        args = [f"--ai-report={self._triage_path(report_path)}"]
+        if self._triage_provider:
+            args += ["--ai-triage=on", f"--ai-provider={self._triage_provider}"]
+            if self._triage_budget is not None:
+                args.append(f"--ai-budget={self._triage_budget}")
+            if self._triage_timeout is not None:
+                args.append(f"--ai-timeout={self._triage_timeout:g}")
+        return tuple(args)
+
+    def _read_triage(self, report_path: str) -> dict[str, Any] | None:
+        """Archive the run's AI verdicts; return the roll-up for ``meta.json``.
+
+        The per-test verdicts are written to their own ``verdicts.json`` beside the report:
+        ``meta.json`` is parsed for every run on every tree scan, so it carries only the
+        roll-up (see :data:`~..layout.VERDICTS_FILENAME`).
+
+        ``None`` when triage wasn't requested, pytest-triage wrote nothing (not installed,
+        or the run died before its session finished), or the file is unreadable -- the run
+        then simply shows no AI analysis. Never raises: an unusable report must not cost
+        the archive its ``meta.json``.
+        """
+        if not self._triage:
+            return None
+        path = self._triage_path(report_path)
+        try:
+            with open(path, encoding="utf-8") as fh:
+                raw = json.load(fh)
+        except (OSError, ValueError, RecursionError):
+            # RecursionError, not just ValueError: that is how json.load fails on a nesting
+            # bomb, and uncaught it escapes _write_meta -- costing the run the very file that
+            # makes it visible in the viewer. Losing the AI section is fine; losing the run
+            # is not.
+            _log.debug("No readable triage report at %s", path, exc_info=True)
+            return None
+        archive = distill_report(raw)
+        if archive is None:
+            # Unreadable: keep it. It is then the only record of what went wrong, and the
+            # archive has no distilled copy to fall back on.
+            return None
+        # Drop the original ONLY once the distilled copy is on disk. It is the LARGEST file
+        # in a run's archive (measured: 10.1KB against junit.xml's 8.5KB on a nine-failure
+        # suite), it repeats tracebacks junit.xml already stores, and being owner-only the
+        # reader can never open it -- but deleting it after a failed write would leave a run
+        # that claims to be triaged with nothing behind it and no evidence of why.
+        if self._write_verdicts(report_path, archive):
+            with contextlib.suppress(OSError):
+                os.unlink(path)
+        return archive.rollup
+
+    def _write_verdicts(self, report_path: str, archive: TriageArchive) -> bool:
+        """Write ``verdicts.json`` atomically beside the report; ``True`` when it landed.
+
+        Atomic (temp + rename) so a reader scanning concurrently never opens a half file,
+        and uniquely named so two writers cannot share a temp. Catches ``Exception``, not
+        just ``OSError``: this runs while ``meta.json`` is being built, and a failure to
+        archive the per-test analysis must never cost the run its identity sidecar -- the
+        roll-up still lands, and the run still reads as triaged.
+        """
+        out_dir = os.path.dirname(os.path.abspath(report_path))
+        tmp = os.path.join(out_dir, f".{VERDICTS_FILENAME}.{uuid.uuid4().hex}.tmp")
+        try:
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(archive.verdicts_document(), fh, ensure_ascii=False)
+            os.replace(tmp, os.path.join(out_dir, VERDICTS_FILENAME))
+        except Exception:
+            _log.warning(
+                "Could not archive AI verdicts for %s", report_path, exc_info=True
+            )
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+            return False
+        return True
 
     def _read_coverage(self, report_path: str) -> float | None:
         """The run's overall line-coverage fraction (0-1) from the archived JSON report.
@@ -310,6 +597,10 @@ class ArchivingResultParser(JUnitResultParser):  # type: ignore[misc, unused-ign
             # Only written when the task pinned one; absent -> the reader applies its
             # AIRFLOW_PYTEST_SUCCESS_COVERAGE default.
             "coverage_threshold": self._coverage_threshold,
+            # The AI triage roll-up (model, duration, category counts) -- small on purpose,
+            # since every tree scan parses this file for every run. The per-test verdicts go
+            # to verdicts.json; tracebacks stay in junit.xml and in the raw report.
+            "triage": self._read_triage(report_path),
             "summary": result.to_xcom(),
             # Compact [node_id, outcome, duration] rows so cross-run views
             # (compare/flaky/history) need not re-parse junit.xml.
@@ -323,12 +614,34 @@ class ArchivingResultParser(JUnitResultParser):  # type: ignore[misc, unused-ign
 
     def _archive_allure(self, out_dir: str, ref: ReportRef) -> bool:
         """True if Allure results exist here; also drop an executor.json so the
-        TestOps launch links back to this Airflow run. Best-effort."""
+        TestOps launch links back to this Airflow run. Best-effort.
+
+        Says why when a task asked for Allure and the archive has none: the run then shows
+        no download button, and without a line in the task log that looks like the viewer
+        losing the report rather than the results never arriving.
+        """
+        if not self._allure:
+            return False
         allure_dir = os.path.join(out_dir, ALLURE_DIRNAME)
         try:
-            if not self._allure or not os.listdir(allure_dir):
-                return False
-        except OSError:  # no allure-results dir
+            entries = os.listdir(allure_dir)
+        except OSError:
+            # Our --alluredir never took effect. The task's own pytest_args are spliced
+            # after ours and the last --alluredir wins, so its results went elsewhere.
+            _log.warning(
+                "allure=True but %s does not exist: pytest wrote its results somewhere "
+                "else. A --alluredir in the task's own pytest_args overrides this "
+                "parser's, so the run is archived without an Allure download.",
+                allure_dir,
+            )
+            return False
+        if not entries:
+            _log.warning(
+                "allure=True but %s is empty: pytest produced no Allure results (no test "
+                "was collected, or the session failed before any ran). The run is "
+                "archived without an Allure download.",
+                allure_dir,
+            )
             return False
         try:
             with open(
@@ -382,6 +695,37 @@ def _unit_fraction_or_none(value: float | None) -> float | None:
         )
         return None
     return float(value)
+
+
+def _positive_int_or_none(value: int | None) -> int | None:
+    """A positive int, or ``None`` when unset / not an int / not positive.
+
+    Rejects rather than clamps, and warns: a task that wrote ``0`` or ``"20"`` should fall
+    back to pytest-triage's own default instead of silently disabling the AI pass.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        _log.warning("ignoring non-integer triage_budget %r", value)
+        return None
+    if value <= 0:
+        _log.warning("ignoring non-positive triage_budget %r", value)
+        return None
+    return value
+
+
+def _positive_float_or_none(value: float | None) -> float | None:
+    """A finite, positive number of seconds, or ``None`` when unset / unusable."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        _log.warning("ignoring non-numeric triage_timeout %r", value)
+        return None
+    number = float(value)
+    if not math.isfinite(number) or number <= 0:
+        _log.warning("ignoring non-positive triage_timeout %r", value)
+        return None
+    return number
 
 
 def _first_str(*values: Any, default: str) -> str:

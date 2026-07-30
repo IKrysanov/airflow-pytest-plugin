@@ -16,8 +16,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from ..compat import (
@@ -29,21 +30,24 @@ from ..compat import (
 )
 from ..sources import FileSystemReportSource, ReportSource
 from ..version import __version__
-from .routes.common import Authorizer, RouteDeps
+from .help_templates import help_html
+from .routes.common import MAX_BULK_DELETE_BODY_BYTES, Authorizer, RouteDeps
 from .templates import index_html
 
 _log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from fastapi import FastAPI
-    from fastapi.responses import HTMLResponse, Response
+    from fastapi import FastAPI, Request
+    from fastapi.responses import HTMLResponse, JSONResponse, Response
+    from starlette.types import ASGIApp, Message, Receive, Scope, Send
 else:
     # Viewer/icon routes annotate these; with future annotations FastAPI resolves
     # them from module globals, so they must live here. FastAPI is optional.
     try:
-        from fastapi.responses import HTMLResponse, Response
+        from fastapi import Request
+        from fastapi.responses import HTMLResponse, JSONResponse, Response
     except ModuleNotFoundError:  # pragma: no cover - only without fastapi installed
-        HTMLResponse = Response = None
+        HTMLResponse = JSONResponse = Request = Response = None
 
 #: Tag descriptions shown as Swagger UI section headers.
 _OPENAPI_TAGS = [
@@ -70,6 +74,150 @@ _API_DESCRIPTION = (
     "a run (dag·run·task·try). The viewer itself and its icons are served outside "
     "this schema."
 )
+
+_HELP_HEADERS = {
+    # Unlike the viewer, the guide is one constant string with no report data in it, so it
+    # can be cached -- but it still must never be served stale after an upgrade. no-cache
+    # keeps the copy and forces revalidation on every open; the ETag then turns a repeat
+    # visit into an empty 304 instead of ~95 KB, and changes to the page change the tag.
+    "Cache-Control": "no-cache, must-revalidate",
+    "Content-Security-Policy": (
+        "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
+        "img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; "
+        "form-action 'none'; frame-ancestors 'self'"
+    ),
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+    "Referrer-Policy": "no-referrer",
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "SAMEORIGIN",
+}
+
+
+_HELP_ETAG_CACHE: str | None = None
+
+
+class _RequestBodyLimitMiddleware:
+    """Reject one sensitive endpoint before FastAPI buffers and decodes a huge body."""
+
+    def __init__(
+        self,
+        app: ASGIApp,
+        *,
+        path: str,
+        method: str,
+        max_bytes: int,
+    ) -> None:
+        self.app = app
+        self.path = path
+        self.method = method
+        self.max_bytes = max_bytes
+
+    async def _reject(self, send: Send) -> None:
+        body = (
+            f'{{"detail":"request body too large (max {self.max_bytes} bytes)"}}'
+        ).encode()
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 413,
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"content-length", str(len(body)).encode()),
+                ],
+            }
+        )
+        await send({"type": "http.response.body", "body": body})
+
+    async def __call__(
+        self,
+        scope: Scope,
+        receive: Receive,
+        send: Send,
+    ) -> None:
+        request_path = scope.get("path", "")
+        root_path = scope.get("root_path", "")
+        if root_path and request_path.startswith(root_path):
+            request_path = request_path[len(root_path) :] or "/"
+        if (
+            scope["type"] != "http"
+            or request_path != self.path
+            or scope.get("method") != self.method
+        ):
+            await self.app(scope, receive, send)
+            return
+
+        for name, value in scope.get("headers", []):
+            if name.lower() != b"content-length":
+                continue
+            try:
+                declared_size = int(value)
+            except ValueError:
+                break
+            if declared_size > self.max_bytes:
+                await self._reject(send)
+                return
+            break
+
+        # Content-Length is optional (for example with chunked transfer encoding), so
+        # enforce the same limit while reading. Buffering at most one bounded request here
+        # also keeps the oversized value away from FastAPI/Pydantic's JSON parser.
+        messages: list[Message] = []
+        size = 0
+        while True:
+            message = await receive()
+            messages.append(message)
+            if message["type"] == "http.disconnect":
+                break
+            if message["type"] != "http.request":
+                continue
+            size += len(message.get("body", b""))
+            if size > self.max_bytes:
+                await self._reject(send)
+                return
+            if not message.get("more_body", False):
+                break
+
+        iterator = iter(messages)
+
+        async def replay() -> Message:
+            return next(iterator, {"type": "http.disconnect"})
+
+        await self.app(scope, replay, send)
+
+
+def _safe_validation_errors(
+    errors: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Strip caller-controlled values from FastAPI's otherwise reflective 422 body."""
+    unsafe = {"ctx", "input", "url"}
+    return [
+        {key: value for key, value in error.items() if key not in unsafe}
+        for error in errors
+    ]
+
+
+def _help_etag() -> str:
+    """Strong validator for the guide: the build's own content hash."""
+    global _HELP_ETAG_CACHE
+    if _HELP_ETAG_CACHE is None:
+        digest = hashlib.sha256(help_html().encode("utf-8")).hexdigest()[:32]
+        _HELP_ETAG_CACHE = f'"{digest}"'
+    return _HELP_ETAG_CACHE
+
+
+def _etag_matches(header: str | None, etag: str) -> bool:
+    """Whether an ``If-None-Match`` header covers ``etag`` (RFC 9110 weak comparison)."""
+    if not header:
+        return False
+    for candidate in header.split(","):
+        token = candidate.strip()
+        if token == "*":
+            return True
+        if token.startswith("W/"):
+            token = token[2:]
+        if token == etag:
+            return True
+    return False
 
 
 def _no_user() -> None:
@@ -107,10 +255,24 @@ def create_app(
     available, else allow-all. ``user_dependency`` overrides current-user lookup.
     """
     from fastapi import FastAPI
+    from fastapi.exceptions import RequestValidationError
 
     from .routes import compare, failures, flaky, monitoring, reports
 
     src = source or FileSystemReportSource()
+
+    # Said once, at startup, where an operator will see it: the hardened XML parser is an
+    # extra, so the default install reads archived reports with the stdlib one. That is fine
+    # when every report comes from your own suites and a real problem when it does not --
+    # and ``/api/health`` reporting ``secure_xml: false`` is only found by someone already
+    # looking.
+    if not getattr(src, "secure_xml", True):
+        _log.warning(
+            "Parsing archived JUnit XML with the stdlib parser: defusedxml is not "
+            "installed, so a hostile or corrupt report can exhaust API-server memory via "
+            "entity expansion. Install the extra: pip install "
+            "'airflow-pytest-plugin[secure-xml]'."
+        )
 
     def _allow_all(dag_id: str, user: Any) -> bool:
         return True
@@ -154,6 +316,26 @@ def create_app(
         docs_url="/api/docs",
         openapi_url="/api/openapi.json",
     )
+    app.add_middleware(
+        _RequestBodyLimitMiddleware,
+        path="/api/reports/delete",
+        method="POST",
+        max_bytes=MAX_BULK_DELETE_BODY_BYTES,
+    )
+
+    @app.exception_handler(RequestValidationError)
+    async def request_validation_error(
+        request: Request,
+        exc: RequestValidationError,
+    ) -> JSONResponse:
+        # Pydantic includes the original invalid value under ``input``. That is useful
+        # during development but lets an attacker reflect a large or sensitive string in
+        # the response. Location, error type and message are enough for API clients.
+        del request
+        return JSONResponse(
+            status_code=422,
+            content={"detail": _safe_validation_errors(exc.errors())},
+        )
 
     for module in (monitoring, reports, failures, compare, flaky):
         app.include_router(module.build_router(deps))
@@ -175,5 +357,18 @@ def create_app(
         return HTMLResponse(
             index_html(), headers={"Cache-Control": "no-store, must-revalidate"}
         )
+
+    # Both spellings are served directly. Left to Starlette's redirect_slashes, a
+    # bookmarked or hand-typed "/help/" costs an extra 307 round trip on every open --
+    # and shows up as two document requests for one visit.
+    @app.get("/help", response_class=HTMLResponse, include_in_schema=False)
+    @app.get("/help/", response_class=HTMLResponse, include_in_schema=False)
+    def help_page(request: Request) -> Response:
+        """Serve the static user guide without reading report data."""
+        etag = _help_etag()
+        headers = {**_HELP_HEADERS, "ETag": etag}
+        if _etag_matches(request.headers.get("if-none-match"), etag):
+            return Response(status_code=304, headers=headers)
+        return HTMLResponse(help_html(), headers=headers)
 
     return app

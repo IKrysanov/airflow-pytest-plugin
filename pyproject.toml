@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "airflow-pytest-plugin"
-version = "0.6.2"
+version = "0.7.0"
 description = "View airflow-pytest-operator results in the Airflow 3 web UI."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -51,6 +51,15 @@ web = ["fastapi>=0.110", "uvicorn>=0.23"]
 # Hardened XML parsing for untrusted JUnit reports (forwarded to the operator's
 # parser, which prefers defusedxml when present).
 secure-xml = ["defusedxml>=0.7"]
+# AI failure triage (ArchivingResultParser(triage=..., triage_provider=...)). A WORKER-side
+# extra: the parser splices pytest-triage's flags onto the pytest command line, so the
+# package must be importable where the tests run. The reader needs nothing -- it only reads
+# what was archived. Bare `triage` gets the failure report plus the offline `fake` provider;
+# the per-provider extras add that provider's SDK, so one install covers the whole feature.
+triage = ["pytest-triage>=0.1.2"]
+triage-anthropic = ["pytest-triage[anthropic]>=0.1.2"]
+triage-openai = ["pytest-triage[openai]>=0.1.2"]
+triage-gigachat = ["pytest-triage[gigachat]>=0.1.2"]
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
@@ -59,6 +68,16 @@ dev = [
     "defusedxml>=0.7",
     "mypy>=1.8",
     "ruff>=0.4",
+    # Mirrors the `triage` extra (kept concrete like the fastapi/defusedxml entries above).
+    # tests/test_triage_integration.py drives a REAL pytest-triage run (its offline `fake`
+    # provider — no key, no network) to pin the cross-library contract: flag names, report
+    # schema, node-id join, file permissions. Without it those tests importorskip, so the
+    # contract goes unchecked until a user hits it. Its own plugin is opt-in and inert.
+    "pytest-triage>=0.1.2",
+    # Same reasoning for Allure: tests/test_allure_integration.py runs REAL allure-pytest
+    # to pin where --alluredir actually writes. Faking that directory cannot catch results
+    # landing outside the archive, which is precisely how the download button goes missing.
+    "allure-pytest>=2.13",
 ]
 # Playwright UI regression suite (tests/ui, marker `ui`). Opt-in: heavy (real browser),
 # run locally + in a dedicated CI job. After install: `playwright install chromium`.
