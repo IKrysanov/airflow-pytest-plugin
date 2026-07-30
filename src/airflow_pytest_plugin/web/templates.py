@@ -1111,11 +1111,14 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       </button>
       <div class="menu" id="links-menu" role="menu" hidden>
         <button id="help-btn" class="menu-item" type="button" role="menuitem">
-          <svg data-icon="book-closed" viewBox="0 0 24 24" fill="none"
+          <!-- A question mark, not a book: the menu already opens with a book (the links
+               button itself), and two books side by side name nothing. -->
+          <svg data-icon="circle-question" viewBox="0 0 24 24" fill="none"
                stroke="currentColor" stroke-width="2"
                stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
-            <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+            <circle cx="12" cy="12" r="9"/>
+            <path d="M9.2 9.3a2.9 2.9 0 0 1 5.6 1c0 1.9-2.8 2.9-2.8 2.9"/>
+            <path d="M12 17.2h.01"/>
           </svg>
           <span data-i18n="help">Help</span>
         </button>

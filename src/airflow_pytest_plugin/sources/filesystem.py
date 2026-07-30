@@ -438,18 +438,40 @@ class FileSystemReportSource(ReportSource):
         target = self._safe_dir(ref)
         if target is None or not os.path.isdir(target):
             return False
+        failure: OSError | None = None
         try:
             shutil.rmtree(target)
-        except OSError:
-            _log.exception("Could not delete report %s", target)
+        except OSError as exc:
+            # Logged below, and only if it mattered: two callers deleting the same run --
+            # a retention sweep while someone clicks delete -- race here constantly, and
+            # the loser's FileNotFoundError is a non-event, not a page of traceback.
+            failure = exc
         # The tree walk can fail per entry, so confirm rather than trust the return.
         if os.path.exists(target):
             self._invalidate_scan()  # a partial delete still changed the run
-            _log.error(
-                "Report %s still exists after delete: storage refused the removal",
-                target,
-            )
+            # rmtree is not atomic: by the time it hits an entry it may not remove, it has
+            # already unlinked the rest. Saying only "storage refused" would leave an
+            # operator looking for a run that no longer exists -- the two outcomes need
+            # different actions, so name which one happened.
+            if os.path.exists(os.path.join(target, META_FILENAME)):
+                _log.error(
+                    "Report %s still exists after delete: storage refused the removal "
+                    "and the run is intact",
+                    target,
+                    exc_info=failure,
+                )
+            else:
+                _log.error(
+                    "Report %s was only partially deleted: storage refused part of the "
+                    "removal and the run is no longer readable. Its directory is now "
+                    "invisible to the viewer and to retention -- remove it by hand",
+                    target,
+                    exc_info=failure,
+                )
             return False
+        if failure is not None:
+            # Gone, but not by us: another deleter finished first. Nothing to report.
+            _log.debug("Report %s vanished while being deleted: %s", target, failure)
         # Remove now-empty ancestors so the tree doesn't accumulate orphan dirs.
         self._prune_empty_parents(
             os.path.dirname(target), os.path.realpath(self._report_root)

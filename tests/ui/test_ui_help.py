@@ -16,6 +16,8 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 from playwright.sync_api import expect
 
@@ -27,7 +29,9 @@ def test_help_button_replaces_dashboard_and_returns(dash):
 
     page.click("#links-btn")
     expect(page.locator("#links-menu")).to_be_visible()
-    expect(page.locator("#help-btn svg")).to_have_attribute("data-icon", "book-closed")
+    expect(page.locator("#help-btn svg")).to_have_attribute(
+        "data-icon", "circle-question"
+    )
     expect(page.locator('[data-api="docs"] svg')).to_have_attribute("data-icon", "code")
     page.click("#help-btn")
     page.wait_for_url("**/help")
@@ -106,13 +110,36 @@ def test_help_skip_link_only_expands_on_keyboard_focus(page, base_url):
     assert focused_size["height"] >= 44
 
 
-def test_help_marks_faq_current_at_page_end(page, base_url):
+# scroll-behavior is smooth and the guide is ~14000px tall, so a scroll assertion that
+# does not wait for the animation asserts whatever chapter happened to be passing by. Wait
+# for the position to stop moving instead.
+_SETTLE = """() => new Promise(done => {
+  let last = -1, still = 0;
+  const tick = () => {
+    if (scrollY === last) { if (++still > 8) return done(scrollY); }
+    else { still = 0; last = scrollY; }
+    requestAnimationFrame(tick);
+  };
+  tick();
+})"""
+
+
+def test_help_marks_the_last_chapter_current_at_page_end(page, base_url):
+    # The bottom of the page cannot put every chapter's heading under the activation line,
+    # so the last one is marked explicitly. Without that, scrolling to the end leaves the
+    # contents highlighting a chapter the reader scrolled past minutes ago.
     page.goto(base_url + "/help")
 
     page.evaluate("window.scrollTo(0, document.documentElement.scrollHeight)")
-    expect(page.locator('.toc a[href="#faq"]')).to_have_attribute(
-        "aria-current", "true"
+    page.evaluate(_SETTLE)
+
+    last = page.locator(".doc-section").last.get_attribute("id")
+    current = page.evaluate(
+        """() => [...document.querySelectorAll('.toc a')]
+             .filter(a => a.getAttribute('aria-current') === 'true')
+             .map(a => a.getAttribute('href'))"""
     )
+    assert current == [f"#{last}"], current
 
 
 def test_help_keeps_airflow_sidebar_icon_active_and_returns_from_nav(page, base_url):
@@ -221,3 +248,102 @@ def test_help_config_sample_is_translated(page, base_url, locale, comment):
     sample = page.locator("#ai-triage pre").first
     expect(sample).to_contain_text("triage_provider=")
     expect(sample).to_contain_text(comment)
+
+
+def test_help_footer_shows_a_selectable_plugin_version(page, base_url):
+    page.goto(base_url + "/help")
+
+    version = page.locator("#help-version")
+    expect(version).to_be_visible()
+    assert re.match(r"^v\d+\.\d+", version.inner_text()), version.inner_text()
+    # Selectable in one gesture: this string exists to be pasted into an issue.
+    assert version.evaluate("el => getComputedStyle(el).userSelect") == "all"
+    expect(version).to_have_attribute("aria-label", re.compile(r"version|версия", re.I))
+
+
+@pytest.mark.parametrize("width", [640, 768, 1024, 1440])
+def test_help_table_names_and_defaults_never_break_mid_token(page, base_url, width):
+    # "Fals / e" is not a default and "logs_only_f / ail" is not a name: both columns hold
+    # literals the reader copies. Whether the browser splits them depends on how wide the
+    # monospace font resolves -- it does not on a default headless Chromium, and does on a
+    # machine with a wider fallback -- so the font is widened here to force the condition
+    # the reader actually hit.
+    page.set_viewport_size({"width": width, "height": 900})
+    page.goto(base_url + "/help")
+    page.wait_for_selector("#setup table")
+    page.add_style_tag(content="#help-content td code { font-size: 26px; }")
+
+    broken = page.evaluate(
+        """() => [...document.querySelectorAll('#help-content tbody tr')]
+             .flatMap(tr => [tr.cells[0], tr.cells[1]])
+             .filter(Boolean)
+             .flatMap(td => [...td.querySelectorAll('code')])
+             .filter(c => c.getClientRects().length > 1)
+             .map(c => c.textContent.trim())"""
+    )
+    # The retention env vars are the one exception, and only on a phone: the table is a
+    # stack of cards there, so a 36-character name either wraps or is clipped out of sight.
+    assert [b for b in broken if not b.startswith("AIRFLOW_")] == [], broken
+
+
+def test_help_parameter_and_retention_tables_stay_readable_on_a_phone(page, base_url):
+    # Both tables carry long identifiers -- parser options and RETENTION env vars. A name
+    # split across lines stops being a name, and one clipped past the edge cannot be read
+    # or copied at all.
+    page.set_viewport_size({"width": 320, "height": 812})
+    page.goto(base_url + "/help")
+    page.wait_for_selector("#setup table")
+
+    assert (
+        page.evaluate("document.documentElement.scrollWidth - window.innerWidth") <= 2
+    )
+    clipped = page.evaluate(
+        """() => [...document.querySelectorAll('#setup *')]
+             .filter(e => e.getBoundingClientRect().right > innerWidth + 1).length"""
+    )
+    assert clipped == 0, f"{clipped} cells reach past the screen edge"
+
+    page.set_viewport_size({"width": 1440, "height": 900})
+    page.reload()
+    split = page.evaluate(
+        """() => [...document.querySelectorAll('#setup td:first-child code')]
+             .filter(c => c.getClientRects().length > 1).map(c => c.textContent)"""
+    )
+    assert split == [], f"option names broken across lines: {split}"
+
+
+def test_help_role_table_renders_in_both_languages(page, base_url):
+    for locale, heading in (
+        ("en", "What your Airflow role lets you do here"),
+        ("ru", "Что доступно в плагине при вашей роли в Airflow"),
+    ):
+        page.goto(base_url + "/help")
+        page.evaluate("(v) => localStorage.setItem('i18nextLng', v)", locale)
+        page.reload()
+        section = page.locator("#access")
+        expect(section.get_by_role("heading", name=heading)).to_be_visible()
+        # Five actions, each with what it needs and the role that usually carries it.
+        rows = section.locator("table tbody tr")
+        expect(rows).to_have_count(5)
+        assert all(rows.nth(i).locator("td").count() == 3 for i in range(5))
+
+
+def test_help_release_section_is_last_and_opens_the_notes(page, base_url):
+    page.goto(base_url + "/help")
+    page.wait_for_selector("#help-content")
+
+    # Last chapter, last entry in the contents: an upgrade note is what you look up after
+    # reading the guide, not before it.
+    sections = page.locator(".doc-section")
+    assert sections.last.get_attribute("id") == "whats-new"
+    assert page.locator(".toc a").last.get_attribute("href") == "#whats-new"
+    expect(page.locator("#whats-new .section-kicker")).to_contain_text("13")
+
+    for link in ("#rel-current-link", "#rel-all-link"):
+        href = page.locator(link).get_attribute("href")
+        assert href.startswith(
+            "https://github.com/IKrysanov/airflow-pytest-plugin/releases"
+        )
+        # Outward links must not be plain _blank: Airflow's iframe sandbox blocks that.
+        expect(page.locator(link)).to_have_attribute("rel", "noopener noreferrer")
+    assert re.search(r"v\d+\.\d+", page.locator("#whats-new").inner_text())

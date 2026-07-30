@@ -16,6 +16,11 @@
 
 from __future__ import annotations
 
+from functools import lru_cache
+from html import escape
+
+from ..version import __version__
+
 _HELP_HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -220,6 +225,13 @@ _HELP_HTML = r"""<!DOCTYPE html>
   th { color: var(--fg); background: var(--surface-2); font-size: 13px; }
   td { color: var(--muted); font-size: 14px; }
   tr:last-child td { border-bottom: 0; }
+  /* An identifier broken across lines ("logs_only_f / ail", "Fals / e") is not a name or a
+     value any more. The name and default columns keep their code on one line; the wrapper
+     scrolls if that needs room. On a phone the table is a stack of cards with nowhere to
+     scroll, so there the longest names (the retention env vars) wrap rather than being
+     clipped out of sight -- see below. Defaults are short enough to always fit. */
+  td:first-child code,
+  td:nth-child(2) code { white-space: nowrap; }
   .check-list { margin: 18px 0; padding: 0; display: grid; gap: 10px; list-style: none; }
   .check-list li { position: relative; padding-left: 30px; }
   .check-list li::before {
@@ -235,6 +247,9 @@ _HELP_HTML = r"""<!DOCTYPE html>
   }
   .faq details p { padding: 0 16px 16px; margin: 0; }
   footer { max-width: 780px; margin: 56px auto 0; color: var(--muted); font-size: 13px; text-align: center; }
+  .ver { font-size: 12px; color: var(--muted); user-select: all; }
+  .rel-links { margin: 18px 0; display: flex; flex-wrap: wrap; gap: 10px; }
+  .rel-links .btn { text-decoration: none; }
   footer a {
     min-height: 44px; padding: 0 4px; display: inline-flex; align-items: center;
     color: var(--primary); font-weight: 650; text-underline-offset: 3px;
@@ -279,6 +294,7 @@ _HELP_HTML = r"""<!DOCTYPE html>
       border-radius: 9px; background: var(--surface);
     }
     td { display: block; border: 0; }
+    td:first-child code { white-space: normal; overflow-wrap: anywhere; }
     td:first-child {
       padding-bottom: 6px; color: var(--fg); background: var(--surface-2);
       font-weight: 700;
@@ -406,6 +422,7 @@ _HELP_HTML = r"""<!DOCTYPE html>
         <a href="#email" data-i18n="navShare">Allure & email</a>
         <a href="#access" data-i18n="navAccess">Settings & access</a>
         <a href="#faq" data-i18n="navFaq">FAQ</a>
+        <a href="#whats-new" data-i18n="navRelease">Release notes</a>
       </nav>
     </aside>
 
@@ -454,6 +471,63 @@ PytestOperator(
         <div class="callout"><p data-i18n-html="setupTip"><strong>No special cleanup mode is required.</strong> The archiving parser owns its report directory, so you do not need <code>cleanup="never"</code>.</p></div>
         <h3 data-i18n="setupOptionalTitle">Enable optional features deliberately</h3>
         <p data-i18n="setupOptionalBody">Coverage, Allure export, AI triage, email, retention, and Prometheus metrics are independent. Enable only the features your team will use, verify their buttons or cards on one test DAG, and keep secrets in Airflow connections or environment variables rather than DAG source.</p>
+
+        <h3 data-i18n="paramsTitle">Every parser option</h3>
+        <p data-i18n-html="paramsIntro">Bare <code>ArchivingResultParser()</code> already archives the run and its captured output — everything below is optional. Options marked <em>worker-side</em> need their package installed where the tests run, or pytest stops on an unknown argument.</p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th data-i18n="paramCol">Option</th><th data-i18n="paramDefault">Default</th><th data-i18n="meaning">Meaning</th></tr></thead>
+            <tbody>
+              <tr><td><code>report_root</code></td><td><code>None</code></td><td data-i18n-html="pReportRoot">Where runs are archived. Unset, it follows <code>AIRFLOW_PYTEST_REPORTS_ROOT</code> — set that once for the whole install instead of repeating a path in every DAG.</td></tr>
+              <tr><td><code>layout</code></td><td><code>None</code></td><td data-i18n="pLayout">The directory scheme inside that root. Leave it alone unless you are migrating an existing archive; the viewer expects the default.</td></tr>
+              <tr><td><code>logs</code></td><td><code>True</code></td><td data-i18n="pLogs">Archive what each test printed and logged. Off, the run keeps tracebacks only — for a suite whose logging would dwarf its report.</td></tr>
+              <tr><td><code>logs_only_fail</code></td><td><code>False</code></td><td data-i18n="pLogsOnlyFail">Keep that output for failed and errored tests alone. The passing majority writes most of the volume and is the part nobody reads.</td></tr>
+              <tr><td><code>allure</code></td><td><code>False</code></td><td data-i18n-html="pAllure">Archive raw Allure results beside the run and show a download button for TestOps. <em>Worker-side:</em> needs <code>allure-pytest</code>.</td></tr>
+              <tr><td><code>coverage</code></td><td><code>False</code></td><td data-i18n-html="pCoverage">Measure coverage and store it with the run, so the Coverage card survives even a failed run. <em>Worker-side:</em> needs <code>pytest-cov</code>.</td></tr>
+              <tr><td><code>coverage_source</code></td><td><code>None</code></td><td data-i18n-html="pCoverageSource">What to measure, as in <code>coverage_source="src"</code>. Set it when the project already narrows coverage itself — otherwise measurement widens and the percentage silently changes.</td></tr>
+              <tr><td><code>coverage_threshold</code></td><td><code>None</code></td><td data-i18n="pCoverageThreshold">The bar this suite is judged against, 0 to 1. It only colours the card — it never fails a run. Unset, the server-wide default applies.</td></tr>
+              <tr><td><code>triage</code></td><td><code>None</code></td><td data-i18n-html="pTriage">AI triage. Left unset it follows <code>triage_provider</code>. <code>True</code> alone archives a failure report with no model calls; <code>False</code> is an off switch and wins even when a provider is named. <em>Worker-side:</em> needs <code>pytest-triage</code>.</td></tr>
+              <tr><td><code>triage_provider</code></td><td><code>None</code></td><td data-i18n-html="pTriageProvider">Which model service judges the failures — <code>"anthropic"</code>, <code>"openai"</code>, <code>"gigachat"</code>, or <code>"fake"</code> for an offline dry run. Naming one turns triage on. Keys come from the environment; the plugin never stores them.</td></tr>
+              <tr><td><code>triage_budget</code></td><td><code>None</code></td><td data-i18n="pTriageBudget">Most model calls one run may make — the cost ceiling, since each failing test costs one call. Unset, the library's own default (10) applies.</td></tr>
+              <tr><td><code>triage_timeout</code></td><td><code>None</code></td><td data-i18n="pTriageTimeout">Seconds one call may take before the run gives up on it and says the pass was incomplete.</td></tr>
+              <tr><td><code>email</code></td><td><code>False</code></td><td data-i18n="pEmail">Email the result after every run of this task. Needs a mail transport and recipients configured on the server.</td></tr>
+              <tr><td><code>email_only_fail</code></td><td><code>False</code></td><td data-i18n="pEmailOnlyFail">Email only when the run failed or a test is flaky — the setting most teams want, so a green night stays quiet.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="example">
+          <div class="example-label" data-i18n="paramsExampleLabel">A fully equipped task</div>
+          <pre data-i18n="paramsExampleCode">ArchivingResultParser(
+    logs_only_fail=True,
+    allure=True,
+    coverage=True,
+    coverage_source="src",
+    triage_provider="anthropic",
+    triage_budget=20,
+    email_only_fail=True,
+)</pre>
+        </div>
+
+        <h3 data-i18n="retentionTitle">Delete old reports automatically</h3>
+        <p data-i18n="retentionIntro">Reports are kept forever until someone prunes them: the plugin never deletes on its own. Turn on any of the limits below and schedule the cleanup from a maintenance DAG.</p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th data-i18n="paramCol">Setting</th><th data-i18n="paramDefault">Default</th><th data-i18n="meaning">Meaning</th></tr></thead>
+            <tbody>
+              <tr><td><code>AIRFLOW_PYTEST_RETENTION_MAX_AGE_DAYS</code></td><td data-i18n="retNone">unset</td><td data-i18n="retAge">Delete runs older than N days.</td></tr>
+              <tr><td><code>AIRFLOW_PYTEST_RETENTION_MAX_RUNS</code></td><td data-i18n="retNone">unset</td><td data-i18n="retRuns">Keep only the N newest runs of each DAG·task.</td></tr>
+              <tr><td><code>AIRFLOW_PYTEST_RETENTION_MAX_TOTAL_MB</code></td><td data-i18n="retNone">unset</td><td data-i18n="retSize">Keep the whole archive under N megabytes, deleting oldest first.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="example">
+          <div class="example-label" data-i18n="retentionDagLabel">Maintenance DAG</div>
+          <pre>from airflow_pytest_plugin import prune_reports
+
+with DAG("pytest_reports_retention", schedule="@daily", catchup=False):
+    PythonOperator(task_id="prune", python_callable=prune_reports)</pre>
+        </div>
+        <p data-i18n-html="retentionRules">Set as many limits as you like: a run goes if <strong>any</strong> of them says so. The <strong>newest run of every DAG·task is always kept</strong>, so a task's latest result never disappears no matter how tight the limits are. To see what a policy would remove before trusting it, call <code>prune_reports(dry_run=True)</code> — it deletes nothing and reports how many runs and bytes it would have freed.</p>
         <h3 data-i18n="setupAccessTitle">Check access with two roles</h3>
         <p data-i18n="setupAccessBody">Test with a normal reader and an operator: the reader should see only permitted DAG reports, while deletion should remain available only to a role that can trigger the DAG.</p>
       </section>
@@ -630,6 +704,24 @@ pytest_integration · try 1</pre>
           <li data-i18n="permission3">Deleting a report is permanent and requires permission to trigger that DAG.</li>
           <li data-i18n="permission4">This help page contains no report data and is available independently of DAG permissions.</li>
         </ul>
+
+        <h3 data-i18n="rolesTitle">What your Airflow role lets you do here</h3>
+        <p data-i18n-html="rolesIntro">The plugin adds no roles and no permission screen of its own. Every check asks Airflow the same question its own DAG pages ask — <em>may this user read this DAG, and may they trigger it?</em> — so whatever your team already granted per DAG decides what you see here. Two permissions cover everything:</p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th data-i18n="rolesAction">In the plugin</th><th data-i18n="rolesNeeds">Needs on that DAG</th><th data-i18n="rolesRole">Typical Airflow role</th></tr></thead>
+            <tbody>
+              <tr><td data-i18n="rolesSee">See a run in the list, open it, read tests, output and AI verdicts</td><td data-i18n="rolesRead">read</td><td data-i18n="rolesViewer">Viewer and above</td></tr>
+              <tr><td data-i18n="rolesCompare">Compare runs, flaky history, heatmap, coverage, failure clusters</td><td data-i18n="rolesRead">read</td><td data-i18n="rolesViewer">Viewer and above</td></tr>
+              <tr><td data-i18n="rolesExport">Download Allure results, copy a link, email a run</td><td data-i18n="rolesRead">read</td><td data-i18n="rolesViewer">Viewer and above</td></tr>
+              <tr><td data-i18n="rolesDelete">Delete a report — one, or a whole selection</td><td data-i18n="rolesTrigger">trigger (run the DAG)</td><td data-i18n="rolesUser">User / Op and above</td></tr>
+              <tr><td data-i18n="rolesConfigure">Turn features on, set the report directory, schedule cleanup</td><td data-i18n="rolesDeploy">no plugin permission — it is DAG code and environment</td><td data-i18n="rolesAdmin">whoever deploys DAGs</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p data-i18n-html="rolesPerDag">Permissions are <strong>per DAG, not per plugin</strong>. Someone who may read two of twenty DAGs sees exactly those two suites — the list, the charts, the KPIs and the flaky panel are all built from what they may read, so the dashboard tells them nothing about the rest. Deleting is checked the same way for every run in a selection: a mixed batch removes only the DAGs you may trigger and reports the others as kept.</p>
+        <div class="callout"><p data-i18n-html="rolesNote"><strong>Two things to know.</strong> The menu entry is visible to everyone who can sign in to Airflow — Airflow has no per-permission gate for plugin links — but a user with no readable DAG sees an empty list, and a direct link to someone else's run answers "not allowed". And if Airflow's permission system cannot be consulted at all, the plugin refuses <em>everyone</em> rather than guessing.</p></div>
+
         <p data-i18n="retentionBody">Administrators may configure automatic retention, so older reports can disappear. The newest run of every DAG·task is always kept by the built-in retention policy.</p>
       </section>
 
@@ -646,10 +738,30 @@ pytest_integration · try 1</pre>
           <details><summary data-i18n="faqDeleteQ">Why can't I delete a report?</summary><p data-i18n="faqDeleteA">Deletion requires trigger permission for that DAG. This is stricter than viewing because deletion removes the archived files for everyone.</p></details>
         </div>
       </section>
+
+      <section class="doc-section" id="whats-new">
+        <p class="section-kicker" data-i18n="relKicker">13 · Release notes</p>
+        <h2 data-i18n="relTitle">What changed, and when</h2>
+        <p data-i18n-html="relIntro">This install runs <strong class="mono" id="rel-version">v__APX_VERSION__</strong>. Every release carries its own summary of what changed — new features, fixes and anything that needs attention on upgrade — so the release notes are the one place to look before or after an upgrade.</p>
+        <div class="rel-links">
+          <a id="rel-current-link" class="btn" href="https://github.com/IKrysanov/airflow-pytest-plugin/releases/tag/v__APX_VERSION__" target="_blank" rel="noopener noreferrer">
+            <span class="btn-label" data-i18n="relThis">Notes for this version</span>
+          </a>
+          <a id="rel-all-link" class="btn" href="https://github.com/IKrysanov/airflow-pytest-plugin/releases" target="_blank" rel="noopener noreferrer">
+            <span class="btn-label" data-i18n="relAll">All releases</span>
+          </a>
+        </div>
+        <p data-i18n="relNote">If the notes for this version do not open, the release is not published yet — the list of all releases always works.</p>
+      </section>
     </article>
   </div>
   <footer>
     <span data-i18n="footer">Pytest Reports · user documentation</span>
+    ·
+    <!-- The version of the plugin actually serving this page: the first thing anyone is
+         asked for in a bug report, and the one thing a user cannot otherwise find in the
+         UI. Selectable, so it can be copied into an issue. -->
+    <span class="ver mono" id="help-version" data-i18n-al="pluginVersion">v__APX_VERSION__</span>
     ·
     <a id="footer-github-link" href="https://github.com/IKrysanov/airflow-pytest-plugin"
       target="_blank" rel="noopener noreferrer">GitHub</a>
@@ -672,7 +784,11 @@ pytest_integration · try 1</pre>
       navDetails: "Run details", navFlaky: "Flaky tests & history",
       navCompare: "Compare & heatmap", navFailures: "Failures & performance",
       navTriage: "Coverage & AI triage", navShare: "Allure & email",
-      navAccess: "Settings & access", navFaq: "FAQ",
+      navAccess: "Settings & access", navFaq: "FAQ", navRelease: "Release notes",
+      relKicker: "13 · Release notes", relTitle: "What changed, and when",
+      relIntro: "This install runs <strong class=\"mono\" id=\"rel-version\">v__APX_VERSION__</strong>. Every release carries its own summary of what changed — new features, fixes and anything that needs attention on upgrade — so the release notes are the one place to look before or after an upgrade.",
+      relThis: "Notes for this version", relAll: "All releases",
+      relNote: "If the notes for this version do not open, the release is not published yet — the list of all releases always works.",
       s1Kicker: "01 · First visit", s1Title: "Getting started",
       s1Intro: "Open <strong>Browse → Pytest</strong> in Airflow. The newest archived runs appear first. No separate sign-in or plugin language setting is needed.",
       s1Step1: "<strong>Start with the KPIs.</strong> They tell you how many runs and unique tests are visible, what is currently failing, and whether anything slowed down.",
@@ -691,6 +807,33 @@ pytest_integration · try 1</pre>
       setupTip: "<strong>No special cleanup mode is required.</strong> The archiving parser owns its report directory, so you do not need <code>cleanup=\"never\"</code>.",
       setupOptionalTitle: "Enable optional features deliberately",
       setupOptionalBody: "Coverage, Allure export, AI triage, email, retention, and Prometheus metrics are independent. Enable only the features your team will use, verify their buttons or cards on one test DAG, and keep secrets in Airflow connections or environment variables rather than DAG source.",
+      paramsTitle: "Every parser option",
+      paramsIntro: "Bare <code>ArchivingResultParser()</code> already archives the run and its captured output — everything below is optional. Options marked <em>worker-side</em> need their package installed where the tests run, or pytest stops on an unknown argument.",
+      paramCol: "Option", paramDefault: "Default",
+      pReportRoot: "Where runs are archived. Unset, it follows <code>AIRFLOW_PYTEST_REPORTS_ROOT</code> — set that once for the whole install instead of repeating a path in every DAG.",
+      pLayout: "The directory scheme inside that root. Leave it alone unless you are migrating an existing archive; the viewer expects the default.",
+      pLogs: "Archive what each test printed and logged. Off, the run keeps tracebacks only — for a suite whose logging would dwarf its report.",
+      pLogsOnlyFail: "Keep that output for failed and errored tests alone — the passing and skipped majority writes most of the volume and none of the part anyone reads.",
+      pAllure: "Archive raw Allure results beside the run and show a download button for TestOps. <em>Worker-side:</em> needs <code>allure-pytest</code>.",
+      pCoverage: "Measure coverage and store it with the run, so the Coverage card survives even a failed run. <em>Worker-side:</em> needs <code>pytest-cov</code>.",
+      pCoverageSource: "What to measure, as in <code>coverage_source=\"src\"</code>. Set it when the project already narrows coverage itself — otherwise measurement widens and the percentage silently changes.",
+      pCoverageThreshold: "The bar this suite is judged against, 0 to 1. It only colours the card — it never fails a run. Unset, the server-wide default applies.",
+      pTriage: "AI triage. Left unset it follows <code>triage_provider</code>. <code>True</code> alone archives a failure report with no model calls; <code>False</code> is an off switch and wins even when a provider is named. <em>Worker-side:</em> needs <code>pytest-triage</code>.",
+      pTriageProvider: "Which model service judges the failures — <code>\"anthropic\"</code>, <code>\"openai\"</code>, <code>\"gigachat\"</code>, or <code>\"fake\"</code> for an offline dry run. Naming one turns triage on. Keys come from the environment; the plugin never stores them.",
+      pTriageBudget: "Most model calls one run may make — the cost ceiling, since each failing test costs one call. Unset, the library's own default (10) applies.",
+      pTriageTimeout: "Seconds one call may take before the run gives up on it and says the pass was incomplete.",
+      pEmail: "Email the result after every run of this task. Needs a mail transport and recipients configured on the server.",
+      pEmailOnlyFail: "Email only when the run failed or a test is flaky — the setting most teams want, so a green night stays quiet.",
+      paramsExampleLabel: "A fully equipped task",
+      paramsExampleCode: "ArchivingResultParser(\n    logs_only_fail=True,\n    allure=True,\n    coverage=True,\n    coverage_source=\"src\",\n    triage_provider=\"anthropic\",\n    triage_budget=20,\n    email_only_fail=True,\n)",
+      retentionTitle: "Delete old reports automatically",
+      retentionIntro: "Reports are kept forever until someone prunes them: the plugin never deletes on its own. Turn on any of the limits below and schedule the cleanup from a maintenance DAG.",
+      retNone: "unset",
+      retAge: "Delete runs older than N days.",
+      retRuns: "Keep only the N newest runs of each DAG·task.",
+      retSize: "Keep the whole archive under N megabytes, deleting oldest first.",
+      retentionDagLabel: "Maintenance DAG",
+      retentionRules: "Set as many limits as you like: a run goes if <strong>any</strong> of them says so. The <strong>newest run of every DAG·task is always kept</strong>, so a task's latest result never disappears no matter how tight the limits are. To see what a policy would remove before trusting it, call <code>prune_reports(dry_run=True)</code> — it deletes nothing and reports how many runs and bytes it would have freed.",
       setupAccessTitle: "Check access with two roles",
       setupAccessBody: "Test with a normal reader and an operator: the reader should see only permitted DAG reports, while deletion should remain available only to a role that can trigger the DAG.",
       s2Kicker: "03 · Overview", s2Title: "Read the dashboard",
@@ -784,6 +927,20 @@ pytest_integration · try 1</pre>
       settingsBody: "The gear button lets you hide Recent runs, Reliability, or Flaky tests. The run list always remains. These choices stay in this browser only and do not affect teammates or server data.",
       languageTitle: "Language and theme",
       languageBody: "The viewer and this guide follow Airflow's selected Russian or English language and its light or dark theme. There is intentionally no separate plugin language switch.",
+      rolesTitle: "What your Airflow role lets you do here",
+      rolesIntro: "The plugin adds no roles and no permission screen of its own. Every check asks Airflow the same question its own DAG pages ask — <em>may this user read this DAG, and may they trigger it?</em> — so whatever your team already granted per DAG decides what you see here. Two permissions cover everything:",
+      rolesAction: "In the plugin", rolesNeeds: "Needs on that DAG", rolesRole: "Typical Airflow role",
+      rolesSee: "See a run in the list, open it, read tests, output and AI verdicts",
+      rolesCompare: "Compare runs, flaky history, heatmap, coverage, failure clusters",
+      rolesExport: "Download Allure results, copy a link, email a run",
+      rolesDelete: "Delete a report — one, or a whole selection",
+      rolesConfigure: "Turn features on, set the report directory, schedule cleanup",
+      rolesRead: "read", rolesTrigger: "trigger (run the DAG)",
+      rolesDeploy: "no plugin permission — it is DAG code and environment",
+      rolesViewer: "Viewer and above", rolesUser: "User / Op and above",
+      rolesAdmin: "whoever deploys DAGs",
+      rolesPerDag: "Permissions are <strong>per DAG, not per plugin</strong>. Someone who may read two of twenty DAGs sees exactly those two suites — the list, the charts, the KPIs and the flaky panel are all built from what they may read, so the dashboard tells them nothing about the rest. Deleting is checked the same way for every run in a selection: a mixed batch removes only the DAGs you may trigger and reports the others as kept.",
+      rolesNote: "<strong>Two things to know.</strong> The menu entry is visible to everyone who can sign in to Airflow — Airflow has no per-permission gate for plugin links — but a user with no readable DAG sees an empty list, and a direct link to someone else's run answers \"not allowed\". And if Airflow's permission system cannot be consulted at all, the plugin refuses <em>everyone</em> rather than guessing.",
       permissionsTitle: "Permissions",
       permission1: "You see only reports for DAGs you are allowed to read.",
       permission2: "Opening, comparing, exporting, and emailing a visible run require read access to its DAG.",
@@ -798,7 +955,8 @@ pytest_integration · try 1</pre>
       faqEmailQ: "Why is the Email button missing?", faqEmailA: "No mail transport is available to the plugin. Ask your Airflow administrator whether email notifications are configured.",
       faqFreshQ: "Why did a new run not appear immediately?", faqFreshA: "The report index is briefly cached. Click Refresh; new runs normally appear within a few seconds.",
       faqDeleteQ: "Why can't I delete a report?", faqDeleteA: "Deletion requires trigger permission for that DAG. This is stricter than viewing because deletion removes the archived files for everyone.",
-      footer: "Pytest Reports · user documentation"
+      footer: "Pytest Reports · user documentation",
+      pluginVersion: "Installed plugin version"
     },
     ru: {
       skip: "Перейти к справке", guide: "Руководство пользователя", back: "К отчётам",
@@ -813,7 +971,11 @@ pytest_integration · try 1</pre>
       navDetails: "Детали прогона", navFlaky: "Нестабильность и история",
       navCompare: "Сравнение и тепловая карта", navFailures: "Сбои и скорость",
       navTriage: "Покрытие и AI-разбор", navShare: "Allure и почта",
-      navAccess: "Настройки и доступ", navFaq: "Частые вопросы",
+      navAccess: "Настройки и доступ", navFaq: "Частые вопросы", navRelease: "История изменений",
+      relKicker: "13 · История изменений", relTitle: "Что изменилось и когда",
+      relIntro: "Установлена версия <strong class=\"mono\" id=\"rel-version\">v__APX_VERSION__</strong>. У каждого релиза своё описание изменений — что появилось, что исправлено и на что обратить внимание при обновлении. Это и есть то единственное место, куда стоит заглянуть до или после обновления.",
+      relThis: "Заметки к этой версии", relAll: "Все релизы",
+      relNote: "Если заметки к этой версии не открываются, релиз ещё не опубликован — список всех релизов работает всегда.",
       s1Kicker: "01 · Первый визит", s1Title: "С чего начать",
       s1Intro: "Откройте в Airflow <strong>Обзор → Pytest</strong>. Сначала показаны самые новые архивные прогоны. Отдельный вход или настройка языка плагина не нужны.",
       s1Step1: "<strong>Начните с показателей.</strong> Они покажут число прогонов и уникальных тестов, текущие сбои и замедления.",
@@ -832,6 +994,33 @@ pytest_integration · try 1</pre>
       setupTip: "<strong>Особый режим очистки не нужен.</strong> Каталогом отчёта владеет архивирующий парсер, поэтому <code>cleanup=\"never\"</code> не требуется.",
       setupOptionalTitle: "Включайте дополнительные возможности осознанно",
       setupOptionalBody: "Покрытие, экспорт Allure, AI-разбор, почта, хранение и метрики Prometheus независимы. Включайте только нужное команде, проверяйте карточки и кнопки на одном тестовом DAG, а секреты храните в подключениях Airflow или переменных среды, а не в коде DAG.",
+      paramsTitle: "Все параметры парсера",
+      paramsIntro: "Голый <code>ArchivingResultParser()</code> уже сохраняет прогон и вывод тестов — всё остальное необязательно. Параметры с пометкой <em>на воркере</em> требуют установленного пакета там, где идут тесты, иначе pytest остановится на незнакомом аргументе.",
+      paramCol: "Параметр", paramDefault: "По умолчанию",
+      pReportRoot: "Куда складывать прогоны. Если не задан, берётся <code>AIRFLOW_PYTEST_REPORTS_ROOT</code> — задайте его один раз на всю установку, а не путь в каждом DAG.",
+      pLayout: "Схема каталогов внутри этого корня. Не трогайте без переезда существующего архива: просмотрщик рассчитывает на схему по умолчанию.",
+      pLogs: "Сохранять то, что тест печатал и логировал. Выключено — в прогоне останутся только трассировки; для набора, чьи логи перевесят сам отчёт.",
+      pLogsOnlyFail: "Оставлять вывод только у упавших и сломавшихся тестов — прошедшие и пропущенные дают основной объём и ровно ту часть, которую никто не читает.",
+      pAllure: "Складывать исходные результаты Allure рядом с прогоном и показывать кнопку выгрузки в TestOps. <em>На воркере:</em> нужен <code>allure-pytest</code>.",
+      pCoverage: "Мерить покрытие и хранить его вместе с прогоном — карточка покрытия переживает даже упавший прогон. <em>На воркере:</em> нужен <code>pytest-cov</code>.",
+      pCoverageSource: "Что мерить, например <code>coverage_source=\"src\"</code>. Указывайте, если проект уже сужает покрытие сам: иначе область расширится, а процент незаметно изменится.",
+      pCoverageThreshold: "Планка для этого набора, от 0 до 1. Влияет только на цвет карточки и никогда не заваливает прогон. Не задана — действует общесерверное значение.",
+      pTriage: "ИИ-разбор падений. Не задан — следует за <code>triage_provider</code>. <code>True</code> без провайдера сохраняет отчёт о падениях без обращений к модели; <code>False</code> — выключатель, он побеждает даже при указанном провайдере. <em>На воркере:</em> нужен <code>pytest-triage</code>.",
+      pTriageProvider: "Какой сервис моделей разбирает падения — <code>\"anthropic\"</code>, <code>\"openai\"</code>, <code>\"gigachat\"</code> или <code>\"fake\"</code> для офлайн-прогона. Указание провайдера включает разбор. Ключи берутся из окружения, плагин их не хранит.",
+      pTriageBudget: "Предел вызовов модели за прогон — потолок расходов, поскольку каждый упавший тест стоит один вызов. Не задан — действует значение библиотеки (10).",
+      pTriageTimeout: "Сколько секунд отводится одному вызову, прежде чем прогон откажется его ждать и сообщит, что разбор не завершён.",
+      pEmail: "Отправлять письмо после каждого прогона этой задачи. Нужны настроенные на сервере транспорт почты и получатели.",
+      pEmailOnlyFail: "Писать только при падении или нестабильности — то, что нужно большинству команд: зелёная ночь остаётся тихой.",
+      paramsExampleLabel: "Задача со всеми возможностями",
+      paramsExampleCode: "ArchivingResultParser(\n    logs_only_fail=True,\n    allure=True,\n    coverage=True,\n    coverage_source=\"src\",\n    triage_provider=\"anthropic\",\n    triage_budget=20,\n    email_only_fail=True,\n)",
+      retentionTitle: "Автоматическая очистка старых отчётов",
+      retentionIntro: "Отчёты хранятся вечно, пока их кто-нибудь не удалит: сам плагин ничего не стирает. Включите любые из ограничений ниже и поставьте очистку в обслуживающий DAG.",
+      retNone: "не задано",
+      retAge: "Удалять прогоны старше N дней.",
+      retRuns: "Оставлять только N последних прогонов каждой пары DAG·задача.",
+      retSize: "Держать весь архив в пределах N мегабайт, удаляя самые старые.",
+      retentionDagLabel: "Обслуживающий DAG",
+      retentionRules: "Ограничений можно включить сколько угодно: прогон удаляется, если сработало <strong>любое</strong>. <strong>Самый свежий прогон каждой пары DAG·задача сохраняется всегда</strong> — последний результат задачи не исчезнет, как бы жёстко ни были выставлены лимиты. Чтобы посмотреть, что политика удалит, до того как ей довериться, вызовите <code>prune_reports(dry_run=True)</code>: он ничего не удаляет и сообщает, сколько прогонов и байтов освободил бы.",
       setupAccessTitle: "Проверьте доступ под двумя ролями",
       setupAccessBody: "Проверьте обычного читателя и оператора: читатель должен видеть отчёты только разрешённых DAG, а удаление должно оставаться доступно лишь роли с правом запуска DAG.",
       s2Kicker: "03 · Обзор", s2Title: "Как читать дашборд",
@@ -925,6 +1114,20 @@ pytest_integration · try 1</pre>
       settingsBody: "Кнопка-шестерёнка позволяет скрыть последние прогоны, надёжность или нестабильные тесты. Список прогонов остаётся всегда. Выбор хранится только в этом браузере и не влияет на коллег или данные сервера.",
       languageTitle: "Язык и тема",
       languageBody: "Вьюер и эта справка следуют выбранному в Airflow русскому или английскому языку и светлой или тёмной теме. Отдельного переключателя языка у плагина намеренно нет.",
+      rolesTitle: "Что доступно в плагине при вашей роли в Airflow",
+      rolesIntro: "Плагин не заводит своих ролей и своего экрана прав. Каждая проверка задаёт Airflow тот же вопрос, что и его собственные страницы DAG — <em>может ли этот пользователь читать этот DAG и может ли его запускать?</em> — так что выданные вашей командой права по DAG и определяют, что вы здесь увидите. Всё сводится к двум разрешениям:",
+      rolesAction: "Действие в плагине", rolesNeeds: "Нужно на этом DAG", rolesRole: "Типовая роль Airflow",
+      rolesSee: "Видеть прогон в списке, открывать его, читать тесты, вывод и ИИ-вердикты",
+      rolesCompare: "Сравнение прогонов, история нестабильности, тепловая карта, покрытие, кластеры ошибок",
+      rolesExport: "Скачивать результаты Allure, копировать ссылку, отправлять прогон почтой",
+      rolesDelete: "Удалять отчёт — один или всю выборку",
+      rolesConfigure: "Включать возможности, задавать каталог отчётов, ставить автоочистку",
+      rolesRead: "чтение", rolesTrigger: "запуск DAG",
+      rolesDeploy: "разрешение плагина не нужно — это код DAG и окружение",
+      rolesViewer: "Viewer и выше", rolesUser: "User / Op и выше",
+      rolesAdmin: "тот, кто выкладывает DAG",
+      rolesPerDag: "Права выдаются <strong>по DAG, а не на плагин целиком</strong>. Тот, кому доступны два DAG из двадцати, видит ровно эти два набора: список, графики, показатели и панель нестабильности строятся только из доступного ему, поэтому дашборд не расскажет ему об остальных. Удаление проверяется так же для каждого прогона выборки: смешанный пакет удалит только те DAG, которые вам разрешено запускать, а остальные вернёт как сохранённые.",
+      rolesNote: "<strong>Два момента.</strong> Пункт меню виден всем, кто вошёл в Airflow — у ссылок плагинов в Airflow нет отдельной проверки прав, — но пользователь без доступных DAG увидит пустой список, а прямая ссылка на чужой прогон ответит «недостаточно прав». А если систему прав Airflow вообще не удаётся опросить, плагин откажет <em>всем</em>, а не станет угадывать.",
       permissionsTitle: "Права",
       permission1: "Вы видите отчёты только тех DAG, на чтение которых у вас есть право.",
       permission2: "Открытие, сравнение, экспорт и отправка видимого прогона требуют права чтения его DAG.",
@@ -939,7 +1142,8 @@ pytest_integration · try 1</pre>
       faqEmailQ: "Почему нет кнопки «Почта»?", faqEmailA: "Плагину недоступен почтовый транспорт. Уточните у администратора Airflow, настроены ли почтовые уведомления.",
       faqFreshQ: "Почему новый прогон не появился сразу?", faqFreshA: "Индекс отчётов ненадолго кэшируется. Нажмите «Обновить»; обычно новый прогон появляется за несколько секунд.",
       faqDeleteQ: "Почему я не могу удалить отчёт?", faqDeleteA: "Для удаления нужно право запуска этого DAG. Оно строже просмотра, потому что удаление стирает архивные файлы для всех.",
-      footer: "Pytest Reports · документация для пользователей"
+      footer: "Pytest Reports · документация для пользователей",
+      pluginVersion: "Установленная версия плагина"
     }
   };
 
@@ -1031,7 +1235,10 @@ pytest_integration · try 1</pre>
     event.preventDefault();
     top.open(event.currentTarget.href, "_blank", "noopener");
   }
-  ["help-github-link", "help-api-link", "footer-github-link"].forEach(function (id) {
+  // Inside Airflow the page is an iframe whose sandbox blocks target=_blank, so every
+  // outward link goes through the same-origin parent instead.
+  ["help-github-link", "help-api-link", "footer-github-link",
+   "rel-current-link", "rel-all-link"].forEach(function (id) {
     document.getElementById(id).addEventListener("click", openHelpLink);
   });
   applyI18n();
@@ -1170,6 +1377,12 @@ pytest_integration · try 1</pre>
 """
 
 
+@lru_cache(maxsize=1)
 def help_html() -> str:
-    """Return the bilingual, dependency-free user guide HTML."""
-    return _HELP_HTML
+    """Return the bilingual, dependency-free user guide HTML.
+
+    The version is substituted rather than baked into the constant so it follows the
+    installed distribution -- a page that named the version it was written against would
+    be worse than no version at all.
+    """
+    return _HELP_HTML.replace("__APX_VERSION__", escape(__version__, quote=True))

@@ -8,92 +8,90 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.7.0] - unreleased
 
 ### Added
+
 - **AI triage — a verdict on every failed test.** With
-  [`pytest-triage`](https://pypi.org/project/pytest-triage/) on the worker, one parser
-  argument turns a wall of tracebacks into a diagnosis:
+  [`pytest-triage`](https://pypi.org/project/pytest-triage/) on the worker:
 
   ```python
   result_parser=ArchivingResultParser(triage_provider="anthropic")
   ```
 
-  Each failed test carries a **category** — `regression` / `flaky` / `env` / `test_bug` /
-  `unknown` — and expands to the model's hypothesis, a suggested fix, its confidence and a
-  copyable command that reruns exactly that test. A run-level card names the model, shows
-  the category mix as a proportional bar and filters the table to one group in a click; the
-  heatmap names the AI's reading of a hovered cell; the run list marks each analysed run —
-  blue judged, red the pass broke, grey report-only. Anthropic, OpenAI (and any
-  OpenAI-compatible endpoint) and GigaChat are supported — bring your own key.
+  Each failed test gets a category (`regression` / `flaky` / `env` / `test_bug` / `unknown`),
+  the model's hypothesis, a suggested fix, its confidence and a command that reruns just that
+  test. A run-level card names the model, shows the category mix and filters the case table;
+  the heatmap names the AI's reading of a hovered cell; the run list marks analysed runs
+  (blue judged, red the pass broke, grey report-only). Anthropic, OpenAI (and any
+  OpenAI-compatible endpoint), GigaChat, plus an offline `fake` provider.
 
-  - **Three levels of opt-in.** `triage=True` costs nothing (no provider, no network) and
-    still gives every failure its exception type and rerun command; naming a provider adds
-    the LLM pass; `triage_budget` / `triage_timeout` bound the spend.
-  - **Verdicts survive a failed run** and are stored beside it, not inside the file every
-    tree scan parses: at 3,000 runs × 200 verdicts, keeping them in `meta.json` made a cold
-    scan **4.4× slower** and grew the scanned corpus from 48 MB to 1.3 GB.
-  - **A pass that could not run is reported as such, not as verdicts.** A rejected key, a
-    timeout or an exhausted budget would otherwise leave a misconfigured run looking fully
-    analysed; those are dropped and the reason stated once, in the provider's own words.
-  - Nothing about triage can fail a run: an unreadable or half-written report just leaves
-    the archive without an AI section.
-  - New in the API: `triage` on `GET /api/reports/{id}` plus a `verdict` per case,
-    `has_triage` and a `triage` mix per run summary, and `cats` on the heatmap.
-  - New **worker-side** extras: `triage`, `triage-anthropic`, `triage-openai`,
-    `triage-gigachat`.
-  - Measured against a real provider: a nine-way-broken suite triaged by `claude-sonnet-5`
-    cost **$0.067 / 11,882 in + 2,090 out tokens / ~40 s** — one call per failing test, and
-    a retry pays again.
-- **A built-in user guide** at `/help`, opened from the links menu. Twelve sections cover
-  setup, the dashboard, reading a run, flaky history, comparison, triage, sharing and
-  permissions — bilingual like the viewer, following Airflow's theme, laid out for a phone
-  as well as a desktop. Static: no report data, no network calls, its own strict CSP, and
-  available even to a user whose report access is denied. Repeat visits revalidate against
-  an `ETag` and cost an empty 304.
-- **Bulk delete** — `POST /api/reports/delete` removes up to 200 runs per request, with
-  trigger permission evaluated **once per DAG** instead of once per run. The viewer sends
-  successive batches and counts them off, so clearing thousands of runs shows progress
-  instead of queueing a request per run behind the browser's handful of connections
-  (200 runs: 0.68 s → 0.28 s, 200 RBAC checks → 1). Partial success is reported per id:
-  refused runs stay on disk and in the list. At most four batches run at once — beyond
-  that the endpoint answers `503` without deleting anything and the viewer retries, so a
-  few simultaneous cleanups cannot hold every worker thread (unrelated API calls under
-  that load: 501 ms worst case → 4 ms).
-- **`logs` / `logs_only_fail`** on the parser decide how much of each test's captured
-  output is archived — see [Captured output](README.md#captured-output).
+  - `triage=True` archives a failure report with no model calls; naming a provider adds the
+    LLM pass; `triage=False` overrides a configured provider. `triage_budget` /
+    `triage_timeout` bound the spend. Only failed and errored tests are ever sent.
+  - A pass that could not run (rejected key, timeout, exhausted budget) is reported as
+    incomplete instead of as verdicts, so a misconfigured run does not read as analysed.
+  - Verdicts live in `verdicts.json` beside the run, not in the `meta.json` every tree scan
+    parses — keeping them there made a cold scan of 3,000 runs 4.4× slower.
+  - New API: `triage` and per-case `verdict` on `GET /api/reports/{id}`, `has_triage` and a
+    `triage` mix per run summary, `cats` on the heatmap. New worker extras `triage`,
+    `triage-anthropic`, `triage-openai`, `triage-gigachat`.
+  - Measured: nine failures triaged by `claude-sonnet-5` cost $0.067 / 11,882 in + 2,090 out
+    tokens / ~40 s — one call per failing test; a retry pays again.
+
+- **Captured output per test.** Each test's own prints and log lines are archived and shown
+  in a scrolling block under the traceback, for passing tests too. pytest's `junit_logging`
+  defaults to `no`, so the parser sets it itself rather than inheriting it from the operator
+  version or the project's ini.
+
+  - `logs=False` archives tracebacks only; `logs_only_fail=True` keeps the capture for failed
+    and errored tests. It is enforced on the archive rather than through pytest's
+    `junit_log_passing_tests`, which leaves skipped tests' capture in place and strips an
+    errored test's — the output that explains the error.
+  - Bounded: 16 KB per test, 2 MB of output and 4 MB of failure text per run, counted in
+    UTF-8 bytes. A report over 32 MB is trimmed to its failures on the worker.
+
+- **Bulk delete** — `POST /api/reports/delete` removes up to 200 runs per request with
+  trigger permission evaluated once per DAG instead of once per run (200 runs: 0.68 s →
+  0.28 s, 200 RBAC checks → 1). The viewer sends successive batches and shows progress;
+  refused runs stay on disk and in the list. At most four batches run at once — beyond that
+  the endpoint answers `503` without deleting anything and the viewer retries, so simultaneous
+  cleanups cannot hold every worker thread. The body is capped at 1 MiB, 200 ids, 4096
+  characters each; ids that cannot be decoded are counted, never echoed back.
+
+- **A built-in user guide** at `/help`, opened from the links menu. Twelve sections covering
+  setup, every parser option with its default, the dashboard, reading a run, flaky history,
+  comparison, triage, sharing, automatic retention and what each Airflow role may do.
+  Bilingual, follows Airflow's theme, laid out for phone and desktop, shows the installed
+  plugin version, and holds no report data — it stays available to a user whose report access
+  is denied. Repeat visits revalidate against an `ETag`.
+
+### Changed
+
+- CI installs a real Airflow for **every supported 3.x minor** (3.0, 3.1, 3.2, 3.3) with
+  Airflow's own constraints and runs the suite against each; the embedded-UI job now runs on
+  the oldest and the newest of them instead of one pinned version.
 
 ### Fixed
-- **A test's own prints and log lines are archived and shown.** pytest's `junit_logging`
-  defaults to `no`, so runs were archived with tracebacks and nothing else — the output
-  that usually explains the failure was dropped on the worker, whose console is gone by
-  the time anyone opens the viewer. The parser now states what it needs rather than
-  inheriting it. The capture gets its own scrolling block under the traceback (for passing
-  tests too), is kept out of failure clustering, and is bounded per test (16 KB) and per run
-  (2 MB of output, 4 MB of failure text) so one chatty — or wide-open — suite cannot turn a
-  run into a 66 MB response. The caps count UTF-8 bytes, not Python characters: measured in
-  characters, emoji output passed at 4× the limit (12.2 MB → 3.1 MB for the same run). Reports past 32 MB are trimmed to their failures on the worker,
-  whatever the setting, so the archive cannot grow without limit either.
-- **`logs_only_fail=True` now really means failed/error only.** pytest can only be told to
-  skip the capture of *passing* tests, so skipped ones kept writing theirs — 500 skips at
-  32 KB each left a 6 MB report the setting promised not to keep. The archive is trimmed
-  after the run instead of trusting the flag.
+
+
 - **A failed delete is no longer reported as success.** `shutil.rmtree` ran with
-  `ignore_errors=True` and the result was returned as `True` regardless, so a read-only
-  mount dropped the run from the list while every file stayed on disk. Removal is now
-  confirmed, and the viewer separates "no permission", "storage refused" and "the request
-  never completed" instead of blaming permissions for all three. Single `DELETE` answers
-  `500` (not `404`) when the store refused, so it no longer contradicts the bulk endpoint
-  for the same run, and one id raising mid-batch no longer discards the result for the rest.
-- **A missing Allure download is explained instead of silent.** With `allure=True`, results
-  land in the run's own directory — unless the task's own `pytest_args` set `--alluredir`
-  (spliced later, so it wins) or the session collected nothing. Both now say so in the task
-  log rather than leaving a run that simply has no button.
+  `ignore_errors=True` and `delete()` returned `True` regardless, so a read-only mount dropped
+  runs from the list while every file stayed on disk. Removal is now confirmed; the single
+  endpoint answers `500` (not `404`) when the store refused; the viewer separates "no
+  permission", "storage refused" and "the request never completed".
+- **Retention no longer reports space it never freed, and keeps its size budget.** `prune`
+  ignored the result of each delete, so a nightly job logged reclaimed gigabytes that were
+  still on disk. Only confirmed removals are counted (`RetentionResult` gained `failed`), one
+  raising run no longer aborts the sweep, and a refused run no longer stops the size policy:
+  it used to plan around the oldest run, fail to delete it and free nothing at all on every
+  later sweep, leaving the tree permanently over its limit.
+- **A missing Allure download is explained.** With `allure=True` the results land in the run's
+  directory unless the task's own `pytest_args` set `--alluredir` (spliced later, so it wins)
+  or the session collected nothing. Both cases now say so in the task log instead of leaving a
+  run that simply has no button.
 
 ### Security
-- The bulk-delete body is bounded before it is parsed: 1 MiB total, 1–200 ids, 4096
-  characters each. Ids that cannot be decoded are counted, never echoed, and validation
-  responses no longer reflect the rejected value — a request could otherwise make the
-  response as large as itself.
-- Captured output is stored verbatim and is outside Airflow's task-log masking. Suites that
-  print credentials or personal data should archive less of it: see
+
+- Captured output is stored verbatim, outside Airflow's task-log masking. Suites that print
+  credentials or personal data should archive less of it — see
   [Captured output](README.md#captured-output).
 
 ## [0.6.2] - 2026-07-23
@@ -572,7 +570,8 @@ the Airflow 3 web UI.
 - CI/CD: lint, type-check, unit (py3.10–3.13) + Airflow 3 integration matrices,
   CodeQL, OpenSSF Scorecard, DCO, and Trusted-Publishing release workflows.
 
-[Unreleased]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.6.2...HEAD
+[Unreleased]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.6.2...v0.7.0
 [0.6.2]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.5.0...v0.6.0

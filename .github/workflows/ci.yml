@@ -77,6 +77,14 @@ jobs:
 
   # Integration: install a REAL Airflow 3 and confirm the plugin, the producer
   # parser, and the FastAPI app import and build against the actual runtime.
+  #
+  # ONE ENTRY PER SUPPORTED AIRFLOW MINOR, at that minor's newest patch. Airflow
+  # ships minors often and each one has moved something we depend on (the Task SDK
+  # context, the auth manager, the plugin/FastAPI registration), so a new minor gets
+  # its own row here rather than replacing the previous one -- the plugin claims
+  # `apache-airflow>=3.0,<4.0` and this matrix is what makes that claim true.
+  # Interpreters are spread across the rows so the pairing is covered too; check that
+  # constraints-<airflow>/constraints-<python>.txt exists before adding a row.
   integration:
     name: Integration (Airflow ${{ matrix.airflow }}, py${{ matrix.python-version }})
     runs-on: ubuntu-latest
@@ -87,9 +95,15 @@ jobs:
           - airflow: "3.0.6"
             python-version: "3.11"
             constraint: "3.11"
-          - airflow: "3.2.1"
+          - airflow: "3.1.8"
+            python-version: "3.11"
+            constraint: "3.11"
+          - airflow: "3.2.2"
             python-version: "3.12"
             constraint: "3.12"
+          - airflow: "3.3.0"
+            python-version: "3.13"
+            constraint: "3.13"
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
@@ -131,20 +145,34 @@ jobs:
 
   # Integration UI: boot a REAL Airflow 3 api-server with the plugin mounted and drive
   # Playwright against the embedded app (/pytest-reports/). Proves the plugin registers,
-  # mounts and serves the working UI under Airflow's own runtime + auth manager. Airflow
-  # is pinned via its official constraints (same approach as the `integration` job).
+  # mounts and serves the working UI under Airflow's own runtime + auth manager.
+  #
+  # Runs on the OLDEST and the NEWEST supported minor: those are where embedding breaks
+  # -- the newest because Airflow moved something, the oldest because a fix for the
+  # newest quietly required something it does not have. The minors in between are
+  # covered by the `integration` job above.
   ui-airflow:
-    name: UI embedded in Airflow (Playwright)
+    name: UI embedded in Airflow ${{ matrix.airflow }} (Playwright)
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - airflow: "3.0.6"
+            python-version: "3.11"
+            constraint: "3.11"
+          - airflow: "3.3.0"
+            python-version: "3.13"
+            constraint: "3.13"
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
       - name: Install Airflow + plugin + UI test deps
         run: |
-          C="https://raw.githubusercontent.com/apache/airflow/constraints-3.2.1/constraints-3.12.txt"
-          pip install "apache-airflow==3.2.1" --constraint "${C}"
+          C="https://raw.githubusercontent.com/apache/airflow/constraints-${{ matrix.airflow }}/constraints-${{ matrix.constraint }}.txt"
+          pip install "apache-airflow==${{ matrix.airflow }}" --constraint "${C}"
           pip install -e ".[web,ui-test]"
       - name: Install Playwright browser
         run: python -m playwright install --with-deps chromium

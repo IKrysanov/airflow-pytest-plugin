@@ -24,19 +24,13 @@ results in the **Airflow 3** web UI.
 
 ![Trigger two pytest DAGs in Airflow, then browse their results in the Pytest Reports plugin](https://raw.githubusercontent.com/IKrysanov/airflow-pytest-plugin/main/docs/demo.webp)
 
-*Trigger two suites from Airflow, then open **Pytest Reports** in the same sidebar: the runs
-you just started are at the top of the list, next to their history — with per-test detail,
-flaky tests, a test×run heatmap and failures clustered by error.*
+The operator runs a `pytest` suite as an Airflow task and parses its JUnit report. This
+plugin archives each report — keyed by `dag_id / run_id / task_id / try` — and serves a web
+UI to browse them: per-run pass/fail counts and durations, the per-test breakdown with
+captured output, plus cross-run analytics — flaky detection, per-test history, run
+comparison, a test×run heatmap and a catalogue of unique tests.
 
-The operator runs a `pytest` suite as an Airflow task and parses the JUnit
-report into a structured result. This plugin archives each of those reports —
-keyed by `dag_id / run_id / task_id / try` — and serves a small web UI to browse
-them: pass/fail counts per run, durations, and the per-test breakdown (with
-failure messages) for any run. On top of that it adds **cross-run analytics** —
-flaky-test detection, per-test history, run-to-run comparison, a duration
-histogram, and a searchable catalogue of unique tests.
-
-It has two halves that share one on-disk layout:
+Two halves sharing one on-disk layout:
 
 | Side | Where it runs | What it is |
 | --- | --- | --- |
@@ -55,90 +49,51 @@ It has two halves that share one on-disk layout:
 - [Captured output](#captured-output)
 - [Coverage](#coverage)
 - [AI triage](#ai-triage)
+- [Allure / TestOps export](#allure--testops-export)
 - [Configuration](#configuration)
 - [Prometheus metrics](#prometheus-metrics)
+- [Retention (auto-cleanup)](#retention-auto-cleanup)
+- [Email alerts](#email-alerts)
 - [Architecture (SOLID)](#architecture-solid)
 - [Development](#development)
 - [License](#license)
 
 ## Screenshots
 
-**Overview** — the run list with the historical chart (per-status legend
-toggles, run numbers, a carousel beyond 30 runs, an optional **pass-rate trend
-line** with a success-threshold gridline, and **tick runs in the list to filter
-the chart to just their trend**) beside a **flaky-tests panel** (with its own
-search and a quarantined-only toggle), KPI cards (including a clickable **unique
-tests** count), and Airflow-matched colours and font. The run list is **grouped by
-dag·task** by default (a checkbox toggles the flat list) — collapsible groups with
-run count, pass-rate, average duration and last status, each sortable on its own;
-select a whole group to chart its trend. The ⚙ button in the header opens **dashboard
-settings**, where each main-board panel (*Recent runs*, *Reliability*, *Flaky tests*) can be
-switched off — it is then not rendered at all, and the choice is remembered in your browser
-across reloads. Everything is on by default and the run list is never affected:
+**Overview** — run list grouped by dag·task, historical chart with an optional pass-rate
+trend line, flaky panel, and KPI cards. The ⚙ button switches main-board panels off; the
+choice is remembered per browser.
 
 ![Pytest Reports — overview](https://raw.githubusercontent.com/IKrysanov/airflow-pytest-plugin/main/docs/screenshots/overview.png)
 
-**Dashboard settings** — switch any main-board panel off and it is not rendered at all; the
-choice is remembered in your browser across reloads:
-
 ![Pytest Reports — dashboard settings](https://raw.githubusercontent.com/IKrysanov/airflow-pytest-plugin/main/docs/screenshots/settings.png)
 
-**A single run** — a clickable success donut (pass-rate over the test count;
-click a slice to filter by status), a **coverage** card next to the duration (when the
-run was produced by [`airflow-pytest-operator`](https://github.com/IKrysanov/airflow-pytest-operator)
-`>= 0.6` with `coverage=True` — see [Coverage](#coverage); omitted when the run carries
-none), a **test-duration histogram** (10-second buckets, scrollable), case
-search / group-by-module, and every test's own prints and log lines on expand
-(kept in their own scrolling block under the traceback — see
-[Captured output](#captured-output)). With
-[AI triage](#ai-triage) on, each failed test also carries its verdict — *regression /
-flaky / environment / test bug* — with the model's hypothesis, a suggested fix and a
-rerun command, plus a run-level card that filters the table by category:
+**A single run** — success donut, coverage card, duration histogram, searchable case table,
+and each test's own prints and log lines on expand (see [Captured output](#captured-output)).
 
 ![Pytest Reports — a single run](https://raw.githubusercontent.com/IKrysanov/airflow-pytest-plugin/main/docs/screenshots/detail.png)
 
-**AI triage** — with [`pytest-triage`](https://pypi.org/project/pytest-triage/) on the
-worker, every failed test answers the question a traceback does not: *is this my code, the
-test, or the environment?* Each failure carries a **category** (regression / flaky /
-environment / test bug), and expands to the model's **hypothesis**, a **suggested fix**, its
-**confidence** and a ready-to-paste rerun command. The card above the table names the model,
-shows the category mix, and filters the table to one group in a click — see
-[AI triage](#ai-triage):
+**AI triage** — every failed test carries a category, hypothesis, suggested fix and a rerun
+command; the card above the table filters by category. See [AI triage](#ai-triage).
 
 ![Pytest Reports — AI triage](https://raw.githubusercontent.com/IKrysanov/airflow-pytest-plugin/main/docs/screenshots/triage.png)
 
-**Flaky tests & comparison** — from a run, *Flaky tests* lists the tests that
-both pass and fail across recent runs, each with a recent-outcome strip, a
-**flakiness score**, a **trend** arrow, and a **quarantine** badge, over a
-configurable analysis window; *Compare to previous* diffs it against the prior
-run; expanding a case offers its full **history**:
+**Flaky tests & comparison** — tests that both pass and fail in the window, with a score,
+trend and quarantine badge; *Compare to previous* diffs a run against the prior one.
 
 ![Pytest Reports — flaky tests](https://raw.githubusercontent.com/IKrysanov/airflow-pytest-plugin/main/docs/screenshots/flaky.png)
 
-**Slow tests & duration regressions** — the *Slowdowns* KPI opens a panel of tests
-whose **execution time got slower** (recent-half average vs the older half, over a
-configurable window) alongside the **slowest tests** by average duration. A test
-that speeds back up drops off the list. Inside a run, the case table sorts by
-execution time (slowest first) so the heaviest tests surface immediately.
+**Slowdowns** — tests whose recent average duration got worse, beside the slowest tests.
 
 ![Pytest Reports — slow tests & regressions](https://raw.githubusercontent.com/IKrysanov/airflow-pytest-plugin/main/docs/screenshots/slow.png)
 
-**Test×run heatmap** — the *Heatmap* button on a dag·task group (or a run's toolbar)
-opens a matrix of **tests (rows) × recent runs (columns)**, each cell coloured by that
-test's outcome (`did not run` is an empty dashed cell). Flaky tests read as alternating
-rows, a regression as a block of failures filling in on the right, and a run that broke
-the build as a red/error **column** — all at a glance. Rows sort most-broken first; click
-a cell to open that run, or a test name to open its history.
+**Test×run heatmap** — tests (rows) × recent runs (columns). Flaky tests read as alternating
+rows, a regression as a block, a broken build as a column.
 
 ![Pytest Reports — test×run heatmap](https://raw.githubusercontent.com/IKrysanov/airflow-pytest-plugin/main/docs/screenshots/heatmap.png)
 
-**Unique tests & failures** — the *Unique tests* KPI opens the searchable,
-paginated catalogue of every distinct test (each with its runs / pass-fail-error-skip
-counts / average time); the *Failures* KPI shows what's broken **now** — failures in each
-dag·task's latest run, so the count shrinks as tests are fixed — grouped into **clusters
-by normalized error** (biggest first) so common root causes surface instead of
-per-failure spam. Expand a cluster to its tests, or open the same clusters scoped to one
-run via the detail's *Error clusters* button:
+**Unique tests & failures** — the catalogue of distinct tests, and what is broken *now*,
+grouped into clusters by normalized error.
 
 ![Pytest Reports — unique tests](https://raw.githubusercontent.com/IKrysanov/airflow-pytest-plugin/main/docs/screenshots/unique.png)
 
@@ -153,21 +108,22 @@ pip install airflow-pytest-plugin          # producer side (workers)
 pip install 'airflow-pytest-plugin[web]'   # reader side (API server)
 ```
 
-On Airflow 3 the API server already provides FastAPI, so the bare install is
-enough there too; the `[web]` extra only adds the standalone dev server.
+Airflow 3's API server already provides FastAPI, so the bare install is enough there too;
+`[web]` only adds the standalone dev server.
 
-Optional extras, each for one side:
+Every Airflow 3 minor is covered by CI — the plugin is installed against **3.0, 3.1, 3.2 and
+3.3** with Airflow's own constraints, and the embedded UI is driven under the oldest and the
+newest of them.
 
 | Extra | Side | What it adds |
 |:--|:--|:--|
 | `web` | reader | FastAPI + uvicorn, for the standalone dev server |
 | `secure-xml` | reader | `defusedxml`, hardened parsing of untrusted JUnit reports |
-| `triage` | **worker** | `pytest-triage` — the failure report plus its offline `fake` provider ([AI triage](#ai-triage)) |
-| `triage-anthropic` / `triage-openai` / `triage-gigachat` | **worker** | the same, with that provider's SDK, so one install covers the whole feature |
+| `triage` | **worker** | `pytest-triage` plus its offline `fake` provider ([AI triage](#ai-triage)) |
+| `triage-anthropic` / `triage-openai` / `triage-gigachat` | **worker** | the same, with that provider's SDK |
 
-The triage extras belong on the **worker**, where the tests run: the parser splices
-pytest-triage's flags onto the pytest command line. The reader needs nothing extra — it only
-reads what was archived.
+The triage extras belong on the **worker**, where the tests run — the reader only reads what
+was archived.
 
 ## Quickstart
 
@@ -184,13 +140,10 @@ PytestOperator(
 )
 ```
 
-After each run the task log gets a tracking link straight to the archived report, opened
-**inside the Airflow UI** (`Pytest report archived — view it at
-http://…/plugin/pytest-reports?dag=…&run=…&task=…&try=1`), provided `[api] base_url` (or
-`[webserver] base_url`) is set — without it the log lists the run's coordinates instead.
+The task log then carries a tracking link straight to the archived run, provided
+`[api] base_url` is set.
 
-**2. Tell both sides where reports live** (one place, read by producer and
-reader alike):
+**2. Tell both sides where reports live:**
 
 ```bash
 export AIRFLOW_PYTEST_REPORTS_ROOT=/opt/airflow/pytest-reports
@@ -203,12 +156,11 @@ or in `airflow.cfg`:
 reports_root = /opt/airflow/pytest-reports
 ```
 
-In a distributed deployment this should be a **shared volume** that both the
-workers (writing) and the API server (reading) can see.
+In a distributed deployment this must be a **shared volume** both the workers (writing) and
+the API server (reading) can see.
 
-**3. Open the UI.** The plugin registers itself via the `airflow.plugins` entry
-point — no config. The app mounts on the API server at `/pytest-reports`, with a
-**Pytest Reports** entry under *Browse* in the nav.
+**3. Open the UI.** The plugin registers itself via the `airflow.plugins` entry point — no
+config. It mounts at `/pytest-reports`, with a **Pytest Reports** entry under *Browse*.
 
 ### Preview locally, without Airflow
 
@@ -221,13 +173,9 @@ python -m airflow_pytest_plugin.web --root ./pytest-reports --port 8000
 
 ## Do I need `cleanup="never"`?
 
-**No.** In the operator, the *parser* owns the report location, and a
-**parser-supplied directory is never deleted by the runner under any cleanup
-policy**. `ArchivingResultParser` supplies its own directory, so reports
-always survive regardless of the runner's `cleanup` setting. `cleanup="never"`
-only matters when you let the runner use throwaway temp dirs — which is exactly
-the fragile path (random names, no `dag/run/task` association, not visible to
-other workers) this plugin replaces.
+**No.** In the operator the *parser* owns the report location, and a parser-supplied
+directory is never deleted by the runner under any cleanup policy. `cleanup="never"` only
+matters when the runner uses throwaway temp dirs — the fragile path this plugin replaces.
 
 ## How it works
 
@@ -240,24 +188,17 @@ PytestOperator                      {root}/{dag}/{run}/           FastAPI app
        parse()          → meta.json     └─ meta.json                 parses junit.xml
 ```
 
-Optional flags add files beside those two, each read by exactly one consumer:
-`allure-results/` (TestOps export), `coverage.json` (folded into `meta.json` at archive
-time), and with [AI triage](#ai-triage) `verdicts.json` (the distilled judgements, opened
-only by the run detail and the heatmap — pytest-triage's own raw report is removed once it
-has been read).
+`report_request()` reads the live Airflow context, computes the archive directory and hands
+it to the operator's JUnit parser. `parse()` reuses that parsing and drops a `meta.json`
+sidecar with the Airflow coordinates and the summary, which makes each report
+**self-describing** — the reader needs no database access. The reader lists by scanning
+`meta.json` (fast) and parses `junit.xml` on demand for per-case detail.
 
-* `report_request()` reads the live Airflow context (`get_current_context()`,
-  available because the parser runs inside the task's `execute()`), computes the
-  archive directory, and hands it to the operator's JUnit parser.
-* `parse()` reuses the operator's JUnit parsing, then drops a `meta.json`
-  sidecar carrying the Airflow coordinates + the summary. That sidecar makes
-  each report **self-describing**, so the reader needs no database access.
-* The reader lists by scanning `meta.json` files (fast) and parses `junit.xml`
-  on demand for the per-case detail.
+Optional flags add files beside those two, each read by one consumer: `allure-results/`,
+`coverage.json` (folded into `meta.json` at archive time) and `verdicts.json` (AI triage).
 
-The directory is a human-friendly container; the authoritative identity always
-lives in `meta.json` (and the API's opaque, reversible report token), so awkward
-`run_id` characters like `:` are sanitised in the path without losing anything.
+The directory is a human-friendly container; identity lives in `meta.json` and in the API's
+opaque report token, so awkward `run_id` characters are sanitised in the path losslessly.
 
 ## HTTP API
 
@@ -290,53 +231,24 @@ The reads (`GET`) and the delete are gated by Airflow RBAC — see below.
 
 ## Access control (RBAC)
 
-Access is enforced the way Airflow 3 enforces it: every check goes through
-Airflow's **auth manager** (`is_authorized_dag(...)`) — the same call Airflow's
-own DAG-run endpoints make — keyed by the report's `dag_id` and the
-authenticated user. Two permissions are checked:
+Every check goes through Airflow's **auth manager** (`is_authorized_dag(...)`) — the same
+call Airflow's own DAG-run endpoints make — keyed by the report's `dag_id` and the user:
 
-| Action | Airflow 3.x check | Airflow 2.x (FAB) equivalent |
+| Action | Airflow 3.x check | Airflow 2.x (FAB) |
 | --- | --- | --- |
 | **See / open a report** | `is_authorized_dag(method="GET", access_entity=RUN)` | `can_read` on the DAG |
-| **Delete a report** | `is_authorized_dag(method="POST", access_entity=RUN)` (may trigger the DAG) | trigger / `can_create` on the DAG |
+| **Delete a report** | `is_authorized_dag(method="POST", access_entity=RUN)` | trigger / `can_create` |
 
-The report list is filtered to the DAGs you may read, opening a report you can't
-read returns `403`, and deleting one requires permission to **trigger** its DAG.
-Every check **fails closed**: if the auth manager can't be consulted, access is
-denied.
+The list is filtered to the DAGs you may read; opening one you cannot read returns `403`;
+deleting requires permission to **trigger** its DAG. Bulk delete
+(`POST /api/reports/delete`) applies the same per-DAG check — no batch-wide permission, no
+administrator bypass — evaluated once per DAG rather than once per run; a mixed selection
+deletes only what you may trigger and returns the rest as `forbidden`. Its body is capped at
+1 MiB, 200 ids, 4096 characters each (`413` / `422` past those), and at most four batches run
+at once — beyond that it answers `503` **without deleting anything**, so the batch is safe to
+retry.
 
-**Deleting many at once** (`POST /api/reports/delete`, what the viewer's bulk delete uses)
-applies exactly the same per-DAG check — there is no batch-wide permission and no
-administrator bypass. A mixed selection deletes only the DAGs you may trigger; the rest
-come back in `forbidden` and stay on disk. Permission is evaluated **once per DAG**
-rather than once per run, which is the point of the endpoint. Its body is capped at
-200 ids, 4096 characters each and 1 MiB in total, so one caller cannot make the API hold
-an unbounded request, and at most four bulk deletes run at once — beyond that the endpoint
-answers `503` **without deleting anything**, so the batch is safe to retry (the viewer
-does). That cap exists because Airflow's API server serves these from one bounded worker
-pool: without it, a few simultaneous cleanups delay every other request by the length of a
-batch.
-
-**Airflow 2 → 3 mapping.** Airflow 2's FAB used `(action, resource)` pairs —
-`can_read` / `can_edit` / `can_delete` / `can_create` on a resource such as
-`DAG:<id>`. Airflow 3 replaced these with the auth manager's `method`: `GET` ↔
-read, `POST` ↔ create, `PUT` ↔ edit, `DELETE` ↔ delete, `MENU` ↔ menu access.
-This plugin maps **read → `GET`** and **delete → `POST`** (trigger), so it
-inherits your existing per-DAG roles with no extra configuration.
-
-**Plugin visibility.** The nav entry is an Airflow `external_views` item, which
-has no per-permission gate, so the menu link is visible to every signed-in user;
-access is enforced on the **content** (a user who may read no DAG sees an empty
-list and `403` on direct links).
-
-**When auth is unavailable** the fallback depends on why. With **no Airflow** installed —
-the bundled dev server — everything is allowed, which is the point of that mode. With
-**Airflow installed but its auth API unreachable** (an upgrade moved it, say) the reader
-**denies every report** and logs the reason: it cannot verify DAG permissions, and serving
-every team's runs would be the worst possible reading of "auth unavailable".
-
-`GET /api/health` reports which mode is live — worth asserting in a smoke check for a shared
-deployment:
+Every check **fails closed**. `GET /api/health` reports which mode is live:
 
 | `auth` | Meaning |
 | --- | --- |
@@ -344,18 +256,17 @@ deployment:
 | `open` | No Airflow — the standalone dev server, everything is served |
 | `denied` | Airflow present but its auth unreachable: every report is refused |
 
-**Two things sit outside per-DAG RBAC**, by design — worth knowing before a wide rollout:
+**The plugin nav entry is visible to every signed-in user** — Airflow has no per-permission
+gate for plugin links — but a user who may read no DAG sees an empty list and `403` on
+direct links.
 
-- **`GET /api/metrics`** is gated by `AIRFLOW_PYTEST_METRICS_TOKEN` (constant-time compare),
-  not by DAG permissions: any holder of that token sees `{dag_id, task_id}` series for
-  **every** archived dag·task. It is disabled (`404`) until you set the token — treat the
-  token as a read-everything credential and scope it to your Prometheus scraper.
-- **`GET /api/health`** and **`GET /api/version`** need no auth. They expose no run data, but
-  health does report the configured `reports_root` path.
+**Two endpoints sit outside per-DAG RBAC.** `GET /api/metrics` is gated by
+`AIRFLOW_PYTEST_METRICS_TOKEN` instead, and exposes series for **every** dag·task — treat
+that token as a read-everything credential. `GET /api/health` and `/api/version` need no
+auth; health reports the configured `reports_root` path.
 
-Report tokens encode a run's coordinates (`dag·run·task·try`) and nothing else — they are
-identifiers, never capabilities. Guessing one gains nothing: every token-addressed route
-re-checks permission on the run's DAG before serving.
+Report tokens encode a run's coordinates and nothing else — identifiers, never capabilities.
+Every token-addressed route re-checks permission before serving.
 
 ## Allure / TestOps export
 
@@ -375,280 +286,182 @@ Download them from a report's detail view, or `GET
 
 ## Captured output
 
-Every test's own `print()` and `logging` output is archived with the run and shown under
-its traceback, in its own scrolling block — for passing tests too, where it is the only
-content there is.
+Every test's own `print()` and `logging` output is archived with the run and shown under its
+traceback, in its own scrolling block — for passing tests too, where it is the only content
+there is.
 
-This needs pytest's `junit_logging`, which defaults to **`no`**: without it the archive
-keeps tracebacks and drops everything the test printed. The parser therefore sets it
-itself, so the archive does not depend on the operator version or the project's `pytest.ini`:
+This needs pytest's `junit_logging`, which defaults to **`no`**: without it the archive keeps
+tracebacks and drops everything the test printed. The parser sets it itself, so the archive
+does not depend on the operator version or the project's `pytest.ini`:
 
 ```python
 ArchivingResultParser(logs=True)              # default
-ArchivingResultParser(logs=False)             # archive tracebacks only
+ArchivingResultParser(logs=False)             # tracebacks only
 ArchivingResultParser(logs_only_fail=True)    # capture, but only for failed/errored tests
 ```
 
-`logs_only_fail=True` is enforced on the archive, not just asked of pytest: pytest can only
-be told to skip the capture of *passing* tests, so a **skipped** one still writes its own
-(500 skips printing 32 KB each left a 6 MB report). Whatever pytest leaves behind is removed
-after the run — failures and errors keep theirs.
+`logs_only_fail=True` is enforced on the archive, not asked of pytest. pytest's own
+`junit_log_passing_tests` is the wrong lever twice over: a **skipped** test still writes its
+capture (500 skips at 32 KB each left a 6 MB report), and an **errored** one loses it — a
+fixture that logged why it could not set the test up would archive nothing. The archive is
+narrowed after the run instead, so failures and errors keep their output and nothing else
+does.
 
-A DAG that sets `-o junit_logging=...` in its own `pytest_args` still wins: pytest honours
-the last override, and the task's arguments are spliced after the parser's.
+A DAG that sets `-o junit_logging=...` in its own `pytest_args` still wins — pytest honours
+the last override, and the task's arguments are spliced after the parser's. `-s` /
+`--capture=no` turns capture off entirely, so nothing reaches the report.
 
-**What is and isn't captured.** pytest captures output by default and hands it to the
-report; `-s` / `--capture=no` turns that off, so with it in `pytest_args` the run is
-archived without any captured output (there is nothing to archive — the text went straight
-to the worker's console). Live-logging settings such as `log_cli` only change what pytest
-prints while running; what lands in the report is `junit_logging` and the capture above.
-
-**Size.** With capture on, a suite printing a few KB per test writes more captured text
-than test results — measured on 500 tests × 2 KB, `junit.xml` grows from 0.04 MB to
-1.19 MB, and on 500 × 32 KB to 15.8 MB. `logs_only_fail=True` is the producer-side lever:
-on the same 2 KB suite it brings `junit.xml` back to 0.06 MB. Past 32 MB a report is
+**Size.** On 500 tests × 2 KB of output, `junit.xml` grows 0.04 MB → 1.19 MB (× 32 KB:
+15.8 MB). `logs_only_fail=True` brings the first case back to 0.06 MB. Past 32 MB a report is
 trimmed to its failures automatically, whatever the setting, and the task log says so.
 
-The API response is bounded independently of what the producer wrote: 16 KB per test, then
-2 MB of captured output and 4 MB of failure text per run (past either, a case says its text
-was omitted rather than appearing silent). The caps are in **UTF-8 bytes**, so a suite that
-prints Cyrillic, CJK or emoji gets the same budget as an ASCII one rather than 2–4× it. On a
-pathological run — 2,000 failures with 16 KB of traceback and 16 KB of output each — that is
-a 6.2 MB response instead of 66 MB.
-What the caps do **not** bound is parsing the archived XML itself: a report is read whole,
-so a 69 MB one still costs ~80 MB of memory in the api-server while it is read.
+The API response is bounded independently: 16 KB per test, then 2 MB of captured output and
+4 MB of failure text per run — past either, a case says its text was omitted rather than
+looking silent. The caps count **UTF-8 bytes**, so non-ASCII output gets the same budget as
+ASCII rather than 2–4× it. A pathological run (2,000 failures × 16 KB traceback + 16 KB
+output) answers in 6.2 MB instead of 66 MB. Parsing the archived XML is *not* bounded: a
+69 MB report costs ~80 MB in the api-server while it is read.
 
-**Secrets.** Captured output is stored verbatim, outside Airflow's task-log masking. If a
-test prints tokens, credentials or personal data, that text lands in the archive and is
-readable by anyone who can read the DAG's reports. Use `logs=False` or `logs_only_fail=True`
-for such suites, and keep the reports' retention aligned with your log-retention policy.
+**Secrets.** Captured output is stored verbatim, outside Airflow's task-log masking. If tests
+print tokens or personal data, that text is readable by anyone who can read the DAG's
+reports — use `logs=False` or `logs_only_fail=True`, and align the reports' retention with
+your log-retention policy.
 
 ## Coverage
 
-The run detail shows a **Coverage** card next to Duration. It needs `pytest-cov` on the
-worker, and the fraction reaches the viewer by one of two routes.
-
-**Recommended: with the archive.** One flag on the parser is enough — the operator does
-*not* need `coverage=True`:
+The run detail shows a **Coverage** card next to Duration. Needs `pytest-cov` on the worker.
 
 ```python
-PytestOperator(
-    ...,
-    result_parser=ArchivingResultParser(coverage=True),
-)
+result_parser=ArchivingResultParser(coverage=True)
 ```
 
-The parser adds `--cov` plus `--cov-report=json:<archive>/coverage.json`, then reads the
-fraction while archiving and bakes it into the run's `meta.json` on the spot. Prefer this
-route, because it:
+The parser adds `--cov` plus a JSON report into the archive, reads the fraction while
+archiving and bakes it into `meta.json`. This is the route to prefer: it **survives a failed
+run** (the operator raises after the parser, so a red suite still gets its coverage), needs
+no metadata-DB query to render the card, and coexists with the operator's own
+`coverage=True` — a duplicate `--cov` measures the same thing once.
 
-- **survives a failed run.** The operator raises on a red suite (`fail_on_test_failure=True`,
-  the default) or a tripped `cov_fail_under` gate, so its `return_value` XCom is never
-  pushed — but the parser has already run, so the coverage of exactly the runs you most
-  want to inspect is preserved;
-- **needs no metadata-DB query.** The value is served from the report, so the api-server
-  never round-trips to Airflow's shared metadata DB to render the card;
-- **coexists with the operator.** Setting `coverage=True` on both is fine: the runner appends
-  the parser's flags after the operator has built its own, so the operator still splices its
-  flags, still parses its terminal `TOTAL` row for the XCom value, and its `cov_fail_under`
-  gate is unaffected. A duplicate `--cov` measures the same thing once.
-
-**Scope.** A bare `--cov` measures everything. If your project already narrows coverage —
-say `addopts = "--cov=src"` in `pyproject.toml` — pass the same scope, because pytest-cov
-*unions* scopes and a bare `--cov` on top would silently widen the number (usually by
-pulling the tests themselves in):
+**Scope.** A bare `--cov` measures everything, and pytest-cov *unions* scopes — so if the
+project already narrows coverage (`addopts = "--cov=src"`), pass the same scope or the
+number silently widens:
 
 ```python
-ArchivingResultParser(coverage=True, coverage_source="src")   # -> --cov=src
+ArchivingResultParser(coverage=True, coverage_source="src")
 ```
 
-**Fallback: from XCom.** Without the parser flag, and with `coverage=True` on the operator,
-the viewer reads the fraction from the operator's `return_value` XCom on first view and bakes
-it in from there. This still works, but only for runs that finished successfully (see above),
-and a run opened seconds after it finishes may show the card a moment late while the XCom lands.
+**Without the parser flag**, and with `coverage=True` on the operator, the viewer reads the
+fraction from the operator's XCom on first view. That works only for runs that finished
+successfully. Either way, a run with no coverage simply has no card.
 
-Either way the card is simply omitted when a run carries no coverage.
-
-**The bar it is read against** comes from one of two places — the **per-task** one wins:
+**The bar** comes from the env default, or from the suite itself — the per-task value wins,
+so a core library can sit at 95% while a legacy suite is fine at 50%:
 
 ```bash
-# 1. Global default for every run this viewer shows.
-export AIRFLOW_PYTEST_SUCCESS_COVERAGE=0.7
+export AIRFLOW_PYTEST_SUCCESS_COVERAGE=0.7            # global default (else 0.85)
 ```
 
 ```python
-# 2. Pinned to one suite; travels in the run's meta.json and OUTRANKS the env var.
-ArchivingResultParser(coverage=True, coverage_threshold=0.5)   # legacy suite, gentler bar
-ArchivingResultParser(coverage=True, coverage_threshold=0.95)  # core library, strict bar
+ArchivingResultParser(coverage=True, coverage_threshold=0.95)
 ```
 
-A single reader-side variable cannot say that a core library should sit at 95% while a
-legacy smoke suite is fine at 50% — so the suite may state its own standard, and the viewer
-honours it. Leave `coverage_threshold` unset and the env var (then `0.85`) applies. A value
-outside 0–1 is rejected with a warning and falls back to the default, rather than clamped —
-a task that meant `0.9` but wrote `90` should not silently paint every run red.
+A value outside 0–1 is rejected with a warning rather than clamped. The card reads *meets
+target 70%* or *below target 70%* in words, not by colour alone.
 
-At or above the bar the card is green and reads *meets target 70%*; below it the card is red
-and reads *below target 70%*. The verdict is spelled out in words next to the colour, so it
-does not depend on seeing the tint.
-
-> **Coverage never fails a run.** Falling short only paints the card red — the run's own
-> pass/fail is decided by its tests (and `AIRFLOW_PYTEST_SUCCESS_THRESHOLD`). If you want a
-> shortfall to actually **fail the task**, that is the operator's job: set `cov_fail_under`
-> on `PytestOperator`. The two are independent on purpose — you can watch coverage in the UI
-> long before you are ready to enforce it in CI.
+> **Coverage never fails a run** — it only colours the card. To fail the task on a shortfall,
+> use the operator's `cov_fail_under`.
 
 ## AI triage
 
-A nightly DAG that fails at 3 a.m. gives you a traceback. Somebody still has to answer the
-only question that matters: **is this my code, the test, or the environment?**
-[`pytest-triage`](https://pypi.org/project/pytest-triage/) turns that judgement into
-structured data; this plugin archives it with the run and shows it where the failure is.
+A traceback says what broke. [`pytest-triage`](https://pypi.org/project/pytest-triage/)
+answers the next question — *is this my code, the test, or the environment?* — and this
+plugin archives that judgement with the run and shows it beside the failure.
 
-### Quick start
-
-Install it on the worker, with the extra for the provider you want:
+Install on the **worker** with the provider you want, give its SDK a key, and name it:
 
 ```bash
 pip install 'airflow-pytest-plugin[triage-anthropic]'   # or [triage-openai] / [triage-gigachat]
-```
-
-(That is just `pytest-triage` with that provider's SDK — `pip install "pytest-triage[anthropic]"`
-does the same thing if you manage the worker's dependencies directly. Plain `[triage]` gets
-the report and the offline `fake` provider, with no LLM SDK at all.)
-
-```bash
-export ANTHROPIC_API_KEY=sk-ant-...      # read by that provider's own SDK, never by us
+export ANTHROPIC_API_KEY=sk-ant-...                     # read by that SDK, never by us
 ```
 
 ```python
-PytestOperator(
-    ...,
-    result_parser=ArchivingResultParser(triage_provider="anthropic"),
-)
+result_parser=ArchivingResultParser(triage_provider="anthropic")
 ```
 
-That is the whole setup. Three levels of opt-in, mirroring pytest-triage's own:
+Three levels of opt-in:
 
 | What you want | What to pass | Cost |
 |:--|:--|:--|
-| Nothing (the default) | — | none; the archive is byte-for-byte what it was |
-| Every failure described — its **exception type** and a **command that reruns just it**, no AI | `triage=True` | none: no provider, no network |
-| A verdict, hypothesis and suggested fix per failure | `triage_provider="anthropic"` | see [What a run costs](#what-a-run-costs) |
+| Nothing (default) | — | none |
+| Every failure's exception type and a command that reruns just it | `triage=True` | none: no provider, no network |
+| A verdict, hypothesis and suggested fix per failure | `triage_provider="anthropic"` | see below |
 
-Naming a provider implies the report, so one argument is enough. Try it with no key and no
-network first — `triage_provider="fake"` classifies off the exception type and is a real
-end-to-end rehearsal of the whole pipeline.
+`triage_provider="fake"` classifies off the exception type — a full rehearsal with no key
+and no network.
 
-### What you get in the UI
+### In the UI
 
-| Where | What it shows |
-|:--|:--|
-| Each failed test's row | its **category** chip — `regression` (the code broke) / `flaky` / `env` (the environment, not the code) / `test_bug` / `unclear`. A failure that was reported but never judged carries no chip |
-| Expanding that row | the model's **hypothesis**, a **suggested fix**, its **confidence**, and `pytest <selector>` to rerun just that test — above the traceback, because the diagnosis is what you read first. Without a verdict the panel still gives the exception type and that rerun command, which is what `triage=True` buys |
-| Above the case table | a card with the **model**, the **category mix** as a proportional bar, and a chip per category that filters the table to it |
-| The test×run **heatmap** | a hovered cell names the AI's reading of that failure, so a block of red separates into "real regressions" and "the environment was down" without opening a single run |
-| The run list | a mark per analysed run, coloured by state — **red** the pass broke, **blue** a model judged it (hover names the model), **grey** report-only with no provider — and naming the mix it found (*Regression 2, Environment 1*) |
+Each failed test carries a **category** chip (`regression` / `flaky` / `env` / `test_bug` /
+`unclear`) and expands to the model's hypothesis, suggested fix, confidence and a rerun
+command, above the traceback. A card over the case table names the model, shows the category
+mix and filters the table to one group. The heatmap names the AI's reading of a hovered
+cell, and the run list marks each analysed run — **blue** judged, **red** the pass broke,
+**grey** report-only.
 
 ### Configuration
 
-Every knob is a parser argument that maps to one pytest-triage flag. Unset means *its*
-default applies, so there is one source of truth for each:
-
 | Parser argument | pytest-triage flag | Default | Purpose |
 |:--|:--|:--|:--|
-| `triage=True` | `--ai-report=<archive>/triage.json` | off | write the failure report into the run's archive |
-| `triage_provider="NAME"` | `--ai-triage=on --ai-provider=NAME` | off | also run the LLM pass. Implies the report |
+| `triage=True` | `--ai-report=<archive>/triage.json` | off | archive the failure report |
+| `triage_provider="NAME"` | `--ai-triage=on --ai-provider=NAME` | off | also run the LLM pass; implies the report |
 | `triage_budget=N` | `--ai-budget=N` | `10` | most provider calls per run — the cost ceiling |
 | `triage_timeout=SEC` | `--ai-timeout=SEC` | `30` | wall clock per call |
 
-Providers are pytest-triage's, not ours: `anthropic`, `openai` (and any OpenAI-compatible
-endpoint — Kimi, DeepSeek, Groq, Ollama, vLLM — via `OPENAI_BASE_URL`), `gigachat`, plus the
-offline `fake`. Credentials are read by each provider's own SDK from the environment; this
-plugin never sees, logs or stores a key. Model choice is likewise theirs (`ANTHROPIC_MODEL`,
-`OPENAI_MODEL`, …) — see the [pytest-triage README](https://pypi.org/project/pytest-triage/).
+`triage=False` is an off switch and **wins** over a configured provider: no report, no call,
+and a line in the task log saying why. Only **failed and errored** tests are ever sent —
+skipped, `xfail` and passing tests cost nothing.
+
+Providers are pytest-triage's: `anthropic`, `openai` (and any OpenAI-compatible endpoint via
+`OPENAI_BASE_URL`), `gigachat`, plus the offline `fake`. Keys and model choice are read by
+each SDK from the environment; this plugin never sees or stores them.
 
 ### What a run costs
 
-Measured, not estimated — one real Anthropic run of a suite that breaks nine ways
-(`claude-sonnet-5`, July 2026 list prices):
+One real Anthropic run of a suite breaking nine ways (`claude-sonnet-5`, July 2026 prices):
+**9 calls, 11,882 input + 2,090 output tokens, $0.067, ~40 s** — one call per failing test.
+A retry re-analyses the same failures and pays again, so `retries=3` can cost 4× the budget;
+each try keeps its own verdicts, which is what makes "did the retry fail differently?"
+answerable. Verdicts are not deterministic.
 
-| | Per run of 9 failures | Per failure |
-|:--|--:|--:|
-| Provider calls | 9 | 1 |
-| Input tokens | 11,882 | ~1,320 |
-| Output tokens | 2,090 | ~230 |
-| Cost | **$0.067** | ~$0.0074 |
-| Added wall time | ~40 s | ~4.4 s |
+### When the pass does not complete
 
-Three things follow, and they are the ones that surprise people:
-
-- **The bill scales with failing tests, not with suite size.** A green run costs nothing at
-  all — there are no failures to send. `triage_budget` is the hard ceiling: past it, the
-  remaining failures are simply left unjudged, and the UI says so ("*N* of *M* failures
-  judged") instead of showing a complete-looking picture.
-- **pytest-triage's dedup cache almost never fires.** It hashes the whole traceback, and
-  pytest prints each test's arguments into that — so even two parametrised cases of one test
-  failing identically are two calls. Budget for one call per failing test.
-- **A retry pays again, in full.** The cache is in-memory, per pytest process, so try 2 of
-  the same failures re-runs the provider (measured: identical 11,882 input tokens both
-  times). Each try keeps its own analysis, which is what makes "did the retry fail
-  differently?" answerable — but a task with `retries=3` can cost 4× its budget. Verdicts
-  are not deterministic either: the same failure was called `test_bug` on one try and
-  `flaky` on the next.
-
-### When the triage pass does not complete
-
-A rejected key, a timeout, an exhausted budget or a provider that keeps failing are
-**operational failures of the pass, not diagnoses of your tests**. pytest-triage reports
-them as `unknown` verdicts; the plugin drops those and reports the reason once, at run
-level, in the provider's own words. All four modes were exercised against the real library
-— a rejected key (live `401` from the Anthropic API), a provider that times out, one that
-cannot be reached, and an exhausted budget — and each produced the warning below with
-**zero** invented verdicts:
+A rejected key, a timeout, an exhausted budget or an unreachable provider are failures **of
+the pass, not diagnoses of your tests**. pytest-triage reports them as `unknown` verdicts;
+the plugin drops those and states the reason once, in the provider's own words:
 
 > ⚠ The AI pass did not complete: triage provider error: AuthenticationError: Error code:
 > 401 — API key is invalid.
 
-so a misconfigured run reads as *misconfigured* rather than as nine tests the AI found
-"unclear". pytest-triage stops calling a provider that has proven it will not answer (one
-timeout, or two errors in a row), so a bad key costs two calls, not your whole budget.
+so a misconfigured run reads as misconfigured, not as nine "unclear" tests. All four modes
+were exercised against the real library with zero invented verdicts.
 
-### What is stored, and where
+### What is stored
 
-Inside the run's archive directory, beside `junit.xml`:
+Beside `junit.xml`: `verdicts.json` (the distilled judgements) and a small roll-up in
+`meta.json` (model, duration, category counts). pytest-triage's own `triage.json` is removed
+once distilled, and kept only when it could not be read.
 
-| File | Written by | Read by | Why |
-|:--|:--|:--|:--|
-| `verdicts.json` | the parser | the run detail, the heatmap | the distilled judgements, keyed to their tests |
-| `meta.json` → `triage` | the parser | every tree scan | a small roll-up: model, duration, category counts |
+The split is load-tested: every tree scan parses each `meta.json`, so verdicts kept there
+made a cold scan of 3,000 runs **4.4× slower** (300 ms → 1,325 ms) and grew the scanned
+corpus from 48 MB to 1.3 GB. Beside it, the scan is unchanged and the cost lands on the one
+request that shows them (+6 ms on a 500-test run). Like coverage, verdicts are read while
+archiving, so they survive a failed run.
 
-pytest-triage's own `triage.json` is written into the same directory and **removed once it
-has been distilled**. It is the largest file a run produces (measured: 10.1 KB against
-`junit.xml`'s 8.5 KB), it repeats tracebacks `junit.xml` already stores, and being
-owner-only (`0600` — even a redacted traceback may hold residual secrets) the reader could
-never open it anyway. It is kept only when it could *not* be read, where it is the sole
-record of what went wrong.
+`GET /api/reports` carries the mix and `incomplete` flag per run; `GET /api/reports/{id}`
+adds the per-test judgements.
 
-The split is deliberate and load-tested. Every summary endpoint parses each run's
-`meta.json` in full; verdicts kept there would be read by every dashboard load. At 3,000
-runs × 200 verdicts that made a cold scan **4.4× slower (300 ms → 1,325 ms)** and grew the
-scanned corpus from 48 MB to 1.3 GB. Keeping them beside it, the scan is unchanged and the
-cost lands only on the one request that shows them (+6 ms on a 500-test run).
-
-Like coverage, verdicts are read while archiving and stored with the run, so they **survive
-a failed run** — the operator raises *after* the parser has run, and a red suite is exactly
-what you want triaged.
-
-The `GET /api/reports` list carries each run's verdict mix straight from that roll-up —
-`triage.counts`, the `model` that judged them, and an `incomplete` flag — so a dashboard can
-show what a run found, and which of the three states it is in, without opening it.
-`GET /api/reports/{id}` adds the per-test judgements.
-
-> **Requires `pytest-triage` on the worker.** Like `allure=True` and `coverage=True`, the
-> flags are spliced onto the pytest command line, so pytest aborts with *unrecognized
-> arguments* if the package is missing. Nothing about triage can fail a run otherwise: a
-> missing, unreadable or half-written report just leaves the archive without an AI section.
+> **Requires `pytest-triage` on the worker** — the flags are spliced onto the pytest command
+> line, so pytest aborts on unrecognized arguments if it is missing. Nothing else about
+> triage can fail a run: an unreadable report just leaves the archive without an AI section.
 
 ## Configuration
 
@@ -673,23 +486,15 @@ show what a run found, and which of the three states it is in, without opening i
 | `AIRFLOW_PYTEST_ALERTS_EMAIL_TO` (env/cfg) | — | comma-separated alert recipients (empty = alerting stays off; a per-task `email=True` *or* `email_only_fail=True` flag is the on-switch — see [below](#email-alerts)). Validated, case-insensitively deduped, capped at 50 (use a mailing-list address for bigger audiences) |
 | `AIRFLOW_PYTEST_SMTP_*` (env/cfg) | — | standalone SMTP (`_HOST`, `_PORT`, `_USER`, `_PASSWORD`, `_FROM`, `_STARTTLS`); when `_HOST` is set it is used directly (takes precedence over Airflow's `send_email`), otherwise it's the fallback |
 
-**Enable / disable the reader.** Set `AIRFLOW_PYTEST_PLUGIN_ENABLE` to a falsey
-value (`0`, `false`, `no`, `off`) to stop the plugin registering its UI and API
-with Airflow; any other value, or leaving it unset, keeps it on (the default).
-This is a kill switch for the reader only — the producer-side
-`ArchivingResultParser` still archives reports regardless. It is read once at
-plugin discovery, so toggling it takes effect on the next API-server restart.
+**Enable / disable the reader.** A falsey `AIRFLOW_PYTEST_PLUGIN_ENABLE` (`0`, `false`,
+`no`, `off`) stops the plugin registering its UI and API. It is a kill switch for the reader
+only — `ArchivingResultParser` keeps archiving — and is read at plugin discovery, so it takes
+effect on the next API-server restart.
 
-```bash
-export AIRFLOW_PYTEST_PLUGIN_ENABLE=false   # hide the Pytest Reports UI + API
-```
-
-**Scan cache.** Loading the home page hits several summary-driven endpoints (the run
-list, the flaky panel, the unique-tests count), and the filter box queries as you
-type. To avoid walking the report tree once per call, the filesystem source reuses a
-single scan for `AIRFLOW_PYTEST_SCAN_CACHE_TTL` seconds (default `2.0`; deletes
-invalidate it immediately). New runs therefore appear within a couple of seconds (or
-on **Refresh**); set it to `0` for no caching, or higher on a very large tree.
+**Scan cache.** The filesystem source reuses one directory scan for
+`AIRFLOW_PYTEST_SCAN_CACHE_TTL` seconds instead of walking the tree per endpoint; deletes
+invalidate it immediately. New runs therefore appear within a couple of seconds, or on
+**Refresh**. Set `0` to disable, higher on a very large tree.
 
 ## Prometheus metrics
 
@@ -721,36 +526,35 @@ scrape_configs:
 
 ## Retention (auto-cleanup)
 
-Reports accumulate forever unless you prune them. Set any of the
-`AIRFLOW_PYTEST_RETENTION_*` knobs above (all opt-in; unset = keep everything) and
-schedule `prune_reports` from a maintenance DAG:
+Reports accumulate until you prune them. Set any `AIRFLOW_PYTEST_RETENTION_*` limit (all
+opt-in) and schedule `prune_reports` from a maintenance DAG:
 
 ```python
-from airflow import DAG
-from airflow.providers.standard.operators.python import PythonOperator
 from airflow_pytest_plugin import prune_reports
 
 with DAG("pytest_reports_retention", schedule="@daily", catchup=False, ...):
     PythonOperator(task_id="prune", python_callable=prune_reports)
 ```
 
-Each knob is a dimension and they combine as a union — a run is deleted if **any**
-applies:
+Limits combine as a union — a run goes if **any** applies: older than `…_MAX_AGE_DAYS`,
+beyond the newest `…_MAX_RUNS` of its dag·task, or oldest-first until the tree fits
+`…_MAX_TOTAL_MB`. The **newest run of each dag·task is always kept**.
 
-- **age** — older than `…_MAX_AGE_DAYS`;
-- **count** — beyond the newest `…_MAX_RUNS` of its dag·task;
-- **size** — oldest-first until the tree fits `…_MAX_TOTAL_MB`.
+`prune_reports(dry_run=True)` reports what would go without deleting. The returned
+`RetentionResult` carries `deleted`, `freed_bytes`, `scanned` and `failed` — runs the store
+refused to remove are never counted as freed, and the size budget re-plans around them:
+a run that cannot be deleted does not stop the sweep from freeing the space behind it.
 
-The **newest run of each dag·task is always kept**, so a task's latest result never
-disappears. `prune_reports(dry_run=True)` reports what *would* go without deleting
-(its `RetentionResult` carries `deleted`, `freed_bytes`, `scanned`). Cleanup is
-scheduler-driven — the plugin never deletes on its own. For a custom policy, build a
-`RetentionPolicy(...)` and pass it (`prune_reports(policy)`).
+Retention only sees directories that still have their `meta.json`. One left behind by a
+crashed worker, or by a delete the storage refused half-way through, is invisible to the
+sweep **and to the size budget** — it has to be removed by hand. The task log names the
+path when that happens. Cleanup is scheduler-driven; the plugin never
+deletes on its own. For a custom policy, pass one: `prune_reports(RetentionPolicy(...))`.
 
 ## Email alerts
 
-Opt-in email notifications with an **adaptive, styled HTML body** — green for a clean pass, amber
-for flaky, red for a failure — listing the failed / flaky tests and linking back to the run:
+Opt-in notifications with an HTML body styled by outcome — green pass, amber flaky, red
+failure — listing the failed tests and linking back to the run:
 
 <p>
 <img src="docs/screenshots/email_failed.png" alt="Failed run email" width="32%">
@@ -758,85 +562,73 @@ for flaky, red for a failure — listing the failed / flaky tests and linking ba
 <img src="docs/screenshots/email_passed.png" alt="Passed run email" width="32%">
 </p>
 
-**Automatic notifications are per task, via `email=True`.** The `ArchivingResultParser(email=)`
-flag is the switch: with `email=True` a "run finished" mail is sent **after every run** (styled by
-outcome — green pass / amber flaky / red fail), so a team gets notified without watching the run;
-the default `email=False` sends **nothing**, so a noisy ping / smoke suite can't flood the mailbox:
+Switched on per task:
 
 ```python
-from airflow_pytest_plugin import ArchivingResultParser
-
-parser = ArchivingResultParser(email=True)            # email me when each run finishes
-parser = ArchivingResultParser(email_only_fail=True)  # email ONLY on a failed / flaky run
-parser = ArchivingResultParser()                      # default: never auto-emails (ping-safe)
+ArchivingResultParser(email=True)            # after every run
+ArchivingResultParser(email_only_fail=True)  # only a failed / flaky run (wins over email=True)
+ArchivingResultParser()                      # default: never auto-emails
 ```
 
-`email_only_fail=True` is for teams that don't want success mail: nothing arrives while runs
-are green, a red/amber notification arrives the moment a run fails or turns flaky (it wins
-over `email=True` when both are set).
+A run counts as failing below `AIRFLOW_PYTEST_SUCCESS_THRESHOLD` (default `0.85`), which is
+also what colours the mail. Recipients are validated and deduplicated case-insensitively.
 
-Recipients are validated (RFC-bounded addresses; invalid configured entries are dropped with
-a warning) and deduplicated case-insensitively — listing the same mailbox twice, in the env or
-in the UI dialog, sends **one** email. The UI dialog also validates as you submit and names the
-bad address before anything is sent; the server re-validates and answers a plain-language `400`.
+Recipients and transport are configured once, one of two ways.
 
-A run is "failing" below `AIRFLOW_PYTEST_SUCCESS_THRESHOLD` (the same 0–1 bar the *Passing runs*
-KPI uses; default `0.85`) — which is what colours the email. Recipients + transport are configured
-once, one of two ways:
-
-**Airflow mode** — mail rides Airflow's own SMTP. Set the recipients here, then configure Airflow's
-SMTP the standard way (per the
-[Airflow email guide](https://airflow.apache.org/docs/apache-airflow/stable/howto/email-config.html)):
+**Airflow mode** — mail rides Airflow's own SMTP. Set the recipients, then configure
+Airflow itself. Everything below belongs on the **worker** that runs the task:
 
 ```bash
 export AIRFLOW_PYTEST_ALERTS_EMAIL_TO="team@example.com, oncall@example.com"
-export AIRFLOW_PYTEST_SUCCESS_THRESHOLD=0.85   # optional
+
+# Server: the [smtp] section, as env vars
+export AIRFLOW__SMTP__SMTP_HOST=smtp.gmail.com
+export AIRFLOW__SMTP__SMTP_PORT=587
+export AIRFLOW__SMTP__SMTP_STARTTLS=True
+export AIRFLOW__SMTP__SMTP_SSL=False
+export AIRFLOW__SMTP__SMTP_MAIL_FROM=you@gmail.com
+export AIRFLOW__SMTP__SMTP_TIMEOUT=30          # optional
+export AIRFLOW__SMTP__SMTP_RETRY_LIMIT=5       # optional
+
+# Credentials: the smtp_default CONNECTION, also as an env var
+export AIRFLOW_CONN_SMTP_DEFAULT='{"conn_type": "smtp", "login": "you@gmail.com", "password": "app-password"}'
 ```
 
-On Airflow 3 the default backend (`airflow.utils.email.send_email`) takes the SMTP **host / port /
-STARTTLS from the `[smtp]` config** but the **login / password from the `smtp_default` connection** —
-so you usually need *both*, present on the service that runs the task (the **worker**), not only the
-scheduler / API server. A minimal Gmail setup:
+**Login and password are not `[smtp]` options.** Airflow 3's `send_mime_email` reads
+host / port / STARTTLS / SSL / timeout / retries from `[smtp]`, but takes the login and
+password **only** from the `smtp_default` connection — with no connection it logs in
+anonymously (verified against Airflow 3.3.0). So `AIRFLOW__SMTP__SMTP_USER` and
+`AIRFLOW__SMTP__SMTP_PASSWORD` do nothing; use `AIRFLOW_CONN_SMTP_DEFAULT` above, or create
+the connection in the UI (type SMTP, login, password). The JSON form is safer than the URI
+form, which needs percent-encoding for `@`, `:` and `/` in a password. For Gmail the
+password is an **App Password** (2FA required; strip the spaces).
 
-- `[smtp]` (env on every Airflow service): `AIRFLOW__SMTP__SMTP_HOST=smtp.gmail.com`,
-  `AIRFLOW__SMTP__SMTP_PORT=587`, `AIRFLOW__SMTP__SMTP_STARTTLS=True`, `AIRFLOW__SMTP__SMTP_SSL=False`,
-  `AIRFLOW__SMTP__SMTP_MAIL_FROM=you@gmail.com`.
-- `smtp_default` **connection**: type SMTP, host `smtp.gmail.com`, port `587`, login `you@gmail.com`,
-  password = a Gmail **App Password** (2FA required; strip the spaces).
+See the
+[Airflow email guide](https://airflow.apache.org/docs/apache-airflow/stable/howto/email-config.html)
+for the full picture.
 
-**Standalone mode** — no Airflow SMTP available (the bundled dev server, or a worker without mail
-configured), so also point the built-in SMTP client at your server:
+**Standalone mode** — no Airflow SMTP available; use the built-in client:
 
 ```bash
 export AIRFLOW_PYTEST_ALERTS_EMAIL_TO="team@example.com"
 export AIRFLOW_PYTEST_SMTP_HOST=smtp.example.com
 export AIRFLOW_PYTEST_SMTP_PORT=587
-export AIRFLOW_PYTEST_SMTP_STARTTLS=true                 # default true; set false for plain SMTP
-export AIRFLOW_PYTEST_SMTP_USER=apikey                   # omit user+password for an open relay
-export AIRFLOW_PYTEST_SMTP_PASSWORD="$SMTP_PASSWORD"     # keep the secret out of shell history
+export AIRFLOW_PYTEST_SMTP_STARTTLS=true               # false for plain SMTP
+export AIRFLOW_PYTEST_SMTP_USER=apikey                 # omit user+password for an open relay
+export AIRFLOW_PYTEST_SMTP_PASSWORD="$SMTP_PASSWORD"
 export AIRFLOW_PYTEST_SMTP_FROM="pytest-reports@example.com"
 ```
 
-**Send one run by hand (from the UI).** Open a run and click the ✉ **Email** button in its
-toolbar to email that run's summary. Recipients are optional (leave the field empty to use the
-configured `AIRFLOW_PYTEST_ALERTS_EMAIL_TO`); any you type are validated as email addresses and
-capped. The button appears only when a mail transport is configured. The action is **RBAC-gated**
-— it needs permission to *read* the run's DAG — and backed by `POST /api/reports/{id}/email`.
+Setting `AIRFLOW_PYTEST_SMTP_HOST` wins even inside Airflow.
 
-**Every send is logged on the run.** Each attempt (automatic or manual) lands in the run's
-`meta.json`; the run's toolbar then shows an ✉ **Emails N** bench that opens the send log —
-who was mailed, when, and a ✓ delivered / ✗ failed mark per send (newest 50 kept). When the run
-has raw Allure results, the notification email carries them as an `allure-results.zip`
-attachment (skipped above 10 MB so mail servers accept the message).
+**Sending one run by hand** — the ✉ button in a run's toolbar mails that run; recipients are
+optional (empty = the configured list). It appears only when a transport exists and needs
+read permission on the run's DAG (`POST /api/reports/{id}/email`).
 
-**Transport precedence:** if you set `AIRFLOW_PYTEST_SMTP_HOST`, that standalone SMTP client is
-used directly — **even inside Airflow** — so your explicit config always wins. Otherwise mail goes
-through **Airflow's configured SMTP** (`airflow.utils.email.send_email`; set it up per the
-[Airflow email/SMTP guide](https://airflow.apache.org/docs/apache-airflow/stable/howto/email-config.html)).
-Alerting is **best-effort** — a mail or config failure is logged (the real reason lands in the
-reader's log; the UI/endpoint only says "failed to send") and never fails the task that archived
-the run. The decision (`evaluate_alerts`) and orchestrator (`notify_for_run`, which takes
-`dry_run=` and a custom `mailer=`) are importable and side-effect-free for testing.
+Every attempt is recorded on the run: an **Emails N** bench opens the log of who was mailed,
+when, and delivered/failed per send (newest 50). Runs with Allure results attach them as a
+zip, skipped above 10 MB. Alerting is best-effort — a mail failure is logged and never fails
+the task that archived the run.
 
 ## Architecture (SOLID)
 
@@ -846,18 +638,17 @@ Mirrors the operator's layering — each piece has one reason to change:
 | --- | --- |
 | `layout.ReportLayout` | the single `ReportRef → directory` mapping, shared by both sides |
 | `producer.ArchivingResultParser` | write JUnit XML + `meta.json` (extends the operator's parser) |
-| `sources.ReportSource` / `FileSystemReportSource` | read/index reports behind an interface (Dependency Inversion) |
+| `sources.ReportSource` / `FileSystemReportSource` | read/index reports behind an interface |
 | `web.create_app` | map HTTP onto a `ReportSource` — knows nothing about the filesystem |
 | `retention` | pure `select_expired` decision + a `prune` orchestrator over any `ReportSource` |
-| `notifications` | pure `evaluate_alerts` decision + a `notify_for_run` orchestrator over any `ReportSource` + a pluggable `Mailer` |
-| `flaky_core` | web-free flaky scoring behind the `/api/flaky` route |
-| `triage` | the pytest-triage contract in one place: node-id canonicalisation, the producer's `distill_report`, the reader's `triage_from_meta` |
+| `notifications` | pure `evaluate_alerts` decision + `notify_for_run` over any `ReportSource` + a pluggable `Mailer` |
+| `flaky_core` | web-free flaky scoring behind `/api/flaky` |
+| `triage` | the pytest-triage contract in one place: node-id canonicalisation, distillation, the reader's view |
 | `plugin.PytestReportsPlugin` | register the app with Airflow |
-| `compat` | the only module that imports Airflow; version differences resolved once |
+| `compat` | the only module that imports Airflow |
 | `models` | JSON-serializable view types; the web layer never sees operator types |
 
-Adding a different backing store (e.g. an `XComReportSource` reading the
-metadata DB) is a new `ReportSource`, not an edit of the web app (Open/Closed).
+A different backing store is a new `ReportSource`, not an edit of the web app.
 
 ## Development
 

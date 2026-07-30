@@ -1604,3 +1604,56 @@ def test_cap_truncates_on_a_character_boundary():
     # A block that fits is returned untouched, with its real byte cost.
     same, size = _cap("привет", 100)
     assert same == "привет" and size == 12
+
+
+def test_a_partial_delete_says_the_run_is_gone_not_merely_refused(
+    reports_root, monkeypatch, caplog
+):
+    # rmtree is not atomic: when it stops on an entry it may not remove, the rest of the run
+    # is already unlinked. "Storage refused" alone would send an operator looking for a run
+    # that no longer exists, and nothing will ever clean the directory up -- without its
+    # meta.json neither the viewer nor retention can see it again.
+    from airflow_pytest_plugin.sources import filesystem
+
+    ref = ReportRef("dag", "run", "task", 1)
+    out_dir = write_report(reports_root, ref)
+    src = FileSystemReportSource(report_root=reports_root)
+
+    def half_delete(path, *a, **kw):
+        os.remove(os.path.join(path, filesystem.META_FILENAME))
+        raise PermissionError("read-only file system")
+
+    monkeypatch.setattr(filesystem.shutil, "rmtree", half_delete)
+    with caplog.at_level("ERROR"):
+        assert src.delete(ref) is False
+
+    assert "no longer readable" in caplog.text
+    assert "remove it by hand" in caplog.text
+    assert os.path.isdir(out_dir)
+    # And the run really has left the listing, which is why the message matters.
+    assert src.list_summaries() == []
+
+
+def test_losing_a_delete_race_is_not_logged_as_a_failure(
+    reports_root, monkeypatch, caplog
+):
+    # A retention sweep and a user's click routinely target the same run. The loser's
+    # FileNotFoundError is a non-event -- the run is gone, which is what both wanted -- and
+    # a page of traceback per raced run turns a clean cleanup into a scary task log.
+    from airflow_pytest_plugin.sources import filesystem
+
+    ref = ReportRef("dag", "run", "task", 1)
+    out_dir = write_report(reports_root, ref)
+    src = FileSystemReportSource(report_root=reports_root)
+    real = filesystem.shutil.rmtree
+
+    def raced(path, *a, **kw):
+        real(path, *a, **kw)  # another caller got here first
+        raise FileNotFoundError(path)
+
+    monkeypatch.setattr(filesystem.shutil, "rmtree", raced)
+    with caplog.at_level("INFO"):
+        assert src.delete(ref) is True  # the run IS gone: that is a success
+    assert not os.path.exists(out_dir)
+    assert "Traceback" not in caplog.text
+    assert "Could not delete" not in caplog.text

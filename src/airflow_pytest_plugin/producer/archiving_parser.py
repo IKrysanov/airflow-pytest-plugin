@@ -130,7 +130,7 @@ class ArchivingResultParser(JUnitResultParser):  # type: ignore[misc, unused-ign
         coverage: bool = False,
         coverage_source: str | None = None,
         coverage_threshold: float | None = None,
-        triage: bool = False,
+        triage: bool | None = None,
         triage_provider: str | None = None,
         triage_budget: int | None = None,
         triage_timeout: float | None = None,
@@ -189,10 +189,23 @@ class ArchivingResultParser(JUnitResultParser):  # type: ignore[misc, unused-ign
         #                                 category / hypothesis / suggested fix. Naming a
         #                                 provider implies the report, so one argument is
         #                                 enough for the full feature.
+        # ``triage`` is tri-state on purpose. Left unset it is inferred from the provider,
+        # which is what makes the one-argument form work; written out as False it is an
+        # instruction and WINS over the provider. Anything else means a task that says
+        # `triage=False, triage_provider="anthropic"` -- a switch someone flipped off while
+        # leaving templated config in place -- still calls the model and still spends money.
+        # An explicit "off" that costs money is the one behaviour nobody can defend.
         # The verdicts are read at ARCHIVE time, so (like coverage) they survive a FAILED run
         # -- the parser runs before the operator raises. The roll-up lands in meta.json; the
         # per-test verdicts in their own verdicts.json, which the tree scan never opens.
         self._triage_provider = (triage_provider or "").strip() or None
+        if triage is False and self._triage_provider is not None:
+            _log.warning(
+                "triage=False overrides triage_provider=%r: no failure report is archived "
+                "and the provider is never called. Drop triage=False to use it.",
+                self._triage_provider,
+            )
+            self._triage_provider = None
         self._triage = bool(triage) or self._triage_provider is not None
         # Max provider calls per run (pytest-triage's own default is 10) and the wall-clock
         # cap per call. Left unset, pytest-triage's defaults apply -- which is what a suite
@@ -239,13 +252,12 @@ class ArchivingResultParser(JUnitResultParser):  # type: ignore[misc, unused-ign
                 req.pytest_args, "all" if self._logs else "no"
             ),
         )
-        if self._logs and self._logs_only_fail:
-            req = dataclasses.replace(
-                req,
-                pytest_args=_with_ini(
-                    req.pytest_args, "junit_log_passing_tests", "False"
-                ),
-            )
+        # NOTE: ``logs_only_fail`` deliberately does NOT set pytest's
+        # ``junit_log_passing_tests=False``. That option drops the capture of an *errored*
+        # test too -- a setup or teardown failure has no call phase, and its output is
+        # exactly the material that explains it. The archive is narrowed afterwards
+        # instead (see :meth:`_trim_capture`), which keeps failures and errors and costs
+        # only a larger report on the worker for the length of the task.
         if self._allure and req.report_path:
             allure_dir = os.path.join(os.path.dirname(req.report_path), ALLURE_DIRNAME)
             req = dataclasses.replace(

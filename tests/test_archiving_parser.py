@@ -962,28 +962,31 @@ def test_the_raw_report_survives_a_failed_verdicts_write(monkeypatch, reports_ro
     assert not os.path.exists(os.path.join(rd, VERDICTS_FILENAME))
 
 
-def test_logs_only_fail_keeps_the_capture_for_failures_alone(monkeypatch, reports_root):
-    # The passing majority writes most of the captured output and none of the part anyone
-    # reads. This is the lever for a suite whose archive would otherwise be mostly logs.
+def test_logs_only_fail_never_asks_pytest_to_drop_passing_capture(
+    monkeypatch, reports_root
+):
+    # pytest's junit_log_passing_tests looks like the obvious lever and is the wrong one:
+    # it also drops the capture of an ERRORED test (a setup failure has no call phase), and
+    # that output is exactly what explains the error. The archive is narrowed after the run
+    # instead, so the flag must never appear on the command line.
     ti = FakeTI(dag_id="d", task_id="t", run_id="run1", try_number=1)
     _patch_context(monkeypatch, {"ti": ti})
     ini = archiving_parser._ini_value
 
-    default = ArchivingResultParser(report_root=reports_root).report_request("/x")
-    assert ini(default.pytest_args, "junit_log_passing_tests") is None  # pytest's own
+    for parser in (
+        ArchivingResultParser(report_root=reports_root),
+        ArchivingResultParser(report_root=reports_root, logs_only_fail=True),
+        ArchivingResultParser(
+            report_root=reports_root, logs=False, logs_only_fail=True
+        ),
+    ):
+        args = parser.report_request("/x").pytest_args
+        assert ini(args, "junit_log_passing_tests") is None, args
 
-    only_fail = ArchivingResultParser(
-        report_root=reports_root, logs_only_fail=True
-    ).report_request("/x")
-    assert ini(only_fail.pytest_args, "junit_logging") == "all"
-    assert ini(only_fail.pytest_args, "junit_log_passing_tests") == "False"
-
-    # Nothing to narrow when the capture is off entirely.
-    off = ArchivingResultParser(
-        report_root=reports_root, logs=False, logs_only_fail=True
-    ).report_request("/x")
-    assert ini(off.pytest_args, "junit_logging") == "no"
-    assert ini(off.pytest_args, "junit_log_passing_tests") is None
+    on = ArchivingResultParser(report_root=reports_root, logs_only_fail=True)
+    assert ini(on.report_request("/x").pytest_args, "junit_logging") == "all"
+    off = ArchivingResultParser(report_root=reports_root, logs=False)
+    assert ini(off.report_request("/x").pytest_args, "junit_logging") == "no"
 
 
 def _mixed_report(path, *, chunk="Z" * 64):
@@ -1045,7 +1048,8 @@ def test_logs_only_fail_also_drops_the_capture_of_skipped_tests(
 
     parser.parse(req.report_path)
 
-    # Failures and errors keep theirs: they are why the capture is archived at all.
+    # Failures AND errors keep theirs: they are why the capture is archived at all, and
+    # an errored test's output is the material that explains the error.
     assert _streams_by_outcome(req.report_path) == {
         "passed": 0,
         "skipped": 0,
@@ -1086,3 +1090,135 @@ def test_capture_is_kept_by_default_and_trimmed_when_the_report_gets_huge(
         parser.parse(req.report_path)
     assert _streams_by_outcome(req.report_path)["passed"] == 6  # left alone
     assert "too large to trim safely" in caplog.text
+
+
+def test_triage_false_wins_over_a_configured_provider(
+    monkeypatch, reports_root, caplog
+):
+    # `triage=False, triage_provider="anthropic"` used to run the LLM pass anyway: the
+    # provider implied the feature and the explicit False was ignored. An "off" switch
+    # that still calls a paid API is the one reading nobody can defend, so False wins --
+    # and says so, since the task clearly meant to use the provider at some point.
+    ti = FakeTI(dag_id="d", task_id="t", run_id="run1", try_number=1)
+    _patch_context(monkeypatch, {"ti": ti})
+
+    with caplog.at_level("WARNING"):
+        off = ArchivingResultParser(
+            report_root=reports_root, triage=False, triage_provider="anthropic"
+        )
+    args = off.report_request("/x").pytest_args
+    assert not any("--ai-" in a for a in args), args  # nothing for pytest-triage at all
+    assert "triage=False overrides" in caplog.text
+
+    # Unset (the default) still infers the feature from the provider: that one-argument
+    # form is the documented way to turn triage on.
+    inferred = ArchivingResultParser(
+        report_root=reports_root, triage_provider="anthropic"
+    ).report_request("/x")
+    assert "--ai-triage=on" in inferred.pytest_args
+    assert "--ai-provider=anthropic" in inferred.pytest_args
+
+    # ...and triage=True without a provider stays the report-only level.
+    report_only = ArchivingResultParser(
+        report_root=reports_root, triage=True
+    ).report_request("/x")
+    assert any(a.startswith("--ai-report=") for a in report_only.pytest_args)
+    assert not any(a.startswith("--ai-provider") for a in report_only.pytest_args)
+
+
+def test_only_failed_and_errored_tests_are_ever_sent_to_a_provider(
+    monkeypatch, reports_root
+):
+    # What reaches the model is pytest-triage's failure set, and a skipped test is not in
+    # it -- neither a marker skip, a runtime skip, nor an xfail. Pinned here because the
+    # cost of the feature is "one call per failing test": if skips ever joined that set, a
+    # suite that skips half its tests would quietly multiply the bill.
+    ti = FakeTI(dag_id="d", task_id="t", run_id="run1", try_number=1)
+    _patch_context(monkeypatch, {"ti": ti})
+    parser = ArchivingResultParser(report_root=reports_root, triage=True)
+    rd, req = _run_with_report(parser, reports_root)
+    report = os.path.join(rd, TRIAGE_FILENAME)
+    # A report as pytest-triage writes it: only the two broken tests are listed.
+    with open(report, "w", encoding="utf-8") as fh:
+        json.dump(
+            {
+                "schema_version": 1,
+                "ai_model": "m",
+                "total_failures": 2,
+                "total_verdicts": 2,
+                "failures": [
+                    {
+                        "nodeid": "t.py::test_broken",
+                        "outcome": "failed",
+                        "exc_type": "AssertionError",
+                        "verdict": {"category": "regression", "confidence": "high"},
+                    },
+                    {
+                        "nodeid": "t.py::test_error",
+                        "outcome": "error",
+                        "exc_type": "RuntimeError",
+                        "verdict": {"category": "environment", "confidence": "low"},
+                    },
+                ],
+            },
+            fh,
+        )
+
+    parser.parse(req.report_path)
+
+    meta = json.load(open(os.path.join(rd, META_FILENAME), encoding="utf-8"))
+    assert meta["triage"]["total_failures"] == 2
+    verdicts = json.load(open(os.path.join(rd, VERDICTS_FILENAME), encoding="utf-8"))
+    judged = {v["node_id"] if isinstance(v, dict) else v for v in verdicts["verdicts"]}
+    assert not any("skip" in str(n) for n in judged)
+
+
+def test_logs_only_fail_keeps_a_real_errored_test_s_output(
+    monkeypatch, reports_root, tmp_path
+):
+    # End-to-end against real pytest, because this is where the promise was broken: the
+    # obvious lever (junit_log_passing_tests) made pytest itself drop the capture of an
+    # ERRORED test, so a fixture that logged why it could not set the test up archived
+    # nothing. Synthetic XML cannot catch that -- only a real run can.
+    import subprocess
+    import sys
+    import xml.etree.ElementTree as ET
+
+    (tmp_path / "test_e.py").write_text(
+        "import pytest\n"
+        "@pytest.fixture\n"
+        "def broken_fixture():\n"
+        "    print('could not reach the payment gateway')\n"
+        "    raise RuntimeError('gateway down')\n"
+        "def test_errors(broken_fixture):\n"
+        "    pass\n"
+        "def test_passes():\n"
+        "    print('quiet')\n",
+        encoding="utf-8",
+    )
+    ti = FakeTI(dag_id="d", task_id="t", run_id="run1", try_number=1)
+    _patch_context(monkeypatch, {"ti": ti})
+    parser = ArchivingResultParser(report_root=reports_root, logs_only_fail=True)
+    req = parser.report_request(str(tmp_path))
+    os.makedirs(os.path.dirname(req.report_path), exist_ok=True)
+    subprocess.run(
+        [sys.executable, "-m", "pytest", "test_e.py", "-p", "no:cacheprovider", "-q"]
+        + list(req.pytest_args),
+        cwd=tmp_path,
+        capture_output=True,
+        check=False,
+    )
+
+    parser.parse(req.report_path, exit_code=1)
+
+    cases = {
+        tc.get("name"): [c.tag for c in tc]
+        for tc in ET.parse(req.report_path).getroot().iter("testcase")
+    }
+    assert "system-out" in cases["test_errors"], cases
+    assert "system-out" not in cases["test_passes"], cases
+    detail = FileSystemReportSource(report_root=reports_root).get_detail(
+        ReportRef("d", "run1", "t", 1)
+    )
+    errored = next(c for c in detail.cases if c.outcome == "error")
+    assert "could not reach the payment gateway" in errored.output

@@ -39,6 +39,8 @@ from .config import (
 from .models import ReportRef
 
 if TYPE_CHECKING:
+    from collections.abc import Collection
+
     from .sources import ReportSource
 
 _log = logging.getLogger(__name__)
@@ -103,10 +105,18 @@ class RetentionResult:
     freed_bytes: int
     scanned: int
     dry_run: bool
+    #: Runs the policy picked that the store would not remove -- a read-only mount, a
+    #: permission problem, a lost NFS lock. They are NOT counted as deleted or freed:
+    #: a nightly job reporting space it never reclaimed is how a full disk goes unnoticed.
+    failed: tuple[str, ...] = ()
 
     @property
     def deleted_count(self) -> int:
         return len(self.deleted)
+
+    @property
+    def failed_count(self) -> int:
+        return len(self.failed)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -115,6 +125,8 @@ class RetentionResult:
             "freed_bytes": self.freed_bytes,
             "scanned": self.scanned,
             "dry_run": self.dry_run,
+            "failed": list(self.failed),
+            "failed_count": self.failed_count,
         }
 
 
@@ -130,16 +142,27 @@ def _parse_dt(value: str | None) -> datetime | None:
 
 
 def select_expired(
-    entries: list[RunEntry], policy: RetentionPolicy, *, now: datetime
+    entries: list[RunEntry],
+    policy: RetentionPolicy,
+    *,
+    now: datetime,
+    skip: Collection[str] = (),
 ) -> list[ReportRef]:
     """Pure decision: which runs to delete under ``policy`` as of ``now``.
 
     Never selects a dag·task's newest run. Age and count act per dag·task; size
     trims oldest-first across all tasks until the tree fits the budget. The
     dimensions combine as a union.
+
+    ``skip`` holds tokens of runs the store has already refused to delete. They are not
+    selected again, but their bytes still count towards the size budget -- they are
+    occupying the disk, which is the whole point of that budget. Without this the size
+    policy plans around a run it cannot remove and stops there, leaving the tree over its
+    limit while deletable runs sit right behind it.
     """
     if not policy.is_active:
         return []
+    blocked = set(skip)
 
     groups: dict[tuple[str, str], list[RunEntry]] = {}
     for entry in entries:
@@ -150,7 +173,8 @@ def select_expired(
     marked: dict[str, RunEntry] = {}  # token -> entry; dedups, keeps insertion order
 
     def mark(entry: RunEntry) -> None:
-        marked.setdefault(entry.ref.token, entry)
+        if entry.ref.token not in blocked:
+            marked.setdefault(entry.ref.token, entry)
 
     # Count: keep only the newest N per dag·task.
     if policy.max_runs_per_task is not None:
@@ -177,7 +201,7 @@ def select_expired(
             for entry in candidates:
                 if remaining <= policy.max_total_bytes:
                     break
-                if entry.ref.token in marked:
+                if entry.ref.token in marked or entry.ref.token in blocked:
                     continue
                 mark(entry)
                 remaining -= entry.size
@@ -212,25 +236,78 @@ def prune(
     when = now if now is not None else datetime.now(timezone.utc)
     to_delete = select_expired(entries, resolved, now=when)
 
+    # Size is measured up front only when the budget needs every run's. Otherwise measure
+    # just what is about to go: without this, a sweep that deleted 500 runs under an age or
+    # count limit reported "freed 0 bytes", which reads as a sweep that did nothing.
     sizes = {e.ref.token: e.size for e in entries}
-    freed = sum(sizes.get(ref.token, 0) for ref in to_delete)
-    if not dry_run:
+    if not resolved.needs_sizes:
         for ref in to_delete:
-            source.delete(ref)
+            sizes[ref.token] = source.report_size(ref)
+    gone: list[ReportRef] = []
+    failed: list[ReportRef] = []
+    if dry_run:
+        gone = list(to_delete)
+    else:
+        # Count what the store actually removed. delete() reports False when the run is
+        # still there afterwards, and a maintenance job that logs space it never freed is
+        # how a full disk stays unnoticed for weeks.
+        #
+        # A refusal also invalidates the plan. The size budget was worked out assuming
+        # every selected run goes; when the oldest one will not, the tree stays over its
+        # limit while deletable runs sit right behind it -- and the next scheduled sweep
+        # re-plans around the same stuck run and frees nothing at all, forever. So the
+        # selection is redone with the refused runs excluded (their bytes still counted,
+        # they are still on the disk) until a pass adds nothing new.
+        live = list(entries)
+        blocked: set[str] = set()
+        targets = to_delete
+        while targets:
+            refused_here = False
+            for ref in targets:
+                try:
+                    removed = source.delete(ref)
+                except Exception:
+                    _log.exception("retention: delete raised for %s", ref.token)
+                    removed = False
+                if removed:
+                    gone.append(ref)
+                elif not source.exists(ref):
+                    # Gone before we got to it -- another sweep, an operator, the viewer.
+                    # That is the outcome this policy asked for, not a storage failure;
+                    # reporting it as one sends someone to check a disk that is fine.
+                    gone.append(ref)
+                else:
+                    failed.append(ref)
+                    blocked.add(ref.token)
+                    refused_here = True
+            if not refused_here:
+                break
+            done = {ref.token for ref in gone}
+            live = [e for e in live if e.ref.token not in done]
+            targets = select_expired(live, resolved, now=when, skip=blocked)
 
+    freed = sum(sizes.get(ref.token, 0) for ref in gone)
     _log.info(
-        "retention: %s %d of %d run(s), %d bytes (dry_run=%s)",
+        "retention: %s %d of %d run(s), %d bytes, %d refused (dry_run=%s)",
         "would delete" if dry_run else "deleted",
-        len(to_delete),
+        len(gone),
         len(entries),
         freed,
+        len(failed),
         dry_run,
     )
+    if failed:
+        _log.error(
+            "retention: %d run(s) could not be deleted and still occupy the report "
+            "store; check its permissions and free space",
+            len(failed),
+        )
     return RetentionResult(
-        deleted=tuple(ref.token for ref in to_delete),
+        deleted=tuple(ref.token for ref in gone),
         freed_bytes=freed,
         scanned=len(entries),
         dry_run=dry_run,
+        failed=tuple(ref.token for ref in failed),
     )
 
 

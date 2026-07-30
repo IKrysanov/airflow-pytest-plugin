@@ -138,6 +138,18 @@ def test_help_serves_user_guide(client):
     assert "secure-xml" in r.text
 
 
+def test_help_shows_the_installed_plugin_version(client):
+    # The version is the first thing a bug report is asked for, and the UI had nowhere to
+    # read it. It must follow the installed distribution -- a page naming the version it
+    # was written against would be worse than no version at all.
+    from airflow_pytest_plugin.version import __version__
+
+    body = client.get("/help").text
+
+    assert f">v{__version__}<" in body
+    assert "__APX_VERSION__" not in body  # the placeholder is always substituted
+
+
 def test_help_serves_the_trailing_slash_without_a_redirect(client):
     # A bookmarked "/help/" must not cost a 307 first: that is a second round trip on
     # every open, and it reads as two document requests for one visit.
@@ -409,13 +421,16 @@ def test_index_has_feature_markers(client):
     assert 'id="help-btn" class="menu-item"' in html
 
 
-def test_links_menu_uses_closed_book_and_code_icons(client):
+def test_links_menu_uses_a_question_mark_and_code_icons(client):
     html = client.get("/").text
 
     help_start = html.index('id="help-btn"')
     help_item = html[help_start : html.index("</button>", help_start)]
-    assert 'data-icon="book-closed"' in help_item
-    assert 'd="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"' in help_item
+    # A question mark in a circle, not a book: the menu's own button is already a book,
+    # and two books in a row name neither of the things they point at.
+    assert 'data-icon="circle-question"' in help_item
+    assert "<circle" in help_item
+    assert 'd="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"' not in help_item  # the old book path
 
     api_start = html.index('data-api="docs"')
     api_item = html[api_start : html.index("</button>", api_start)]
@@ -3193,3 +3208,68 @@ def test_bulk_delete_refuses_rather_than_holding_every_worker_thread(reports_roo
 
     # The slot is returned even when the batch raises, so the endpoint cannot leak them.
     assert c.post("/api/reports/delete", json={"ids": [token]}).json()["deleted"] == 1
+
+
+def test_help_documents_every_parser_option(client):
+    # The guide is where an operator looks up what a parser argument does; an option the
+    # table forgets is an option nobody turns on. Pinned against the real signature so a
+    # new argument cannot ship undocumented.
+    import inspect
+
+    from airflow_pytest_plugin.producer import ArchivingResultParser
+
+    body = client.get("/help").text
+    options = [
+        name
+        for name in inspect.signature(ArchivingResultParser.__init__).parameters
+        if name != "self"
+    ]
+
+    assert len(options) == 14, "signature changed -- update the guide's table too"
+    for name in options:
+        assert f"<code>{name}</code>" in body, f"{name} is missing from the help table"
+    # Each row states a default, so nobody has to read the source to learn what unset does.
+    for default in ("<code>None</code>", "<code>True</code>", "<code>False</code>"):
+        assert default in body
+
+
+def test_help_explains_automatic_retention(client):
+    body = client.get("/help").text
+
+    for knob in (
+        "AIRFLOW_PYTEST_RETENTION_MAX_AGE_DAYS",
+        "AIRFLOW_PYTEST_RETENTION_MAX_RUNS",
+        "AIRFLOW_PYTEST_RETENTION_MAX_TOTAL_MB",
+    ):
+        assert knob in body
+    # The two rules that decide whether a team can trust the cleanup at all.
+    assert "prune_reports" in body
+    assert "dry_run=True" in body
+    assert "newest run of every DAG" in body
+
+
+def test_help_explains_what_each_airflow_role_can_do(client):
+    # "Why can't I delete this?" is the most common question a viewer asks, and the answer
+    # lives in Airflow's roles, not in the plugin. The guide has to state the mapping, both
+    # permissions, and the two rules that surprise people: per-DAG scope and fail-closed.
+    body = client.get("/help").text
+
+    assert "airflow role" in body.lower()
+    for row in ("See a run in the list", "Delete a report", "trigger (run the DAG)"):
+        assert row in body
+    assert "per DAG, not per plugin" in body
+    assert "refuses <em>everyone</em>" in body  # fail-closed, stated plainly
+
+
+def test_help_links_to_the_release_notes_for_this_exact_version(client):
+    # The changelog lives in the GitHub releases, one summary per release. The guide has to
+    # point at THIS install's release, not a generic page, or the reader has to work out
+    # which version they are on before they can read what changed.
+    from airflow_pytest_plugin.version import __version__
+
+    body = client.get("/help").text
+
+    base = "https://github.com/IKrysanov/airflow-pytest-plugin/releases"
+    assert f'href="{base}/tag/v{__version__}"' in body
+    assert f'href="{base}"' in body  # and the full list, for older versions
+    assert "__APX_VERSION__" not in body
