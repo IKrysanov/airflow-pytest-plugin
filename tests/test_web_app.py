@@ -3462,3 +3462,25 @@ def test_a_run_whose_report_is_missing_still_answers_404(
                 os.remove(os.path.join(base, name))
     r = client.get(f"/api/reports/{token}")
     assert r.status_code == 404 and r.json()["detail"] == "report not found"
+
+
+def test_a_missing_hardened_xml_parser_is_announced_at_startup(reports_root, caplog):
+    # /api/health carries `secure_xml`, but nobody reads health until something is wrong.
+    # The default install has no defusedxml, so the one moment an operator can act on it is
+    # the log line the server writes when it comes up.
+    class _Plain(FileSystemReportSource):
+        secure_xml = False  # type: ignore[assignment]
+
+    with caplog.at_level("WARNING"):
+        create_app(
+            _Plain(report_root=reports_root),
+            authorizer=lambda dag_id, user: True,
+            read_authorizer=lambda dag_id, user: True,
+            user_dependency=lambda: _TEST_USER,
+        )
+    assert "defusedxml" in caplog.text and "secure-xml" in caplog.text
+
+    caplog.clear()
+    with caplog.at_level("WARNING"):
+        make_app(reports_root)  # the dev/test install HAS it -> silence
+    assert "defusedxml" not in caplog.text

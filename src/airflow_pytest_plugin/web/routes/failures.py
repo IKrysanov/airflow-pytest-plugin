@@ -30,9 +30,11 @@ TAG = "failures"
 _FAILURES_CAP = 5000
 #: Reports read for their failure MESSAGES in one request (the clusters view over full
 #: history). Node ids come from meta.json, but a message only exists in junit.xml, so this
-#: is the one path that still parses reports -- and with one failure per run the item cap
-#: above never bites: 2,000 sparsely-failing runs meant 2,000 parses for 2,000 items.
-#: Clusters answer "what is the common cause", which the newest reports already show.
+#: view parses a report for every failing run it counts -- and with one failure per run the
+#: item cap above never bites: 2,000 sparsely-failing runs meant 2,000 parses for 2,000
+#: items. Clusters answer "what is the common cause", which the newest reports already show.
+#: (An archive without compact rows also parses reports, one endpoint down in the source;
+#: both go through the same size guard.)
 _CLUSTER_READ_CAP = 300
 #: Caps tests listed per cluster; the count stays exact.
 _CLUSTER_TESTS_CAP = 200

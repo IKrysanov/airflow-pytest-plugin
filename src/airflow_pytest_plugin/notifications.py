@@ -121,6 +121,11 @@ def domain_allowed(address: str) -> bool:
     An absent allowlist allows everything (the pre-0.7.0 behaviour). A listed domain also
     covers its subdomains, so ``corp.io`` accepts ``qa@ci.corp.io`` -- matched label-wise, so
     it never accepts a lookalike like ``corp.io.evil.net``.
+
+    A list that IS configured but names no usable domain allows nothing: whoever set it asked
+    for a restriction, and reading their typo as "anywhere" is the one answer they did not
+    ask for. :func:`~airflow_pytest_plugin.config.get_alerts_allowed_domains` says so in the
+    log; here it is simply an empty tuple that nothing matches.
     """
     allowed = get_alerts_allowed_domains()
     if allowed is None:  # unset -> unrestricted; empty -> configured but unusable

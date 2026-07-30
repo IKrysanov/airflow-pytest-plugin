@@ -1930,3 +1930,35 @@ def test_the_head_search_budget_counts_bytes_not_characters(reports_root, monkey
     )
     filesystem._unusable_meta.clear()
     assert FileSystemReportSource(report_root=reports_root).list_summaries() == []
+
+
+def test_a_meta_whose_head_does_not_parse_is_also_remembered(reports_root, monkeypatch):
+    # Reaching the rows and then failing to parse costs the same walk through the file as
+    # never finding them. Remembering only the second case left the first re-reading itself
+    # on every scan, which is the cost this whole path exists to avoid.
+    ref = ReportRef("dag", "run", "task", 1)
+    out = write_report(reports_root, ref, passed=1)
+    meta_path = os.path.join(out, META_FILENAME)
+    # Has the marker, but the head before it is not a JSON object we can close.
+    body = '["' + "x" * 4000 + '", ' * 100 + '"end"], "tests": [["a", "passed", 0.1]]}'
+    with open(meta_path, "w", encoding="utf-8") as fh:
+        fh.write(body)
+    monkeypatch.setenv(
+        "AIRFLOW_PYTEST_MAX_META_MIB", str((os.path.getsize(meta_path) - 1) / 2**20)
+    )
+    filesystem._unusable_meta.clear()
+    src = FileSystemReportSource(report_root=reports_root)
+
+    reads = []
+    real_open = Path.open
+
+    def counting(self, *a, **k):
+        if self.name == META_FILENAME:
+            reads.append(str(self))
+        return real_open(self, *a, **k)
+
+    monkeypatch.setattr(Path, "open", counting)
+    for _ in range(4):
+        src._invalidate_scan()
+        assert src.list_summaries() == []
+    assert len(reads) == 1, reads

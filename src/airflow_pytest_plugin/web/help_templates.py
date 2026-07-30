@@ -518,6 +518,8 @@ PytestOperator(
               <tr><td><code>AIRFLOW_PYTEST_RETENTION_MAX_AGE_DAYS</code></td><td data-i18n="retNone">unset</td><td data-i18n="retAge">Delete runs older than N days.</td></tr>
               <tr><td><code>AIRFLOW_PYTEST_RETENTION_MAX_RUNS</code></td><td data-i18n="retNone">unset</td><td data-i18n="retRuns">Keep only the N newest runs of each DAG·task.</td></tr>
               <tr><td><code>AIRFLOW_PYTEST_RETENTION_MAX_TOTAL_MB</code></td><td data-i18n="retNone">unset</td><td data-i18n="retSize">Keep the whole archive under N megabytes, deleting oldest first.</td></tr>
+              <tr><td><code>AIRFLOW_PYTEST_MAX_REPORT_MIB</code></td><td><code>64</code></td><td data-i18n="limReport">Largest report the viewer will open. A run past it stays in the list with its real numbers, but opening it says so instead. Raise it if a suite really archives more; 0 removes the limit.</td></tr>
+              <tr><td><code>AIRFLOW_PYTEST_MAX_META_MIB</code></td><td><code>16</code></td><td data-i18n="limMeta">Largest run index a scan decodes whole (about a quarter-million tests). Past it a run still lists, opens and is cleaned up as usual; only its per-test data is read from the report instead.</td></tr>
             </tbody>
           </table>
         </div>
@@ -835,6 +837,8 @@ pytest_integration · try 1</pre>
       retAge: "Delete runs older than N days.",
       retRuns: "Keep only the N newest runs of each DAG·task.",
       retSize: "Keep the whole archive under N megabytes, deleting oldest first.",
+      limReport: "Largest report the viewer will open. A run past it stays in the list with its real numbers, but opening it says so instead. Raise it if a suite really archives more; 0 removes the limit.",
+      limMeta: "Largest run index a scan decodes whole (about a quarter-million tests). Past it a run still lists, opens and is cleaned up as usual; only its per-test data is read from the report instead.",
       retentionDagLabel: "Maintenance DAG",
       retentionRules: "Set as many limits as you like: a run goes if <strong>any</strong> of them says so. The <strong>newest run of every DAG·task is always kept</strong>, so a task's latest result never disappears no matter how tight the limits are. To see what a policy would remove before trusting it, call <code>prune_reports(dry_run=True)</code> — it deletes nothing and reports how many runs and bytes it would have freed.",
       setupAccessTitle: "Check access with two roles",
@@ -1024,6 +1028,8 @@ pytest_integration · try 1</pre>
       retAge: "Удалять прогоны старше N дней.",
       retRuns: "Оставлять только N последних прогонов каждой пары DAG·задача.",
       retSize: "Держать весь архив в пределах N мегабайт, удаляя самые старые.",
+      limReport: "Наибольший отчёт, который вьювер откроет. Прогон сверх предела остаётся в списке с настоящими числами, но при открытии сообщает об этом. Поднимите значение, если сюита действительно архивирует больше; 0 снимает предел.",
+      limMeta: "Наибольший индекс прогона, который скан разбирает целиком (около четверти миллиона тестов). Сверх предела прогон так же виден, открывается и очищается; только построчные данные берутся из отчёта.",
       retentionDagLabel: "Обслуживающий DAG",
       retentionRules: "Ограничений можно включить сколько угодно: прогон удаляется, если сработало <strong>любое</strong>. <strong>Самый свежий прогон каждой пары DAG·задача сохраняется всегда</strong> — последний результат задачи не исчезнет, как бы жёстко ни были выставлены лимиты. Чтобы посмотреть, что политика удалит, до того как ей довериться, вызовите <code>prune_reports(dry_run=True)</code>: он ничего не удаляет и сообщает, сколько прогонов и байтов освободил бы.",
       setupAccessTitle: "Проверьте доступ под двумя ролями",

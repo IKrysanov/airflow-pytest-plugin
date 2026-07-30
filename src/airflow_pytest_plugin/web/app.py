@@ -261,6 +261,19 @@ def create_app(
 
     src = source or FileSystemReportSource()
 
+    # Said once, at startup, where an operator will see it: the hardened XML parser is an
+    # extra, so the default install reads archived reports with the stdlib one. That is fine
+    # when every report comes from your own suites and a real problem when it does not --
+    # and ``/api/health`` reporting ``secure_xml: false`` is only found by someone already
+    # looking.
+    if not getattr(src, "secure_xml", True):
+        _log.warning(
+            "Parsing archived JUnit XML with the stdlib parser: defusedxml is not "
+            "installed, so a hostile or corrupt report can exhaust API-server memory via "
+            "entity expansion. Install the extra: pip install "
+            "'airflow-pytest-plugin[secure-xml]'."
+        )
+
     def _allow_all(dag_id: str, user: Any) -> bool:
         return True
 

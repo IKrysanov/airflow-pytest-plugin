@@ -5,7 +5,7 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.7.0] - unreleased
+## [0.7.0] - 2026-07-31
 
 ### Added
 
@@ -122,7 +122,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   entirely, and the refusal is logged once per file rather than once per scan. A
   20,000-test suite writes 1.3 MiB, so the limit is roughly a quarter-million tests.
 - Both viewer limits are settings, not constants: `AIRFLOW_PYTEST_MAX_REPORT_MIB` (64) and
-  `AIRFLOW_PYTEST_MAX_META_MIB` (16), each with `0` meaning no limit. A run that is archived
+  `AIRFLOW_PYTEST_MAX_META_MIB` (16), each with `0` meaning no limit. **On upgrade**, a run
+  already archived with a report past 64 MiB stops opening until the limit is raised — it
+  stays in the list, and the `413` names the setting. A run that is archived
   but too large to parse now answers `413` with the reason and the way out instead of `404`
   "report not found", and the viewer shows that text rather than the status code.
 - A JUnit report past 64 MiB is refused by the viewer instead of parsed. Building the tree

@@ -100,13 +100,6 @@ _OUTPUT_BUDGET_SPENT = (
 _FAILURE_BUDGET_SPENT = (
     "…(traceback omitted: this run's failure text exceeded the limit)"
 )
-#: Largest JUnit report the reader will parse. Measured on a case-dense report: 45MiB of
-#: XML peaked at 220MiB and took 5.2s of CPU in the api-server's worker thread, so an
-#: unbounded report is an unbounded allocation there. Set well above the producer's own
-#: 32MB trim threshold: a healthy archive never comes close, and a report that does is a
-#: broken run, not a run worth OOMing for.
-#: Read through :func:`get_max_report_bytes` so an operator who really does archive more
-#: can raise it (``AIRFLOW_PYTEST_MAX_REPORT_MIB``, ``0`` = no limit).
 #: pytest's banner around a captured stream: ``------- Captured Log -------``.
 _CAPTURE_RULE = re.compile(r"^-{3,}\s*(Captured [^-]*?)\s*-{3,}$")
 
@@ -127,13 +120,17 @@ _unusable_meta: dict[str, tuple[int, int]] = {}
 def _parsable_report(report_path: str) -> bool:
     """Whether ``report_path`` exists and is small enough for the viewer to parse.
 
-    Parsing builds a tree that measures up to 5x the file on disk (measured on a case-dense
-    report), inside the Airflow api-server shared with everything else it serves. The
-    producer trims an archive past 32MB down to its failures, so a report near this limit
-    was not written by a healthy run: refuse it rather than let one run take the server down
-    with it. Every path that parses a report goes through here -- opening a run and the
-    per-test fallback for archives without compact rows -- so the bound cannot be walked
-    around by asking a different question.
+    Parsing builds a tree that measures up to 5x the file on disk -- 45MiB of case-dense XML
+    peaked at 220MiB and 5.2s of CPU -- inside the Airflow api-server shared with everything
+    else it serves. The producer trims an archive past 32MB down to its failures, so a report
+    near the limit was not written by a healthy run: refuse it rather than let one run take
+    the server down with it. The limit is :func:`get_max_report_bytes`
+    (``AIRFLOW_PYTEST_MAX_REPORT_MIB``, ``0`` = none), because an operator who really does
+    archive more should be able to say so.
+
+    Every path that parses a report goes through here -- opening a run and the per-test
+    fallback for archives without compact rows -- so the bound cannot be walked around by
+    asking a different question.
     """
     try:
         report_bytes = os.path.getsize(report_path)
@@ -176,13 +173,9 @@ def _cap(text: str, limit: int = -1) -> tuple[str, int]:
     return clipped, len(clipped.encode("utf-8"))
 
 
-#: Cap on ``meta.json`` before it is parsed. This one is read for EVERY run on every tree
-#: scan, so an unbounded file here is multiplied by the size of the archive. A real one is
-#: small: the compact per-test rows dominate it, and a 20,000-test suite writes 1.3 MiB, so
-#: 16 MiB is roughly a quarter-million tests -- past that the file is corrupt or was not
-#: written by us. Tunable via ``AIRFLOW_PYTEST_MAX_META_MIB`` (``0`` = no limit).
-#: With the limit switched off nothing is ever refused, but the identity-only reader still
-#: needs a ceiling on how far it will look for the rows.
+#: How far the identity-only reader will look for the per-test rows when the ``meta.json``
+#: cap (:func:`get_max_meta_bytes`, ``AIRFLOW_PYTEST_MAX_META_MIB``) is switched off. Nothing
+#: is refused then, but that search still needs a ceiling.
 _MAX_META_BYTES_FALLBACK = 64 * 1024 * 1024
 #: Chunk size when looking for the per-test rows in an oversized ``meta.json``. Everything
 #: before them -- identity, timestamps, the summary -- is normally a few hundred bytes, but
@@ -357,20 +350,33 @@ class FileSystemReportSource(ReportSource):
                         break
         except OSError:
             return None
-        if cut <= 0:
-            # Either not our shape, or the rows are further in than we will read. Both mean
-            # this file cannot answer, and repeating the search every scan just burns I/O.
+
+        def give_up() -> None:
+            """Remember that this exact file cannot answer, so later scans skip the read.
+
+            EVERY failure ends here, not just a missing marker: the rows being further in
+            than we will read, a head that does not parse, a head that is not an object.
+            All of them cost the same walk through the file, and the scan repeats every few
+            seconds -- one unreadable file would otherwise re-read itself forever.
+            """
             if len(_unusable_meta) >= _MAX_REPORTED_OVERSIZED:
                 _unusable_meta.clear()
             _unusable_meta[key] = (st.st_size, st.st_mtime_ns)
+
+        if cut <= 0:  # not our shape, or the rows are past the budget
+            give_up()
             return None
         # The cut is at a key boundary, so the prefix is whole UTF-8 -- but the file was
         # written by something else if it is not, and that is a skip, not a crash.
         try:
             data = json.loads(head[:cut].decode("utf-8").rstrip().rstrip(",") + "}")
         except (ValueError, UnicodeDecodeError):
+            give_up()
             return None
-        return data if isinstance(data, dict) else None
+        if not isinstance(data, dict):
+            give_up()
+            return None
+        return data
 
     def _scan_disk(self) -> list[ReportSummary]:
         """Walk the tree and build every summary, newest first (uncached)."""
