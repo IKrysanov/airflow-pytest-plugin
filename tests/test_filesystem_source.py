@@ -1657,3 +1657,23 @@ def test_losing_a_delete_race_is_not_logged_as_a_failure(
     assert not os.path.exists(out_dir)
     assert "Traceback" not in caplog.text
     assert "Could not delete" not in caplog.text
+
+
+def test_an_absurdly_large_report_is_refused_instead_of_parsed(
+    reports_root, monkeypatch
+):
+    # Parsing builds a tree several times the file's size, inside the Airflow api-server
+    # that serves everything else. The producer trims an archive past 32MB down to its
+    # failures, so a report near this limit was not written by a healthy run -- refusing it
+    # keeps one opened run from taking the server down with it.
+    from airflow_pytest_plugin.sources import filesystem
+
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref, passed=1)
+    src = FileSystemReportSource(report_root=reports_root)
+    assert src.get_detail(ref) is not None  # a normal report opens
+
+    monkeypatch.setattr(filesystem, "_MAX_REPORT_BYTES", 10)
+    assert src.get_detail(ref) is None
+    # The run itself stays listed: only opening it is refused, and the log says why.
+    assert len(src.list_summaries()) == 1

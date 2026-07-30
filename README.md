@@ -319,8 +319,10 @@ The API response is bounded independently: 16 KB per test, then 2 MB of captured
 4 MB of failure text per run — past either, a case says its text was omitted rather than
 looking silent. The caps count **UTF-8 bytes**, so non-ASCII output gets the same budget as
 ASCII rather than 2–4× it. A pathological run (2,000 failures × 16 KB traceback + 16 KB
-output) answers in 6.2 MB instead of 66 MB. Parsing the archived XML is *not* bounded: a
-69 MB report costs ~80 MB in the api-server while it is read.
+output) answers in 6.2 MB instead of 66 MB. Parsing itself is bounded too: a report past
+64 MiB is refused rather than parsed — its run stays listed and the api-server log says why
+— because building the tree costs up to 5× the file (45 MiB of XML peaked at 220 MiB and
+5.2 s of CPU). The producer trims past 32 MB, so a healthy archive never reaches that.
 
 **Secrets.** Captured output is stored verbatim, outside Airflow's task-log masking. If tests
 print tokens or personal data, that text is readable by anyone who can read the DAG's

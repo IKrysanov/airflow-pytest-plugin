@@ -495,6 +495,7 @@ PytestOperator(
             </tbody>
           </table>
         </div>
+        <div class="callout"><p data-i18n-html="paramsCapture"><strong>Captured output is archived verbatim.</strong> Whatever a test prints or logs is stored as the run produced it — the plugin does not mask secrets, so a test that prints a token archives that token. Keep credentials out of test output, or archive with <code>logs=False</code>; who can read it is decided by the same Airflow DAG permissions as the run itself.</p></div>
         <div class="example">
           <div class="example-label" data-i18n="paramsExampleLabel">A fully equipped task</div>
           <pre data-i18n="paramsExampleCode">ArchivingResultParser(
@@ -824,6 +825,7 @@ pytest_integration · try 1</pre>
       pTriageTimeout: "Seconds one call may take before the run gives up on it and says the pass was incomplete.",
       pEmail: "Email the result after every run of this task. Needs a mail transport and recipients configured on the server.",
       pEmailOnlyFail: "Email only when the run failed or a test is flaky — the setting most teams want, so a green night stays quiet.",
+      paramsCapture: "<strong>Captured output is archived verbatim.</strong> Whatever a test prints or logs is stored as the run produced it \u2014 the plugin does not mask secrets, so a test that prints a token archives that token. Keep credentials out of test output, or archive with <code>logs=False</code>; who can read it is decided by the same Airflow DAG permissions as the run itself.",
       paramsExampleLabel: "A fully equipped task",
       paramsExampleCode: "ArchivingResultParser(\n    logs_only_fail=True,\n    allure=True,\n    coverage=True,\n    coverage_source=\"src\",\n    triage_provider=\"anthropic\",\n    triage_budget=20,\n    email_only_fail=True,\n)",
       retentionTitle: "Delete old reports automatically",
@@ -1011,6 +1013,7 @@ pytest_integration · try 1</pre>
       pTriageTimeout: "Сколько секунд отводится одному вызову, прежде чем прогон откажется его ждать и сообщит, что разбор не завершён.",
       pEmail: "Отправлять письмо после каждого прогона этой задачи. Нужны настроенные на сервере транспорт почты и получатели.",
       pEmailOnlyFail: "Писать только при падении или нестабильности — то, что нужно большинству команд: зелёная ночь остаётся тихой.",
+      paramsCapture: "<strong>Захват сохраняется буквально.</strong> Всё, что тест напечатал или залогировал, кладётся в архив в том же виде: плагин не маскирует секреты, и тест, печатающий токен, архивирует его. Не выводите учётные данные в тестах или архивируйте с <code>logs=False</code>; кому это видно, решают те же права на DAG в Airflow, что и для самого запуска.",
       paramsExampleLabel: "Задача со всеми возможностями",
       paramsExampleCode: "ArchivingResultParser(\n    logs_only_fail=True,\n    allure=True,\n    coverage=True,\n    coverage_source=\"src\",\n    triage_provider=\"anthropic\",\n    triage_budget=20,\n    email_only_fail=True,\n)",
       retentionTitle: "Автоматическая очистка старых отчётов",

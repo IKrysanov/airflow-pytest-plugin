@@ -94,6 +94,12 @@ _OUTPUT_BUDGET_SPENT = (
 _FAILURE_BUDGET_SPENT = (
     "…(traceback omitted: this run's failure text exceeded the limit)"
 )
+#: Largest JUnit report the reader will parse. Measured on a case-dense report: 45MiB of
+#: XML peaked at 220MiB and took 5.2s of CPU in the api-server's worker thread, so an
+#: unbounded report is an unbounded allocation there. Set well above the producer's own
+#: 32MB trim threshold: a healthy archive never comes close, and a report that does is a
+#: broken run, not a run worth OOMing for.
+_MAX_REPORT_BYTES = 64 * 1024 * 1024
 #: pytest's banner around a captured stream: ``------- Captured Log -------``.
 _CAPTURE_RULE = re.compile(r"^-{3,}\s*(Captured [^-]*?)\s*-{3,}$")
 
@@ -308,6 +314,25 @@ class FileSystemReportSource(ReportSource):
             return None
         report_path = os.path.join(report_dir, REPORT_FILENAME)
         if not os.path.exists(report_path):
+            return None
+        # Parsing builds a tree that measures up to 5x the file on disk (measured on a
+        # case-dense report), inside the Airflow api-server shared with everything else it
+        # serves. The producer trims an archive past 32MB down to its failures, so a report
+        # near this limit was not written by a healthy run: refuse it rather than let one
+        # opened run take the server down with it.
+        try:
+            report_bytes = os.path.getsize(report_path)
+        except OSError:
+            return None
+        if report_bytes > _MAX_REPORT_BYTES:
+            _log.error(
+                "Refusing to open %s: %.0f MiB of JUnit XML is past the %.0f MiB the "
+                "viewer will parse. Archive the suite with logs=False or "
+                "logs_only_fail=True.",
+                report_path,
+                report_bytes / 2**20,
+                _MAX_REPORT_BYTES / 2**20,
+            )
             return None
 
         # Prefer stored counts; success is re-derived from the pass-rate threshold.

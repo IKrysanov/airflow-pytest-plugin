@@ -22,12 +22,18 @@ from typing import Any
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 
-from .common import RouteDeps, ok
+from .common import FAIL_OUTCOMES, RouteDeps, ok
 
 TAG = "failures"
 
 #: Bounds the returned payload.
 _FAILURES_CAP = 5000
+#: Reports read for their failure MESSAGES in one request (the clusters view over full
+#: history). Node ids come from meta.json, but a message only exists in junit.xml, so this
+#: is the one path that still parses reports -- and with one failure per run the item cap
+#: above never bites: 2,000 sparsely-failing runs meant 2,000 parses for 2,000 items.
+#: Clusters answer "what is the common cause", which the newest reports already show.
+_CLUSTER_READ_CAP = 300
 #: Caps tests listed per cluster; the count stays exact.
 _CLUSTER_TESTS_CAP = 200
 
@@ -122,12 +128,14 @@ def _collect_failures(
     once its next run is green and the list shows *current* breakage, not every failure
     ever archived (older run_ids are history). Deduped per (dag_id, task_id); a retry wins
     its run via the scan's created_at/try_number order. ``latest=False`` walks the full
-    history. Returns ``(items, capped)``.
+    history. Returns ``(items, capped)``; ``capped`` also covers ``with_message`` stopping
+    at :data:`_CLUSTER_READ_CAP` reports read.
     """
     src, read_auth = deps.src, deps.read_auth
     items: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
     capped = False
+    reports_read = 0
     for s in src.list_summaries(dag_id=dag_id, run_id=run_id):  # newest first
         if task_q and task_q not in s.ref.task_id.lower():
             continue
@@ -142,23 +150,46 @@ def _collect_failures(
             )  # mark before the green check, so a green newest hides old fails
         if (s.failed + s.errors) <= 0:
             continue
-        detail = src.get_detail(s.ref)
-        if detail is None:
-            continue
-        for c in detail.cases:
-            if c.outcome not in ("failed", "error"):
+        # Node id and outcome are already in the run's meta.json; the failure MESSAGE is
+        # only in junit.xml. So parse the XML only when the caller needs messages --
+        # without this, the dashboard's failures list re-parsed every failing run's report
+        # on every request (2,000 runs = 2,000 XML parses), which is what turns a handful
+        # of simultaneous viewers into a stalled API server.
+        cases: list[tuple[str, str, str | None]] = []
+        outcomes = None if with_message else src.test_outcomes(s.ref)
+        if outcomes is not None:
+            cases = [
+                (node, str(info.get("outcome")), None)
+                for node, info in outcomes.items()
+                if info.get("outcome") in FAIL_OUTCOMES
+            ]
+        else:
+            # No compact rows (a report archived before they existed, or a source that
+            # cannot serve them) -- fall back to the full read.
+            if reports_read >= _CLUSTER_READ_CAP:
+                capped = True
+                break
+            reports_read += 1
+            detail = src.get_detail(s.ref)
+            if detail is None:
                 continue
+            cases = [
+                (c.node_id, c.outcome, c.message)
+                for c in detail.cases
+                if c.outcome in FAIL_OUTCOMES
+            ]
+        for node_id, outcome, message in cases:
             item = {
                 "id": s.ref.token,
                 "dag_id": s.ref.dag_id,
                 "task_id": s.ref.task_id,
                 "run_id": s.ref.run_id,
                 "created_at": s.created_at,
-                "node_id": c.node_id,
-                "outcome": c.outcome,
+                "node_id": node_id,
+                "outcome": outcome,
             }
             if with_message:
-                item["message"] = c.message
+                item["message"] = message
             items.append(item)
             if len(items) >= _FAILURES_CAP:  # stop mid-run; don't over-read one big run
                 capped = True

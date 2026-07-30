@@ -83,6 +83,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   raising run no longer aborts the sweep, and a refused run no longer stops the size policy:
   it used to plan around the oldest run, fail to delete it and free nothing at all on every
   later sweep, leaving the tree permanently over its limit.
+- **The failures list no longer re-parses every report.** `GET /api/failures` read each
+  failing run's `junit.xml` to get node ids that already sit in its `meta.json`, so the
+  dashboard's list cost one XML parse per failing run, and 40 simultaneous viewers held
+  every worker thread, stalling unrelated requests. The report is now read only when the
+  caller asks for failure messages (the clusters view): over 2,000 archived runs the list
+  went from ~1.4 s with 500 XML parses to ~0.3 s with none. Runs archived before `meta.json`
+  carried test rows still fall back to the full read.
+- **Failure clusters no longer parse the whole archive.** `GET /api/failure-clusters` needs
+  each failure's *message*, which only `junit.xml` holds, so with one failure per run the
+  item cap never bit: 2,000 runs meant 2,000 parses. Reads are now capped at the 300 newest
+  runs — enough to answer "what is the common cause" — and the response says `capped: true`.
+  Measured over 2,000 runs: 341 ms → 58 ms, and the cost no longer grows with history. The
+  default `latest=1` view was always cheap and is unchanged.
 - **A missing Allure download is explained.** With `allure=True` the results land in the run's
   directory unless the task's own `pytest_args` set `--alluredir` (spliced later, so it wins)
   or the session collected nothing. Both cases now say so in the task log instead of leaving a
@@ -90,6 +103,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- A JUnit report past 64 MiB is refused by the viewer instead of parsed. Building the tree
+  costs up to 5× the file (45 MiB peaked at 220 MiB and 5.2 s of CPU in the api-server's
+  worker thread), so one absurd report could exhaust the process every viewer shares. The run
+  stays listed and the server log names the file and the fix; the producer's own 32 MB trim
+  keeps healthy archives far below the limit.
 - Captured output is stored verbatim, outside Airflow's task-log masking. Suites that print
   credentials or personal data should archive less of it — see
   [Captured output](README.md#captured-output).

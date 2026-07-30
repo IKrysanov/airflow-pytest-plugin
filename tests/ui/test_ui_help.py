@@ -347,3 +347,21 @@ def test_help_release_section_is_last_and_opens_the_notes(page, base_url):
         # Outward links must not be plain _blank: Airflow's iframe sandbox blocks that.
         expect(page.locator(link)).to_have_attribute("rel", "noopener noreferrer")
     assert re.search(r"v\d+\.\d+", page.locator("#whats-new").inner_text())
+
+
+def test_captured_output_warns_that_secrets_are_not_masked(page, base_url):
+    # The archive stores whatever a test printed, verbatim. Nothing else in the product
+    # says so, so a team can archive a token without ever being told that would happen.
+    for locale, needle in (
+        ("en", "does not mask secrets"),
+        ("ru", "не маскирует секреты"),
+    ):
+        page.goto(base_url + "/help")
+        page.evaluate("(v) => localStorage.setItem('i18nextLng', v)", locale)
+        page.reload()
+        warn = page.locator("[data-i18n-html='paramsCapture']")
+        warn.scroll_into_view_if_needed()
+        expect(warn).to_be_visible()
+        assert needle in warn.inner_text()
+        # It names the way out, not just the hazard.
+        assert "logs=False" in warn.inner_text()

@@ -3273,3 +3273,86 @@ def test_help_links_to_the_release_notes_for_this_exact_version(client):
     assert f'href="{base}/tag/v{__version__}"' in body
     assert f'href="{base}"' in body  # and the full list, for older versions
     assert "__APX_VERSION__" not in body
+
+
+def test_failures_list_does_not_reparse_every_report(reports_root):
+    # node_id and outcome already live in each run's meta.json; only the failure MESSAGE
+    # needs junit.xml. Reading the report for the plain list meant one XML parse per
+    # failing run on every dashboard load -- the thing that turns a few simultaneous
+    # viewers into a stalled API server.
+    import builtins
+
+    for i in range(6):
+        ref = ReportRef("dag", f"run{i}", "task", 1)
+        out = write_tests(
+            reports_root,
+            ref,
+            [["tests/t.py::test_a", "failed"], ["tests/t.py::test_b", "passed"]],
+            created_at=f"2026-06-{i + 1:02d}T00:00:00+00:00",
+        )
+        meta_path = os.path.join(out, META_FILENAME)
+        meta = json.load(open(meta_path, encoding="utf-8"))
+        meta["summary"] = {
+            "total": 2,
+            "passed": 1,
+            "failed": 1,
+            "skipped": 0,
+            "errors": 0,
+            "duration": 1.0,
+            "success": False,
+        }
+        json.dump(meta, open(meta_path, "w", encoding="utf-8"))
+    c = TestClient(make_app(reports_root))
+    c.get("/api/reports")  # warm the scan
+
+    real_open, opened = builtins.open, []
+    builtins.open = lambda *a, **kw: (opened.append(a[0]), real_open(*a, **kw))[1]
+    try:
+        plain = c.get("/api/failures?latest=0").json()
+    finally:
+        builtins.open = real_open
+
+    assert plain["total"] == 6
+    assert opened == [], f"re-read {len(opened)} files"
+    assert {f["node_id"] for f in plain["failures"]} == {"tests/t.py::test_a"}
+
+
+def test_failures_still_work_for_runs_archived_without_compact_rows(reports_root):
+    # A report from before meta.json carried its test rows (or a source that cannot serve
+    # them) must still list its failures -- the fast path falls back to the full read.
+    ref = ReportRef("dag", "old", "task", 1)
+    write_report(reports_root, ref, passed=1, failed=1)
+    meta_path = os.path.join(ReportLayout().dir_for(reports_root, ref), META_FILENAME)
+    meta = json.load(open(meta_path, encoding="utf-8"))
+    meta.pop("tests", None)
+    json.dump(meta, open(meta_path, "w", encoding="utf-8"))
+
+    body = TestClient(make_app(reports_root)).get("/api/failures?latest=0").json()
+
+    assert body["total"] == 1
+    assert body["failures"][0]["outcome"] in ("failed", "error")
+
+
+def test_failure_clusters_bounds_how_many_reports_it_reads(reports_root):
+    # Clusters need the failure MESSAGE, which only junit.xml holds, so this is the one
+    # path that still parses reports. With one failure per run the item cap never bites:
+    # 2,000 sparsely-failing runs meant 2,000 parses. The newest reports already answer
+    # "what is the common cause", so the read count is bounded and the result says so.
+    from airflow_pytest_plugin.web.routes.failures import _CLUSTER_READ_CAP
+
+    for i in range(_CLUSTER_READ_CAP + 20):
+        write_report(
+            reports_root,
+            ReportRef("dag", f"run{i:04d}", "task", 1),
+            passed=1,
+            failed=1,
+            created_at=f"2026-06-01T{i // 60:02d}:{i % 60:02d}:00+00:00",
+        )
+    c = TestClient(make_app(reports_root))
+
+    body = c.get("/api/failure-clusters?latest=0").json()
+
+    assert body["capped"] is True
+    assert sum(cl["count"] for cl in body["clusters"]) == _CLUSTER_READ_CAP
+    # The plain list needs no messages, so it is not bounded by the read cap.
+    assert c.get("/api/failures?latest=0").json()["total"] == _CLUSTER_READ_CAP + 20
