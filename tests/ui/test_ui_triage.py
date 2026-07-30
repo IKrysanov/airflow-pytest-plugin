@@ -485,14 +485,26 @@ BAR_OPACITY = (
 )
 
 
-def _bar(page):
+def _bar(page, *, timeout_ms=3000):
     """Segment opacities, read AFTER the dim transition has settled.
 
     Read immediately, getComputedStyle returns the value mid-interpolation -- still ~1 --
-    and the assertion passes for the wrong reason.
+    and the assertion passes for the wrong reason. A fixed sleep instead of this poll is
+    what made these two tests flaky: it is long enough on an idle machine and not on a busy
+    one, so the read lands mid-fade and the assertion fails on a UI that is behaving.
     """
+    # Let the class land and the .12s fade start before sampling: polling from t=0 settles
+    # on the value from BEFORE the change (two equal reads of a state that has not moved
+    # yet), which is the same wrong answer read too early always gave.
     page.wait_for_timeout(220)
-    return page.evaluate(BAR_OPACITY)
+    waited, previous = 0, None
+    while True:
+        current = page.evaluate(BAR_OPACITY)
+        if current == previous or waited >= timeout_ms:
+            return current
+        previous = current
+        page.wait_for_timeout(80)
+        waited += 80
 
 
 def test_the_mix_bar_dims_to_the_selected_category(triage_dash):

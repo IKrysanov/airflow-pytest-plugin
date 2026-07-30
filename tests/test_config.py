@@ -230,3 +230,29 @@ def test_success_coverage_falls_back_to_airflow_cfg(monkeypatch):
         lambda s, k: "0.7" if k == "success_coverage" else None,
     )
     assert config.get_success_coverage() == 0.7
+
+
+def test_a_positive_size_limit_never_rounds_down_to_no_limit(monkeypatch):
+    # 0 means "no limit"; any positive value means "a limit, this small". Rounding a tiny
+    # positive value to zero bytes would turn the strictest possible setting into none.
+    from airflow_pytest_plugin.config import get_max_report_bytes
+
+    monkeypatch.setenv("AIRFLOW_PYTEST_MAX_REPORT_MIB", "0")
+    assert get_max_report_bytes() == 0
+    monkeypatch.setenv("AIRFLOW_PYTEST_MAX_REPORT_MIB", "0.0000001")
+    assert get_max_report_bytes() == 1
+    monkeypatch.setenv("AIRFLOW_PYTEST_MAX_REPORT_MIB", "0.5")
+    assert get_max_report_bytes() == 512 * 1024
+
+
+def test_a_size_limit_follows_the_environment_without_a_restart(monkeypatch):
+    # The value is cached (it is read once per RUN during a scan), but the cache is keyed on
+    # the env value, so exporting a new one takes effect at once.
+    from airflow_pytest_plugin.config import get_max_meta_bytes
+
+    monkeypatch.delenv("AIRFLOW_PYTEST_MAX_META_MIB", raising=False)
+    assert get_max_meta_bytes() == 16 * 1024 * 1024
+    monkeypatch.setenv("AIRFLOW_PYTEST_MAX_META_MIB", "32")
+    assert get_max_meta_bytes() == 32 * 1024 * 1024
+    monkeypatch.delenv("AIRFLOW_PYTEST_MAX_META_MIB")
+    assert get_max_meta_bytes() == 16 * 1024 * 1024

@@ -16,10 +16,13 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import os
 
 from .compat import get_conf_value
+
+_log = logging.getLogger(__name__)
 
 ENV_VAR = "AIRFLOW_PYTEST_REPORTS_ROOT"
 CONF_SECTION = "pytest_reports"
@@ -65,6 +68,76 @@ def get_scan_cache_ttl() -> float:
     except ValueError:
         return DEFAULT_SCAN_TTL
     return ttl if ttl >= 0 else DEFAULT_SCAN_TTL
+
+
+#: Largest archived files the READER will parse, in MiB. Both exist because parsing happens
+#: inside the Airflow api-server, where one absurd file is everyone's problem -- not because
+#: a big suite is unwelcome. The defaults sit far above any healthy archive (a 2,000-test run
+#: whose every test failed with 32 KB of logs is 62 MiB; ``meta.json`` reaches 16 MiB at about
+#: a quarter-million tests), and both are here so an operator who really does archive more can
+#: raise them instead of being stuck. ``0`` removes the limit entirely.
+MAX_REPORT_MIB_ENV = "AIRFLOW_PYTEST_MAX_REPORT_MIB"
+DEFAULT_MAX_REPORT_MIB = 64.0
+MAX_META_MIB_ENV = "AIRFLOW_PYTEST_MAX_META_MIB"
+DEFAULT_MAX_META_MIB = 16.0
+
+
+#: Resolved limits, keyed by env var, as ``(raw env value, bytes)``. These are read once per
+#: RUN during a tree scan, and reading them is not free: with the env var unset -- the default
+#: -- each call falls through to ``airflow.cfg``, which measured 30us and turned a 3,000-run
+#: scan into 91ms of pure config lookup. The env value is still read every time (a dict hit),
+#: so exporting a new one takes effect at once; a change made in ``airflow.cfg`` instead needs
+#: an api-server restart, like most of Airflow's own configuration.
+_mib_resolved: dict[str, tuple[str | None, int]] = {}
+
+
+def _mib_setting(env_var: str, conf_key: str, default: float) -> int:
+    """A size limit in MiB from env, then cfg, as BYTES. ``0`` means no limit."""
+    raw = os.environ.get(env_var)
+    cached = _mib_resolved.get(env_var)
+    if cached is not None and cached[0] == raw:
+        return cached[1]
+    resolved = _resolve_mib(env_var, conf_key, default, raw)
+    _mib_resolved[env_var] = (raw, resolved)
+    return resolved
+
+
+def _resolve_mib(env_var: str, conf_key: str, default: float, raw: str | None) -> int:
+    if raw is None or not str(raw).strip():
+        raw = get_conf_value(CONF_SECTION, conf_key)
+    value = default
+    if raw is not None and str(raw).strip():
+        try:
+            parsed = float(str(raw).strip())
+        except ValueError:
+            _log.warning(
+                "Ignoring %s=%r: not a number of MiB; using %.0f",
+                env_var,
+                raw,
+                default,
+            )
+        else:
+            if parsed >= 0:
+                value = parsed
+            else:
+                _log.warning(
+                    "Ignoring %s=%r: negative; using %.0f", env_var, raw, default
+                )
+    if value <= 0:
+        return 0  # only an explicit 0 means "no limit"
+    # A positive value asks for a LIMIT, however small. Rounding 0.0000001 MiB down to zero
+    # bytes would silently turn the strictest possible setting into no setting at all.
+    return max(1, int(value * 1024 * 1024))
+
+
+def get_max_report_bytes() -> int:
+    """Largest ``junit.xml`` the viewer will parse, in bytes (``0`` = unlimited)."""
+    return _mib_setting(MAX_REPORT_MIB_ENV, "max_report_mib", DEFAULT_MAX_REPORT_MIB)
+
+
+def get_max_meta_bytes() -> int:
+    """Largest ``meta.json`` the viewer will parse whole, in bytes (``0`` = unlimited)."""
+    return _mib_setting(MAX_META_MIB_ENV, "max_meta_mib", DEFAULT_MAX_META_MIB)
 
 
 #: Retention knobs (all opt-in; unset = keep everything). Each reads its env var, then
@@ -257,6 +330,25 @@ def _list_setting(env_var: str, conf_key: str) -> tuple[str, ...]:
 def get_alerts_recipients() -> tuple[str, ...]:
     """The alert email recipients (empty = alerting stays inert)."""
     return _list_setting(ALERTS_EMAIL_TO_ENV, "alerts_email_to")
+
+
+#: Opt-in domain allowlist for every address the plugin will mail. The manual
+#: ``POST /api/reports/{id}/email`` accepts recipients from the request body, so anyone who
+#: may READ a DAG can otherwise have the organisation's SMTP server deliver a run (with its
+#: captured output and Allure attachment) to an address of their choosing. Listing the
+#: domains that are allowed to receive turns that into an internal-only feature. Unset =
+#: unrestricted, which is the behaviour every release before 0.7.0 had.
+ALERTS_EMAIL_DOMAINS_ENV = "AIRFLOW_PYTEST_ALERTS_EMAIL_DOMAINS"
+
+
+def get_alerts_allowed_domains() -> tuple[str, ...]:
+    """Lower-cased domains that may receive plugin email; empty tuple = no restriction.
+
+    A leading ``@`` or ``.`` is accepted and stripped, so ``@corp.io``, ``.corp.io`` and
+    ``corp.io`` all mean the same thing.
+    """
+    raw = _list_setting(ALERTS_EMAIL_DOMAINS_ENV, "alerts_email_domains")
+    return tuple(d.lstrip("@.").lower() for d in raw if d.lstrip("@."))
 
 
 def get_reports_root() -> str:

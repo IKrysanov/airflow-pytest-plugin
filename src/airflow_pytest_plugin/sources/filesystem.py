@@ -34,7 +34,13 @@ from typing import IO, Any, cast
 
 from airflow_pytest_operator import JUnitResultParser
 
-from ..config import get_reports_root, get_scan_cache_ttl, get_success_threshold
+from ..config import (
+    get_max_meta_bytes,
+    get_max_report_bytes,
+    get_reports_root,
+    get_scan_cache_ttl,
+    get_success_threshold,
+)
 from ..layout import (
     ALLURE_DIRNAME,
     META_FILENAME,
@@ -99,9 +105,59 @@ _FAILURE_BUDGET_SPENT = (
 #: unbounded report is an unbounded allocation there. Set well above the producer's own
 #: 32MB trim threshold: a healthy archive never comes close, and a report that does is a
 #: broken run, not a run worth OOMing for.
-_MAX_REPORT_BYTES = 64 * 1024 * 1024
+#: Read through :func:`get_max_report_bytes` so an operator who really does archive more
+#: can raise it (``AIRFLOW_PYTEST_MAX_REPORT_MIB``, ``0`` = no limit).
 #: pytest's banner around a captured stream: ``------- Captured Log -------``.
 _CAPTURE_RULE = re.compile(r"^-{3,}\s*(Captured [^-]*?)\s*-{3,}$")
+
+
+#: Files already reported as too large, as ``path -> size``. The scan runs on a timer, so
+#: without this one bad file writes the same ERROR every few seconds for as long as it sits
+#: in the tree -- an operator sees the problem once and then only noise. Bounded: a tree with
+#: more broken files than this has a bigger problem than a log line.
+_MAX_REPORTED_OVERSIZED = 512
+_reported_oversized: dict[str, int] = {}
+#: Oversized files already shown NOT to be one of ours, as ``path -> (size, mtime_ns)``.
+#: Looking for the rows in a file that has none reads up to the whole budget, and the scan
+#: repeats every couple of seconds: without this, one 40MiB foreign file had every scan read
+#: 16MiB to reach the same answer, forever. Re-checked whenever the file changes.
+_unusable_meta: dict[str, tuple[int, int]] = {}
+
+
+def _parsable_report(report_path: str) -> bool:
+    """Whether ``report_path`` exists and is small enough for the viewer to parse.
+
+    Parsing builds a tree that measures up to 5x the file on disk (measured on a case-dense
+    report), inside the Airflow api-server shared with everything else it serves. The
+    producer trims an archive past 32MB down to its failures, so a report near this limit
+    was not written by a healthy run: refuse it rather than let one run take the server down
+    with it. Every path that parses a report goes through here -- opening a run and the
+    per-test fallback for archives without compact rows -- so the bound cannot be walked
+    around by asking a different question.
+    """
+    try:
+        report_bytes = os.path.getsize(report_path)
+    except OSError:  # missing or unreadable
+        return False
+    cap = get_max_report_bytes()
+    if not cap or report_bytes <= cap:
+        return True
+    key = str(report_path)
+    first_time = _reported_oversized.get(key) != report_bytes
+    if first_time:
+        if len(_reported_oversized) >= _MAX_REPORTED_OVERSIZED:
+            _reported_oversized.clear()
+        _reported_oversized[key] = report_bytes
+    log = _log.error if first_time else _log.debug
+    log(
+        "Refusing to open %s: %.0f MiB of JUnit XML is past the %.0f MiB the viewer will "
+        "parse. Archive the suite with logs=False or logs_only_fail=True, or raise "
+        "AIRFLOW_PYTEST_MAX_REPORT_MIB.",
+        report_path,
+        report_bytes / 2**20,
+        cap / 2**20,
+    )
+    return False
 
 
 def _cap(text: str, limit: int = -1) -> tuple[str, int]:
@@ -120,6 +176,21 @@ def _cap(text: str, limit: int = -1) -> tuple[str, int]:
     return clipped, len(clipped.encode("utf-8"))
 
 
+#: Cap on ``meta.json`` before it is parsed. This one is read for EVERY run on every tree
+#: scan, so an unbounded file here is multiplied by the size of the archive. A real one is
+#: small: the compact per-test rows dominate it, and a 20,000-test suite writes 1.3 MiB, so
+#: 16 MiB is roughly a quarter-million tests -- past that the file is corrupt or was not
+#: written by us. Tunable via ``AIRFLOW_PYTEST_MAX_META_MIB`` (``0`` = no limit).
+#: With the limit switched off nothing is ever refused, but the identity-only reader still
+#: needs a ceiling on how far it will look for the rows.
+_MAX_META_BYTES_FALLBACK = 64 * 1024 * 1024
+#: Chunk size when looking for the per-test rows in an oversized ``meta.json``. Everything
+#: before them -- identity, timestamps, the summary -- is normally a few hundred bytes, but
+#: ``summary.failed_node_ids`` is not bounded by anything: a run with tens of thousands of
+#: failures pushes the rows well past any fixed window, and reading only a fixed head made
+#: exactly those runs vanish from the list (and from retention). So the search walks the file
+#: in chunks instead, bounded by the same limit that refused the parse in the first place.
+_META_HEAD_CHUNK = 256 * 1024
 #: Cap on a run's verdicts sidecar before it is parsed. The producer's own caps put the
 #: worst case near 500KB (200 verdicts x two 1000-char fields); anything far past that was
 #: not written by us, and this parse happens inside the api-server on every detail request.
@@ -242,6 +313,56 @@ class FileSystemReportSource(ReportSource):
         """Whether JUnit XML is parsed with the hardened ``defusedxml`` parser."""
         return _SECURE_XML
 
+    @staticmethod
+    def _meta_identity_only(meta_file: Path) -> dict[str, Any] | None:
+        """Identity and summary from a meta.json too large to parse, or ``None``.
+
+        The reason the file is huge is the per-test rows we write LAST, and everything the
+        run list needs sits before them -- so the head is read and closed off there, and the
+        rows are never decoded. Without this a run whose meta crossed the cap would vanish
+        from the list, and with it from retention: its bytes would stop counting toward the
+        size budget and no sweep would ever reclaim them, which is how a tree ends up
+        permanently over its limit. Returns ``None`` for anything not shaped like ours, so
+        the caller still skips a genuinely foreign file.
+        """
+        key = str(meta_file)
+        try:
+            st = os.stat(meta_file)
+        except OSError:
+            return None
+        if _unusable_meta.get(key) == (st.st_size, st.st_mtime_ns):
+            return None  # already searched this exact file and it has no rows
+        # The KEY, not the substring: a node id inside the rows cannot contain an unescaped
+        # quote, so the first '"tests":' in the file is always the key we cut at.
+        marker = '"tests":'
+        budget = get_max_meta_bytes() or _MAX_META_BYTES_FALLBACK
+        head = ""
+        cut = -1
+        try:
+            with meta_file.open("r", encoding="utf-8") as fh:
+                while len(head) < budget:
+                    chunk = fh.read(_META_HEAD_CHUNK)
+                    if not chunk:
+                        break  # no rows at all: not our shape
+                    head += chunk
+                    cut = head.find(marker)
+                    if cut >= 0:
+                        break
+        except (OSError, ValueError):
+            return None
+        if cut <= 0:
+            # Either not our shape, or the rows are further in than we will read. Both mean
+            # this file cannot answer, and repeating the search every scan just burns I/O.
+            if len(_unusable_meta) >= _MAX_REPORTED_OVERSIZED:
+                _unusable_meta.clear()
+            _unusable_meta[key] = (st.st_size, st.st_mtime_ns)
+            return None
+        try:
+            data = json.loads(head[:cut].rstrip().rstrip(",") + "}")
+        except ValueError:
+            return None
+        return data if isinstance(data, dict) else None
+
     def _scan_disk(self) -> list[ReportSummary]:
         """Walk the tree and build every summary, newest first (uncached)."""
         root = Path(self._report_root)
@@ -251,6 +372,10 @@ class FileSystemReportSource(ReportSource):
         threshold = get_success_threshold()  # once per scan
         for meta_file in root.rglob(META_FILENAME):
             meta = self._load_meta(meta_file)
+            if meta is None:
+                # Refused (almost always: too large to parse). Keep the run listed if its
+                # head still identifies it -- see :meth:`_meta_identity_only`.
+                meta = self._meta_identity_only(meta_file)
             if meta is None:
                 continue
             summary = self._summary_from_meta(meta, threshold)
@@ -313,26 +438,7 @@ class FileSystemReportSource(ReportSource):
         if report_dir is None:
             return None
         report_path = os.path.join(report_dir, REPORT_FILENAME)
-        if not os.path.exists(report_path):
-            return None
-        # Parsing builds a tree that measures up to 5x the file on disk (measured on a
-        # case-dense report), inside the Airflow api-server shared with everything else it
-        # serves. The producer trims an archive past 32MB down to its failures, so a report
-        # near this limit was not written by a healthy run: refuse it rather than let one
-        # opened run take the server down with it.
-        try:
-            report_bytes = os.path.getsize(report_path)
-        except OSError:
-            return None
-        if report_bytes > _MAX_REPORT_BYTES:
-            _log.error(
-                "Refusing to open %s: %.0f MiB of JUnit XML is past the %.0f MiB the "
-                "viewer will parse. Archive the suite with logs=False or "
-                "logs_only_fail=True.",
-                report_path,
-                report_bytes / 2**20,
-                _MAX_REPORT_BYTES / 2**20,
-            )
+        if not _parsable_report(report_path):
             return None
 
         # Prefer stored counts; success is re-derived from the pass-rate threshold.
@@ -433,9 +539,11 @@ class FileSystemReportSource(ReportSource):
                         dur = 0.0
                     out[str(row[0])] = {"outcome": str(row[1]), "duration": dur}
             return out
-        # Older archive lacking the per-test map: parse junit.xml on demand.
+        # Older archive lacking the per-test map: parse junit.xml on demand. Same guard as
+        # opening a run -- this path is reached from the list views, so leaving it out would
+        # have made one refused report parsable through the back door.
         report_path = os.path.join(report_dir, REPORT_FILENAME)
-        if not os.path.isfile(report_path):
+        if not _parsable_report(report_path):
             return None
         try:
             result = self._parser.parse(report_path)
@@ -565,6 +673,24 @@ class FileSystemReportSource(ReportSource):
         """Whether the run's directory is still there (one stat, no parsing)."""
         target = self._safe_dir(ref)
         return target is not None and os.path.isdir(target)
+
+    def report_too_large(self, ref: ReportRef) -> bool:
+        """Whether this run's ``junit.xml`` is past :func:`get_max_report_bytes`.
+
+        Asked ONLY to explain a refusal, so it never inspects anything else: a run whose
+        report is missing or corrupt is not "too large", and saying so would send its owner
+        after the wrong problem.
+        """
+        report_dir = self._safe_dir(ref)
+        if report_dir is None:
+            return False
+        cap = get_max_report_bytes()
+        if not cap:
+            return False
+        try:
+            return os.path.getsize(os.path.join(report_dir, REPORT_FILENAME)) > cap
+        except OSError:  # missing or unreadable -> a different problem entirely
+            return False
 
     def report_size(self, ref: ReportRef) -> int:
         """Total bytes of the report's directory (``0`` if it resolves nowhere)."""
@@ -855,6 +981,29 @@ class FileSystemReportSource(ReportSource):
 
     @staticmethod
     def _load_meta(meta_file: Path) -> dict[str, Any] | None:
+        try:
+            meta_bytes = os.path.getsize(meta_file)
+        except OSError as exc:
+            _log.warning("Skipping unreadable %s: %s", meta_file, exc)
+            return None
+        meta_cap = get_max_meta_bytes()
+        if meta_cap and meta_bytes > meta_cap:
+            key = str(meta_file)
+            first_time = _reported_oversized.get(key) != meta_bytes
+            if first_time:
+                if len(_reported_oversized) >= _MAX_REPORTED_OVERSIZED:
+                    _reported_oversized.clear()
+                _reported_oversized[key] = meta_bytes
+            log = _log.error if first_time else _log.debug
+            log(
+                "Leaving the test rows in %s unparsed: %.0f MiB is past the %.0f MiB "
+                "(AIRFLOW_PYTEST_MAX_META_MIB) a tree scan will decode for one run. The run "
+                "stays listed; its per-test data comes from junit.xml instead.",
+                meta_file,
+                meta_bytes / 2**20,
+                meta_cap / 2**20,
+            )
+            return None
         try:
             with meta_file.open("r", encoding="utf-8") as fh:
                 data = json.load(fh)

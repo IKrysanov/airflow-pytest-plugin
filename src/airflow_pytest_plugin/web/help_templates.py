@@ -688,6 +688,7 @@ pytest_integration · try 1</pre>
         <p data-i18n="emailBody">When mail is available, open a run and click Email. Enter recipients or leave the field empty to use the team's configured list. Addresses are validated before sending.</p>
         <h3 data-i18n="alertsTitle">Automatic notifications</h3>
         <p data-i18n="alertsBody">A suite may be configured to email every result, or only failed and flaky runs. Messages are styled by outcome and link back to the run. Delivery failures never change the pytest task result.</p>
+        <div class="callout"><p data-i18n-html="emailDomains"><strong>Recipients are bounded by the server, not by the form.</strong> Anyone who may read a run can email it anywhere unless an administrator lists the allowed domains in <code>AIRFLOW_PYTEST_ALERTS_EMAIL_DOMAINS</code>; an address outside them is refused instead of quietly dropped.</p></div>
         <p data-i18n="emailLog">The Emails badge in the run toolbar opens the latest delivery attempts — recipients, time, automatic or manual source, and delivered/failed status.</p>
       </section>
 
@@ -923,6 +924,7 @@ pytest_integration · try 1</pre>
       emailBody: "When mail is available, open a run and click Email. Enter recipients or leave the field empty to use the team's configured list. Addresses are validated before sending.",
       alertsTitle: "Automatic notifications",
       alertsBody: "A suite may be configured to email every result, or only failed and flaky runs. Messages are styled by outcome and link back to the run. Delivery failures never change the pytest task result.",
+      emailDomains: "<strong>Recipients are bounded by the server, not by the form.</strong> Anyone who may read a run can email it anywhere unless an administrator lists the allowed domains in <code>AIRFLOW_PYTEST_ALERTS_EMAIL_DOMAINS</code>; an address outside them is refused instead of quietly dropped.",
       emailLog: "The Emails badge in the run toolbar opens the latest delivery attempts — recipients, time, automatic or manual source, and delivered/failed status.",
       s10Kicker: "11 · Personal view and permissions", s10Title: "Settings, language, and access",
       settingsTitle: "Dashboard settings",
@@ -1111,6 +1113,7 @@ pytest_integration · try 1</pre>
       emailBody: "Если почта доступна, откройте прогон и нажмите «Почта». Укажите получателей или оставьте поле пустым для командного списка. Адреса проверяются до отправки.",
       alertsTitle: "Автоматические уведомления",
       alertsBody: "Набор может отправлять письма после каждого результата либо только при сбоях и нестабильности. Письма оформлены по результату и ведут к прогону. Ошибка доставки не меняет результат pytest-задачи.",
+      emailDomains: "<strong>Круг получателей задаёт сервер, а не форма.</strong> Любой, кто может открыть прогон, отправит его на любой адрес, пока администратор не перечислит разрешённые домены в <code>AIRFLOW_PYTEST_ALERTS_EMAIL_DOMAINS</code>; адрес вне списка получает отказ, а не тихо отбрасывается.",
       emailLog: "Бейдж «Письма» в панели прогона открывает последние попытки доставки: получатели, время, автоматический или ручной источник и статус доставки.",
       s10Kicker: "11 · Личный вид и права", s10Title: "Настройки, язык и доступ",
       settingsTitle: "Настройки дашборда",

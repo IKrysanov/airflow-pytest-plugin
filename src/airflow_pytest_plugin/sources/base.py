@@ -100,6 +100,16 @@ class ReportSource(ABC):
         """
         return self.get_detail(ref) is not None
 
+    def report_too_large(self, ref: ReportRef) -> bool:
+        """Whether this run is stored but past the size this source will parse.
+
+        Only reason a stored run can refuse to open. Lets the API say that instead of
+        "not found", which sends the person who archived it looking for a run that is
+        right there in the list. Default ``False``: a source with no such limit never
+        has this problem.
+        """
+        return False
+
     def report_size(self, ref: ReportRef) -> int:
         """Bytes one report occupies on the backing store (``0`` if unknown).
 

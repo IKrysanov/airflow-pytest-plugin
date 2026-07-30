@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+import json
+import os
 from datetime import datetime, timezone
 
 import pytest
@@ -28,7 +30,7 @@ from airflow_pytest_plugin.retention import (
     select_expired,
 )
 from airflow_pytest_plugin.sources import FileSystemReportSource
-from conftest import write_tests
+from conftest import write_report, write_tests
 
 NOW = datetime(2026, 7, 1, tzinfo=timezone.utc)
 
@@ -538,3 +540,39 @@ def test_a_run_that_vanished_before_the_sweep_is_not_a_storage_failure(reports_r
 
     assert result.failed == ()
     assert result.deleted_count == 3  # including the one that went by itself
+
+
+def test_a_run_with_an_unparsable_meta_still_counts_and_is_reclaimed(
+    reports_root, monkeypatch
+):
+    # A run the viewer cannot fully read is still bytes on disk. If it dropped out of the
+    # listing, the size budget would stop counting it and no sweep would reclaim it: the
+    # tree would sit permanently over its limit while every sweep reported success.
+
+    # ``fat`` is the older of the two, so the newest-run-always-kept rule leaves it
+    # eligible; a size budget must then reach it like any other run.
+    fat = ReportRef("dag", "fat", "task", 1)
+    newer = ReportRef("dag", "newer", "task", 1)
+    out = write_report(
+        reports_root, fat, passed=1, created_at="2026-01-01T00:00:00+00:00"
+    )
+    write_report(reports_root, newer, passed=1, created_at="2026-01-02T00:00:00+00:00")
+    meta_path = os.path.join(out, "meta.json")
+    with open(meta_path, encoding="utf-8") as fh:
+        meta = json.load(fh)
+    meta["tests"] = [[f"tests/t.py::test_{i}", "passed", 0.1] for i in range(5000)]
+    with open(meta_path, "w", encoding="utf-8") as fh:
+        json.dump(meta, fh, indent=2)
+    monkeypatch.setenv(
+        "AIRFLOW_PYTEST_MAX_META_MIB", str((os.path.getsize(meta_path) - 1) / 2**20)
+    )
+
+    src = FileSystemReportSource(report_root=reports_root)
+    fat_bytes = src.report_size(fat)
+    assert fat_bytes > 0
+
+    result = prune(src, RetentionPolicy(max_total_bytes=fat_bytes // 2), dry_run=False)
+
+    assert fat.token in set(result.deleted)
+    assert result.freed_bytes >= fat_bytes
+    assert not os.path.exists(meta_path)

@@ -3356,3 +3356,109 @@ def test_failure_clusters_bounds_how_many_reports_it_reads(reports_root):
     assert sum(cl["count"] for cl in body["clusters"]) == _CLUSTER_READ_CAP
     # The plain list needs no messages, so it is not bounded by the read cap.
     assert c.get("/api/failures?latest=0").json()["total"] == _CLUSTER_READ_CAP + 20
+
+
+def test_email_domain_allowlist_refuses_outside_recipients(client, monkeypatch):
+    # Manual send takes recipients from the request body, so read access to ONE dag was
+    # enough to have the organisation's SMTP server deliver a run -- captured output and
+    # Allure attachment included -- to any address. The allowlist bounds where it can go.
+    import airflow_pytest_plugin.web.routes.reports as reports_mod
+
+    spy = _SpyMailer()
+    monkeypatch.setattr(reports_mod, "build_mailer", lambda: spy)
+    monkeypatch.setenv("AIRFLOW_PYTEST_ALERTS_EMAIL_DOMAINS", "corp.io")
+    token = _first_token(client)
+
+    r = client.post(
+        f"/api/reports/{token}/email", json={"recipients": ["attacker@evil.net"]}
+    )
+    assert r.status_code == 400
+    assert "AIRFLOW_PYTEST_ALERTS_EMAIL_DOMAINS" in r.json()["detail"]
+    assert spy.sent == []  # refused before the mailer is ever built
+
+    # One blocked address refuses the whole request: a 200 that quietly mailed fewer
+    # people than asked would be worse than a no.
+    assert (
+        client.post(
+            f"/api/reports/{token}/email",
+            json={"recipients": ["qa@corp.io", "attacker@evil.net"]},
+        ).status_code
+        == 400
+    )
+    assert spy.sent == []
+
+    # Subdomains of a listed domain are in; a lookalike that merely ends with it is not.
+    assert (
+        client.post(
+            f"/api/reports/{token}/email", json={"recipients": ["qa@ci.corp.io"]}
+        ).status_code
+        == 200
+    )
+    assert (
+        client.post(
+            f"/api/reports/{token}/email", json={"recipients": ["a@corp.io.evil.net"]}
+        ).status_code
+        == 400
+    )
+    assert [s["recipients"] for s in spy.sent] == [["qa@ci.corp.io"]]
+
+
+def test_email_without_an_allowlist_still_mails_anywhere(client, monkeypatch):
+    # The knob is opt-in: unset, the endpoint behaves exactly as it did before 0.7.0.
+    import airflow_pytest_plugin.web.routes.reports as reports_mod
+
+    spy = _SpyMailer()
+    monkeypatch.setattr(reports_mod, "build_mailer", lambda: spy)
+    monkeypatch.delenv("AIRFLOW_PYTEST_ALERTS_EMAIL_DOMAINS", raising=False)
+    r = client.post(
+        f"/api/reports/{_first_token(client)}/email",
+        json={"recipients": ["someone@elsewhere.example"]},
+    )
+    assert r.status_code == 200 and spy.sent[0]["recipients"] == [
+        "someone@elsewhere.example"
+    ]
+
+
+def test_a_report_too_large_to_open_says_so_instead_of_404(client, monkeypatch):
+    # The run is in the list and on disk. Answering "not found" would send its owner looking
+    # for a deleted run instead of at the report that is simply too big to parse.
+    token = _first_token(client)
+    assert client.get(f"/api/reports/{token}").status_code == 200
+
+    monkeypatch.setenv("AIRFLOW_PYTEST_MAX_REPORT_MIB", "0.00001")
+    r = client.get(f"/api/reports/{token}")
+    assert r.status_code == 413
+    assert "AIRFLOW_PYTEST_MAX_REPORT_MIB" in r.json()["detail"]
+    assert "logs_only_fail" in r.json()["detail"]
+    # A token that really is missing still answers 404.
+    gone = ReportRef("nope", "nope", "nope", 1).token
+    assert client.get(f"/api/reports/{gone}").status_code == 404
+
+
+def test_the_report_size_limit_is_configurable(client, monkeypatch):
+    # The default is a guard rail, not a wall: an operator who really does archive more can
+    # raise it, and 0 removes it entirely.
+    token = _first_token(client)
+    monkeypatch.setenv("AIRFLOW_PYTEST_MAX_REPORT_MIB", "0.00001")
+    assert client.get(f"/api/reports/{token}").status_code == 413
+
+    monkeypatch.setenv("AIRFLOW_PYTEST_MAX_REPORT_MIB", "512")
+    assert client.get(f"/api/reports/{token}").status_code == 200
+
+    monkeypatch.setenv("AIRFLOW_PYTEST_MAX_REPORT_MIB", "0")  # unlimited
+    assert client.get(f"/api/reports/{token}").status_code == 200
+
+
+def test_a_run_whose_report_is_missing_still_answers_404(
+    client, monkeypatch, reports_root
+):
+    # 413 says "too large", which is a claim about a file that is there. A run whose report
+    # was never written -- the task died before pytest produced one -- is a different
+    # problem, and answering "too large" would send its owner to the wrong setting.
+    token = _first_token(client)
+    for base, _dirs, names in os.walk(reports_root):
+        for name in names:
+            if name == "junit.xml":
+                os.remove(os.path.join(base, name))
+    r = client.get(f"/api/reports/{token}")
+    assert r.status_code == 404 and r.json()["detail"] == "report not found"

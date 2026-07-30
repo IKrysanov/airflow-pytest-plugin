@@ -30,6 +30,8 @@ import re
 import pytest
 from playwright.sync_api import expect
 
+from conftest import _load_dash  # type: ignore[import-not-found]
+
 pytestmark = pytest.mark.ui
 
 
@@ -1476,3 +1478,38 @@ def test_a_chatty_test_scrolls_inside_its_own_block(page, base_url):
     # And the row it lives in stays a row, not a page.
     expanded = page.locator("#d-body tbody tr.case-exp").first
     assert expanded.bounding_box()["height"] <= 700
+
+
+def test_email_outside_the_allowed_domains_says_why(page, restricted_email_base_url):
+    # The dialog accepts any syntactically valid address, so the domain bound is the
+    # server's. A refusal must reach the person typing -- a blank "could not send" would
+    # read as an outage and send them to the logs of a service they cannot see.
+    dash = _load_dash(page, restricted_email_base_url)
+    _open_first_run(page)
+    page.click("#d-email")
+    expect(page.locator("dialog#email-dlg")).to_be_visible()
+
+    page.fill("#em-to", "attacker@evil.net")
+    page.click("#em-send")
+    expect(page.locator("#em-status.err")).to_be_visible()
+    status = page.locator("#em-status").inner_text()
+    assert "evil.net" in status  # names the address that was refused
+    assert "AIRFLOW_PYTEST_ALERTS_EMAIL_DOMAINS" in status  # and the setting behind it
+    # The browser logs the 400 itself; nothing else broke, and the dialog stays open so the
+    # address can be corrected rather than retyped from scratch.
+    assert all("400" in e for e in dash.errors), dash.errors
+    expect(page.locator("dialog#email-dlg")).to_be_visible()
+    assert page.input_value("#em-to") == "attacker@evil.net"
+
+
+def test_a_run_too_large_to_open_explains_itself(page, tiny_limit_base_url):
+    # The run is in the list, so "Failed to load report: HTTP 404" would read as a bug or a
+    # vanished run. The dialog must carry the server's reason and the way out.
+    dash = _load_dash(page, tiny_limit_base_url)
+    _open_first_run(page)
+    body = page.locator("#d-body")
+    expect(body).to_contain_text("too large")
+    assert "logs_only_fail" in body.inner_text()
+    assert "AIRFLOW_PYTEST_MAX_REPORT_MIB" in body.inner_text()
+    assert "404" not in body.inner_text()
+    assert all("413" in e for e in dash.errors), dash.errors

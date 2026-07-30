@@ -44,9 +44,11 @@ from urllib.parse import quote
 
 from .compat.airflow import airflow_email_available, send_airflow_email
 from .config import (
+    ALERTS_EMAIL_DOMAINS_ENV,
     DEFAULT_FLAKY_MIN_SCORE,
     DEFAULT_FLAKY_WINDOW,
     DEFAULT_SUCCESS_THRESHOLD,
+    get_alerts_allowed_domains,
     get_alerts_recipients,
     get_base_url,
     get_conf_value,
@@ -113,6 +115,20 @@ def is_valid_email(address: str) -> bool:
     return True
 
 
+def domain_allowed(address: str) -> bool:
+    """Whether ``address`` may be mailed under the configured domain allowlist.
+
+    Unset allowlist -> everything is allowed (the pre-0.7.0 behaviour). A listed domain also
+    covers its subdomains, so ``corp.io`` accepts ``qa@ci.corp.io`` -- matched label-wise, so
+    it never accepts a lookalike like ``corp.io.evil.net``.
+    """
+    allowed = get_alerts_allowed_domains()
+    if not allowed:
+        return True
+    domain = address.rpartition("@")[2].lower().rstrip(".")
+    return any(domain == d or domain.endswith("." + d) for d in allowed)
+
+
 def dedupe_emails(addresses: Sequence[str]) -> tuple[str, ...]:
     """Dedupe case-insensitively (one mailbox = one send); keep first spelling and order."""
     seen: set[str] = set()
@@ -155,12 +171,20 @@ class AlertPolicy:
         """
         valid = []
         for address in get_alerts_recipients():
-            if is_valid_email(address):
-                valid.append(address)
-            else:
+            if not is_valid_email(address):
                 _log.warning(
                     "dropping invalid alert recipient from config: %r", address
                 )
+            elif not domain_allowed(address):
+                # The allowlist is the operator's own setting, so a configured address it
+                # rejects is a contradiction they need to see, not a silent non-delivery.
+                _log.warning(
+                    "dropping configured alert recipient %r: its domain is not in %s",
+                    address,
+                    ALERTS_EMAIL_DOMAINS_ENV,
+                )
+            else:
+                valid.append(address)
         recipients = dedupe_emails(valid)
         if len(recipients) > _MAX_CONFIG_RECIPIENTS:
             _log.warning(

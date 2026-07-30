@@ -18,6 +18,7 @@ import json
 import os
 import threading
 import time
+from pathlib import Path
 
 from airflow_pytest_plugin.layout import META_FILENAME, VERDICTS_FILENAME, ReportLayout
 from airflow_pytest_plugin.models import ReportRef
@@ -1666,14 +1667,236 @@ def test_an_absurdly_large_report_is_refused_instead_of_parsed(
     # that serves everything else. The producer trims an archive past 32MB down to its
     # failures, so a report near this limit was not written by a healthy run -- refusing it
     # keeps one opened run from taking the server down with it.
-    from airflow_pytest_plugin.sources import filesystem
 
     ref = ReportRef("dag", "run", "task", 1)
     write_report(reports_root, ref, passed=1)
     src = FileSystemReportSource(report_root=reports_root)
     assert src.get_detail(ref) is not None  # a normal report opens
 
-    monkeypatch.setattr(filesystem, "_MAX_REPORT_BYTES", 10)
+    monkeypatch.setenv("AIRFLOW_PYTEST_MAX_REPORT_MIB", "0.00001")
     assert src.get_detail(ref) is None
     # The run itself stays listed: only opening it is refused, and the log says why.
     assert len(src.list_summaries()) == 1
+
+
+def test_an_oversized_meta_has_its_test_rows_left_unparsed(reports_root, monkeypatch):
+    # meta.json is parsed for EVERY run on every tree scan, so one unbounded file is
+    # multiplied by the size of the archive. Past the cap the rows -- the part that made it
+    # huge -- are never decoded; only the head that identifies the run is read.
+    good = ReportRef("dag", "good", "task", 1)
+    fat = ReportRef("dag", "fat", "task", 1)
+    write_report(reports_root, good, passed=1)
+    out = write_report(reports_root, fat, passed=1)
+    meta_path = os.path.join(out, META_FILENAME)
+    with open(meta_path, encoding="utf-8") as fh:
+        meta = json.load(fh)
+    meta["tests"] = [[f"tests/t.py::test_{i}", "passed", 0.1] for i in range(20_000)]
+    with open(meta_path, "w", encoding="utf-8") as fh:
+        json.dump(meta, fh, indent=2)
+    src = FileSystemReportSource(report_root=reports_root)
+    assert len(src.test_outcomes(fat) or ()) == 20_000  # a big suite is read as it is
+
+    monkeypatch.setenv(
+        "AIRFLOW_PYTEST_MAX_META_MIB", str((os.path.getsize(meta_path) - 1) / 2**20)
+    )
+    src._invalidate_scan()
+    assert {s.ref.run_id for s in src.list_summaries()} == {"good", "fat"}
+    # The rows are gone from the cheap path: per-test data now comes from junit.xml, which
+    # carries the one case the run really has, and is bounded by its own cap.
+    assert len(src.test_outcomes(fat) or ()) == 1
+
+
+def _oversize_meta(out_dir, monkeypatch, rows=2000):
+    """Give the run at ``out_dir`` a meta.json past the parse cap; return its path."""
+    meta_path = os.path.join(out_dir, META_FILENAME)
+    with open(meta_path, encoding="utf-8") as fh:
+        meta = json.load(fh)
+    meta["tests"] = [[f"tests/t.py::test_{i}", "passed", 0.1] for i in range(rows)]
+    with open(meta_path, "w", encoding="utf-8") as fh:
+        json.dump(meta, fh, indent=2)
+    monkeypatch.setenv(
+        "AIRFLOW_PYTEST_MAX_META_MIB", str((os.path.getsize(meta_path) - 1) / 2**20)
+    )
+    return meta_path
+
+
+def test_a_run_whose_meta_is_too_large_stays_listed_and_deletable(
+    reports_root, monkeypatch
+):
+    # The rows are what make the file huge, and they sit last -- so the head still names the
+    # run. Dropping it from the list instead would also drop it from retention: its bytes
+    # would stop counting toward the size budget and no sweep would ever reclaim them.
+    ref = ReportRef("dag", "run", "task", 1)
+    out = write_report(reports_root, ref, passed=3, failed=1)
+    _oversize_meta(out, monkeypatch)
+
+    src = FileSystemReportSource(report_root=reports_root)
+    (summary,) = src.list_summaries()
+    assert summary.ref == ref  # real identity, not a placeholder
+    assert (summary.passed, summary.failed) == (3, 1)  # and the real numbers
+    assert src.report_size(ref) > 0  # so a size budget counts it
+    assert src.delete(ref) is True  # and a sweep can reclaim it
+
+
+def test_an_oversized_meta_that_is_not_ours_is_still_skipped(reports_root, monkeypatch):
+    # The head cut is for OUR shape. Anything else must fall back to being skipped rather
+    # than half-parsed into a run with invented numbers.
+    ref = ReportRef("dag", "run", "task", 1)
+    out = write_report(reports_root, ref, passed=1)
+    meta_path = os.path.join(out, META_FILENAME)
+    with open(meta_path, "w", encoding="utf-8") as fh:
+        json.dump({"junk": ["x" * 100] * 2000}, fh)
+    monkeypatch.setenv(
+        "AIRFLOW_PYTEST_MAX_META_MIB", str((os.path.getsize(meta_path) - 1) / 2**20)
+    )
+
+    assert FileSystemReportSource(report_root=reports_root).list_summaries() == []
+
+
+def test_an_oversized_meta_is_never_rewritten_by_a_sidecar_write(
+    reports_root, monkeypatch
+):
+    # record_alert / record_coverage load meta and write it back. They must not run on a
+    # file we only read the head of -- that would silently drop the per-test rows.
+    ref = ReportRef("dag", "run", "task", 1)
+    out = write_report(reports_root, ref, passed=1)
+    meta_path = _oversize_meta(out, monkeypatch)
+    before = os.path.getsize(meta_path)
+
+    src = FileSystemReportSource(report_root=reports_root)
+    assert src.record_alert(ref, {"kind": "failed", "ok": True}) is False
+    assert src.record_coverage(ref, 0.9) is False
+    assert os.path.getsize(meta_path) == before
+
+
+def test_an_oversized_meta_is_reported_once_not_on_every_scan(
+    reports_root, monkeypatch, caplog
+):
+    # The scan runs on a timer. Logging the refusal each time turns one broken file into a
+    # permanent stream of ERRORs that buries whatever else the api-server has to say.
+    ref = ReportRef("dag", "run", "task", 1)
+    out = write_report(reports_root, ref, passed=1)
+    _oversize_meta(out, monkeypatch)
+    filesystem._reported_oversized.clear()
+    src = FileSystemReportSource(report_root=reports_root)
+
+    with caplog.at_level("ERROR"):
+        for _ in range(5):
+            src._invalidate_scan()
+            src.list_summaries()
+
+    assert len([r for r in caplog.records if r.levelname == "ERROR"]) == 1
+    # A file that CHANGED size is news again: it was re-archived, or is still growing.
+    meta_path = os.path.join(out, META_FILENAME)
+    with open(meta_path, "a", encoding="utf-8") as fh:
+        fh.write(" " * 1000)
+    with caplog.at_level("ERROR"):
+        src._invalidate_scan()
+        src.list_summaries()
+    assert len([r for r in caplog.records if r.levelname == "ERROR"]) == 2
+
+
+def test_an_oversized_report_is_refused_on_every_path_that_parses_it(
+    reports_root, monkeypatch
+):
+    # Opening a run is not the only way to reach the parser: an archive without compact
+    # rows makes the list views parse junit.xml for per-test data. Guarding only the open
+    # would leave the refused report parsable through the back door.
+    ref = ReportRef("dag", "run", "task", 1)
+    out = write_report(reports_root, ref, passed=2)
+    meta_path = os.path.join(out, META_FILENAME)
+    with open(meta_path, encoding="utf-8") as fh:
+        meta = json.load(fh)
+    meta.pop("tests", None)  # the pre-0.3 shape: per-test data only in junit.xml
+    with open(meta_path, "w", encoding="utf-8") as fh:
+        json.dump(meta, fh)
+    src = FileSystemReportSource(report_root=reports_root)
+    assert src.test_outcomes(ref)  # normally the fallback reads the report
+
+    report_path = os.path.join(out, "junit.xml")
+    monkeypatch.setenv(
+        "AIRFLOW_PYTEST_MAX_REPORT_MIB", str((os.path.getsize(report_path) - 1) / 2**20)
+    )
+    assert src.get_detail(ref) is None
+    assert src.test_outcomes(ref) is None
+    assert len(src.list_summaries()) == 1  # still listed, still deletable
+
+
+def test_a_huge_summary_does_not_hide_the_run(reports_root, monkeypatch):
+    # ``summary.failed_node_ids`` is not bounded by anything, so a run with tens of thousands
+    # of failures pushes the per-test rows far into the file. Looking for them in a fixed
+    # window made exactly those runs vanish -- from the list and from retention with it.
+    ref = ReportRef("dag", "run", "task", 1)
+    out = write_report(reports_root, ref, passed=1, failed=1)
+    meta_path = os.path.join(out, META_FILENAME)
+    with open(meta_path, encoding="utf-8") as fh:
+        meta = json.load(fh)
+    meta["summary"]["failed_node_ids"] = [
+        f"tests/t.py::test_{i}[{'q' * 80}]" for i in range(5000)
+    ]
+    meta["tests"] = [[f"tests/t.py::test_{i}", "failed", 0.1] for i in range(20_000)]
+    with open(meta_path, "w", encoding="utf-8") as fh:
+        json.dump(meta, fh, indent=2)
+    monkeypatch.setenv(
+        "AIRFLOW_PYTEST_MAX_META_MIB", str((os.path.getsize(meta_path) - 1) / 2**20)
+    )
+
+    (summary,) = FileSystemReportSource(report_root=reports_root).list_summaries()
+    assert summary.ref == ref
+    assert (summary.passed, summary.failed) == (1, 1)
+
+
+def test_only_an_oversized_report_is_reported_as_too_large(reports_root, monkeypatch):
+    # "Too large" is a specific claim. A run whose report is missing or corrupt has a
+    # different problem, and naming the wrong one sends its owner to the wrong fix.
+    ref = ReportRef("dag", "run", "task", 1)
+    out = write_report(reports_root, ref, passed=1)
+    src = FileSystemReportSource(report_root=reports_root)
+    report_path = os.path.join(out, "junit.xml")
+    assert src.report_too_large(ref) is False
+
+    monkeypatch.setenv("AIRFLOW_PYTEST_MAX_REPORT_MIB", "0.00001")
+    assert src.report_too_large(ref) is True
+
+    os.remove(report_path)
+    assert src.report_too_large(ref) is False  # missing is not "too large"
+    assert src.report_too_large(ReportRef("dag", "gone", "task", 1)) is False
+
+
+def test_a_meta_that_cannot_answer_is_not_searched_on_every_scan(
+    reports_root, monkeypatch
+):
+    # Searching a file that has no per-test rows reads up to the whole budget, and the scan
+    # repeats every couple of seconds: one foreign 40 MiB file had every scan read 16 MiB to
+    # reach the same answer. The verdict is remembered until the file itself changes.
+    ref = ReportRef("dag", "run", "task", 1)
+    out = write_report(reports_root, ref, passed=1)
+    meta_path = os.path.join(out, META_FILENAME)
+    with open(meta_path, "w", encoding="utf-8") as fh:
+        json.dump({"junk": ["x" * 100] * 3000}, fh)
+    monkeypatch.setenv(
+        "AIRFLOW_PYTEST_MAX_META_MIB", str((os.path.getsize(meta_path) - 1) / 2**20)
+    )
+    filesystem._unusable_meta.clear()
+    src = FileSystemReportSource(report_root=reports_root)
+
+    reads = []
+    real_open = Path.open
+
+    def counting(self, *a, **k):
+        if self.name == META_FILENAME:
+            reads.append(str(self))
+        return real_open(self, *a, **k)
+
+    monkeypatch.setattr(Path, "open", counting)
+    for _ in range(4):
+        src._invalidate_scan()
+        assert src.list_summaries() == []
+    assert len(reads) == 1, reads  # searched once, remembered after that
+
+    # A file that CHANGED is searched again: it may have been re-archived.
+    with open(meta_path, "a", encoding="utf-8") as fh:
+        fh.write(" ")
+    src._invalidate_scan()
+    src.list_summaries()
+    assert len(reads) == 2

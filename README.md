@@ -319,10 +319,18 @@ The API response is bounded independently: 16 KB per test, then 2 MB of captured
 4 MB of failure text per run — past either, a case says its text was omitted rather than
 looking silent. The caps count **UTF-8 bytes**, so non-ASCII output gets the same budget as
 ASCII rather than 2–4× it. A pathological run (2,000 failures × 16 KB traceback + 16 KB
-output) answers in 6.2 MB instead of 66 MB. Parsing itself is bounded too: a report past
-64 MiB is refused rather than parsed — its run stays listed and the api-server log says why
-— because building the tree costs up to 5× the file (45 MiB of XML peaked at 220 MiB and
-5.2 s of CPU). The producer trims past 32 MB, so a healthy archive never reaches that.
+output) answers in 6.2 MB instead of 66 MB.
+
+Parsing itself is bounded too, because building the tree costs up to 5× the file (45 MiB of
+XML peaked at 220 MiB and 5.2 s of CPU) **inside the api-server**. A report past
+`AIRFLOW_PYTEST_MAX_REPORT_MIB` (default 64) is not parsed: the run stays in the list with
+its real numbers, opening it answers `413` with the reason, and the other views keep working
+from `meta.json`. For scale, a 2,000-test run where *every* test failed with 32 KB of logs
+each is 62 MiB — and a passing run cannot get there at all, since the producer trims capture
+from non-failing cases above 32 MB. `meta.json` has the same arrangement
+(`AIRFLOW_PYTEST_MAX_META_MIB`, default 16 ≈ a quarter-million tests): past it the per-test
+rows are left unparsed and come from `junit.xml` instead. Set either to `0` to remove the
+limit.
 
 **Secrets.** Captured output is stored verbatim, outside Airflow's task-log masking. If tests
 print tokens or personal data, that text is readable by anyone who can read the DAG's
@@ -486,6 +494,9 @@ adds the per-test judgements.
 | `AIRFLOW_PYTEST_SUCCESS_COVERAGE` (env/cfg) | `0.85` | line-coverage fraction (0–1) at/above which a run's **coverage** card reads as passing; below it the card turns red. Presentational only — it never fails a run (see [Coverage](#coverage)) |
 | `AIRFLOW_PYTEST_METRICS_TOKEN` (env/cfg) | — | bearer token that **enables** the Prometheus `/api/metrics` endpoint; unset = disabled (see [below](#prometheus-metrics)) |
 | `AIRFLOW_PYTEST_ALERTS_EMAIL_TO` (env/cfg) | — | comma-separated alert recipients (empty = alerting stays off; a per-task `email=True` *or* `email_only_fail=True` flag is the on-switch — see [below](#email-alerts)). Validated, case-insensitively deduped, capped at 50 (use a mailing-list address for bigger audiences) |
+| `AIRFLOW_PYTEST_MAX_REPORT_MIB` (env/cfg) | `64` | largest `junit.xml` the **viewer** will parse. Past it the run stays listed but opening it answers `413`; `0` = no limit. Parsing costs up to 5× the file inside the api-server, so this is a guard rail, not a quota — raise it if you really archive more |
+| `AIRFLOW_PYTEST_MAX_META_MIB` (env/cfg) | `16` | largest `meta.json` a tree scan will decode whole (~a quarter-million tests). Past it the per-test rows are skipped and come from `junit.xml`; the run stays listed, counted by retention and openable. `0` = no limit |
+| `AIRFLOW_PYTEST_ALERTS_EMAIL_DOMAINS` (env/cfg) | — | comma-separated domains the plugin may email (`corp.io` also covers `ci.corp.io`). Unset = anywhere. Set it if the ✉ button should stay internal: recipients come from the request body, so read access to a DAG otherwise reaches any address — an address outside the list is refused with `400`, and a configured one is dropped with a warning |
 | `AIRFLOW_PYTEST_SMTP_*` (env/cfg) | — | standalone SMTP (`_HOST`, `_PORT`, `_USER`, `_PASSWORD`, `_FROM`, `_STARTTLS`); when `_HOST` is set it is used directly (takes precedence over Airflow's `send_email`), otherwise it's the fallback |
 
 **Enable / disable the reader.** A falsey `AIRFLOW_PYTEST_PLUGIN_ENABLE` (`0`, `false`,
@@ -626,6 +637,20 @@ Setting `AIRFLOW_PYTEST_SMTP_HOST` wins even inside Airflow.
 **Sending one run by hand** — the ✉ button in a run's toolbar mails that run; recipients are
 optional (empty = the configured list). It appears only when a transport exists and needs
 read permission on the run's DAG (`POST /api/reports/{id}/email`).
+
+Because those recipients come from the request, anyone who may read a DAG can have your SMTP
+server deliver that run — captured output and Allure attachment included — to an address they
+choose. Bound it to your own domains:
+
+```bash
+export AIRFLOW_PYTEST_ALERTS_EMAIL_DOMAINS="corp.io, team.dev"   # subdomains included
+```
+
+An address outside the list is refused with `400` (the whole request, not silently fewer
+recipients), and it applies to the automatic alerts too — those are sent from the **worker**,
+so set the variable wherever mail leaves: the API server for the ✉ button, the workers for
+`email=True` / `email_only_fail=True`. An `airflow.cfg` key (`alerts_email_domains`) covers
+both when the file is shared.
 
 Every attempt is recorded on the run: an **Emails N** bench opens the log of who was mailed,
 when, and delivered/failed per send (newest 50). Runs with Allure results attach them as a

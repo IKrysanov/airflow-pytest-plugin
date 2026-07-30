@@ -42,6 +42,7 @@ from ...notifications import (
     build_mailer,
     build_run_alert,
     dedupe_emails,
+    domain_allowed,
     is_valid_email,
     record_sent_alert,
 )
@@ -180,6 +181,11 @@ def _resolve_recipients(body: dict[str, Any]) -> tuple[str, ...]:
     Accepts a list or a comma/semicolon string. Each address goes through the alerting
     layer's strict ``is_valid_email``; a bad one raises HTTP ``400`` naming it. The list
     is capped (no mass-mailing) and case-insensitive duplicates collapse to one send.
+
+    When ``AIRFLOW_PYTEST_ALERTS_EMAIL_DOMAINS`` is set, an address outside it is refused
+    with ``400`` rather than dropped: the caller asked for a delivery that will not happen,
+    and a request that answers "sent" while silently mailing fewer people is worse than one
+    that says no.
     """
     raw = body.get("recipients")
     if raw is None or raw == "":
@@ -198,6 +204,15 @@ def _resolve_recipients(body: dict[str, Any]) -> tuple[str, ...]:
         raise HTTPException(
             status_code=400,
             detail=f"invalid email address: {bad[:100]!r} — use name@example.com",
+        )
+    blocked = next((r for r in cleaned if not domain_allowed(r)), None)
+    if blocked is not None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"recipient {blocked[:100]!r} is outside the domains this server may "
+                "email; ask an administrator about AIRFLOW_PYTEST_ALERTS_EMAIL_DOMAINS"
+            ),
         )
     deduped = dedupe_emails(cleaned)
     if len(deduped) > _MAX_EMAIL_RECIPIENTS:
@@ -702,6 +717,7 @@ def build_router(deps: RouteDeps) -> APIRouter:
             **ERR_400,
             **ERR_403,
             **ERR_404,
+            413: {"description": "Archived, but too large for the viewer to parse."},
         },
     )
     def get_report(
@@ -713,7 +729,8 @@ def build_router(deps: RouteDeps) -> APIRouter:
         Includes every case's outcome, duration and captured output. A run archived with
         ``ArchivingResultParser(triage_provider=...)`` also carries the AI analysis: a
         ``triage`` roll-up (model, category counts) and a ``verdict`` on each failed case.
-        ``400`` malformed token, ``403`` dag not readable, ``404`` missing.
+        ``400`` malformed token, ``403`` dag not readable, ``404`` missing, ``413`` archived
+        but too large for the viewer to parse (see ``AIRFLOW_PYTEST_MAX_REPORT_MIB``).
         """
         ref = ref_from_token(report_id)
         if not read_auth(ref.dag_id, user):
@@ -722,6 +739,19 @@ def build_router(deps: RouteDeps) -> APIRouter:
             )
         detail = src.get_detail(ref)
         if detail is None:
+            # A run that IS on disk but would not parse is not "not found": saying so sends
+            # its owner looking for a deleted run instead of at the report that is too big.
+            # The question is deliberately narrow -- a missing or corrupt report still
+            # answers 404, because "too large" would be the wrong thing to go fix.
+            if src.report_too_large(ref):
+                raise HTTPException(
+                    status_code=413,
+                    detail=(
+                        "this run's JUnit report is too large for the viewer to open; "
+                        "archive the suite with logs_only_fail=True, or ask an "
+                        "administrator to raise AIRFLOW_PYTEST_MAX_REPORT_MIB"
+                    ),
+                )
             raise HTTPException(status_code=404, detail="report not found")
         payload = detail.to_dict()
         # Coverage is part of the report once baked in. If it isn't yet (older report, or

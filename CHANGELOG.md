@@ -103,11 +103,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Recipients of a manual email can be bounded to your own domains.** New
+  `AIRFLOW_PYTEST_ALERTS_EMAIL_DOMAINS` (env/cfg, comma-separated; a listed domain covers its
+  subdomains). `POST /api/reports/{id}/email` takes recipients from the request body, so read
+  access to one DAG was enough to have the organisation's SMTP server deliver a run — captured
+  output and Allure attachment included — to any address. With the list set, an address outside
+  it is refused with `400` (the whole request, so a send never quietly reaches fewer people
+  than asked) and configured recipients outside it are dropped with a warning. Automatic
+  alerts are bounded too, so the variable belongs wherever mail leaves — the API server for
+  the ✉ button, the workers for `email=True`. Unset = the previous, unrestricted behaviour.
+- A `meta.json` past 16 MiB has its per-test rows left unparsed. That file is read for
+  **every** run on every tree scan, so one unbounded copy is multiplied by the archive: a
+  single 164 MiB `meta.json` among 300 runs cost 244 ms and 453 MiB of peak memory per scan,
+  versus 22 ms and 0.2 MiB with the cap. The rows are what make it large and they are written
+  last, so the run's identity and summary are still read from the head — it stays listed,
+  keeps counting toward the retention size budget and is still reclaimed by a sweep, while
+  its per-test data comes from `junit.xml` instead. A file not shaped like ours is skipped
+  entirely, and the refusal is logged once per file rather than once per scan. A
+  20,000-test suite writes 1.3 MiB, so the limit is roughly a quarter-million tests.
+- Both viewer limits are settings, not constants: `AIRFLOW_PYTEST_MAX_REPORT_MIB` (64) and
+  `AIRFLOW_PYTEST_MAX_META_MIB` (16), each with `0` meaning no limit. A run that is archived
+  but too large to parse now answers `413` with the reason and the way out instead of `404`
+  "report not found", and the viewer shows that text rather than the status code.
 - A JUnit report past 64 MiB is refused by the viewer instead of parsed. Building the tree
   costs up to 5× the file (45 MiB peaked at 220 MiB and 5.2 s of CPU in the api-server's
   worker thread), so one absurd report could exhaust the process every viewer shares. The run
-  stays listed and the server log names the file and the fix; the producer's own 32 MB trim
-  keeps healthy archives far below the limit.
+  stays listed with its real numbers (those come from `meta.json`), and the server log names
+  the file and the fix, once per file. Every path that parses a report is behind the same
+  guard, including the per-test fallback the list views use for archives without compact
+  rows. The producer's own 32 MB trim keeps healthy archives far below the limit — only a
+  run whose FAILURES alone exceed it can get there, since trimming keeps those.
 - Captured output is stored verbatim, outside Airflow's task-log masking. Suites that print
   credentials or personal data should archive less of it — see
   [Captured output](README.md#captured-output).

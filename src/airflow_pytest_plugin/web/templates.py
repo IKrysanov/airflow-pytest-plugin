@@ -4442,7 +4442,15 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     updateParentDim();
     setReportParam(id);
     fetch(API + "reports/" + encodeURIComponent(id))
-      .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+      // Show what the server SAID, not just its status: a run can be archived and still
+      // refuse to open (a report too large to parse), and "HTTP 404" would send its owner
+      // hunting for a run that is right there in the list.
+      .then(function (r) {
+        if (r.ok) return r.json();
+        return r.json().catch(function () { return {}; }).then(function (b) {
+          throw new Error(b && b.detail ? b.detail : "HTTP " + r.status);
+        });
+      })
       .then(function (d) {
         detail = d; detail.cases = d.cases || []; renderDetail();
         if (focusNode) focusCaseRow(focusNode);  // jump to + expand one test

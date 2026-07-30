@@ -591,6 +591,22 @@ def email_base_url(tmp_path_factory):
     )
 
 
+@pytest.fixture(scope="session")
+def restricted_email_base_url(tmp_path_factory):
+    """Mail transport plus a recipient domain allowlist -> the server refuses outside
+    addresses, and the dialog has to say why instead of failing blankly."""
+    root = tmp_path_factory.mktemp("ui-reports-email-domains")
+    _seed(str(root), _SMALL, _SMALL_NRUNS)
+    yield from _boot(
+        str(root),
+        extra_env={
+            "AIRFLOW_PYTEST_SMTP_HOST": "localhost",
+            "AIRFLOW_PYTEST_ALERTS_EMAIL_TO": "team@example.com",
+            "AIRFLOW_PYTEST_ALERTS_EMAIL_DOMAINS": "example.com",
+        },
+    )
+
+
 @dataclass
 class Dash:
     page: object
@@ -726,3 +742,12 @@ def airflow_base_url(tmp_path_factory):
 def airflow_dash(page, airflow_base_url) -> Dash:
     """The dashboard EMBEDDED in a real Airflow api-server (plugin mount at /pytest-reports/)."""
     return _load_dash(page, airflow_base_url)
+
+
+@pytest.fixture(scope="session")
+def tiny_limit_base_url(tmp_path_factory):
+    """Server whose report-size limit is far below any real run -> opening one is refused,
+    so the dialog has to explain that rather than claim the run is missing."""
+    root = tmp_path_factory.mktemp("ui-reports-tiny-limit")
+    _seed(str(root), _SMALL, _SMALL_NRUNS)
+    yield from _boot(str(root), extra_env={"AIRFLOW_PYTEST_MAX_REPORT_MIB": "0.00001"})

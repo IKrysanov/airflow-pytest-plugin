@@ -365,3 +365,19 @@ def test_captured_output_warns_that_secrets_are_not_masked(page, base_url):
         assert needle in warn.inner_text()
         # It names the way out, not just the hazard.
         assert "logs=False" in warn.inner_text()
+
+
+def test_email_chapter_names_the_recipient_allowlist(page, base_url):
+    # The ✉ form takes any address, so a reader of the guide must learn that the bound is a
+    # server setting -- otherwise nobody knows the knob exists until it is abused.
+    for locale, needle in (
+        ("en", "AIRFLOW_PYTEST_ALERTS_EMAIL_DOMAINS"),
+        ("ru", "разрешённые домены"),
+    ):
+        page.goto(base_url + "/help")
+        page.evaluate("(v) => localStorage.setItem('i18nextLng', v)", locale)
+        page.reload()
+        note = page.locator("[data-i18n-html='emailDomains']")
+        note.scroll_into_view_if_needed()
+        expect(note).to_be_visible()
+        assert needle in note.inner_text()
