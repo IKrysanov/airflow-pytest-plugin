@@ -5,6 +5,58 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Read-only report assistant.** The **AI assistant** button opens a centered, resizable chat
+  window on the main dashboard and answers from the selected runs or current filters. Its
+  per-user size and same-tab open state survive a refresh. The API server builds a bounded
+  report snapshot,
+  re-checks Airflow read permission for every DAG, and returns clickable `[R1]` evidence
+  links. The current tab retains its bounded history across refreshes in `sessionStorage`;
+  histories are separated by an opaque Airflow-user namespace and nothing is stored on the
+  server. Assistant replies render a safe Markdown subset. Anthropic, OpenAI-compatible,
+  GigaChat and an offline fake provider are supported through new API-server extras and
+  environment settings.
+- **Optional in-process context reducer.** A GGUF model loaded by `llama-cpp-python` inside
+  the API server now processes the complete authorized tree in bounded chunks: every run
+  summary and every test case, with failure traceback, captured output and triage details.
+  Chunk summaries are merged hierarchically before the final provider call. It is lazy,
+  concurrency-bounded and optional; without it the deterministic bounded context is sent
+  directly.
+- New API methods: `GET /api/assistant/status` and `POST /api/assistant/query`.
+
+### Changed
+
+- Assistant providers now live in focused modules under `assistant/`; common contracts,
+  exceptions, context collection, prompts, settings and runtime orchestration are separated.
+- API-server assistant extras now depend directly on their provider SDKs. Secret redaction
+  is owned by the assistant package, so only worker-side triage extras install `pytest-triage`.
+- The assistant scope now updates immediately when report or group checkboxes change. It
+  shows a compact selected-run count and opens the full selection in a dedicated list.
+- Assistant controls follow Airflow language changes without reloading the plugin page.
+- Assistant Markdown tables stay inside a horizontally scrollable answer region, and loading
+  is shown as a compact three-dot bubble.
+- Chat context now keeps up to six complete exchanges under one 16 KB budget, and explicit
+  selection accepts up to 100 runs. The direct path keeps the 100-summary and total-byte
+  limits, but no longer drops details at fixed eight-run / 12-failure boundaries; failure
+  details are added newest-first while they fit. The local-model path has no tree-count
+  cut-off for filter-based scopes.
+- Completed answers show provider-reported input, output and total token usage when available.
+  The context-limited warning now means that a report or failure record was actually omitted
+  by the shared budget; clipping one traceback or captured-output field to its documented cap
+  no longer raises that warning.
+- The guide now includes a complete API-server installation example for the local reducer,
+  including downloading a small GGUF file and mounting it in Docker or Kubernetes.
+
+### Security
+
+- Assistant requests never bypass report RBAC; they cap request, history, explicit scope,
+  traceback, captured-output and response sizes, redact known secrets, and treat report text
+  as untrusted prompt data. Tracebacks and bounded captured output from failed/errored tests
+  do leave the server when a remote provider is enabled.
+
 ## [0.7.0] - 2026-07-31
 
 ### Added

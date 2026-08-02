@@ -60,6 +60,15 @@ triage = ["pytest-triage>=0.1.2"]
 triage-anthropic = ["pytest-triage[anthropic]>=0.1.2"]
 triage-openai = ["pytest-triage[openai]>=0.1.2"]
 triage-gigachat = ["pytest-triage[gigachat]>=0.1.2"]
+# Read-only assistant in the API server. Its provider adapters and redaction are independent
+# from worker-side pytest-triage; each extra installs only the SDK imported by that adapter.
+# Keep the empty base extra as a stable, explicit name for the bundled offline fake provider.
+# `assistant-local` adds an in-process GGUF reducer; its model file comes from deployment.
+assistant = []
+assistant-anthropic = ["anthropic>=0.40"]
+assistant-openai = ["openai>=1.0"]
+assistant-gigachat = ["gigachat>=0.2.1"]
+assistant-local = ["llama-cpp-python>=0.3"]
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",

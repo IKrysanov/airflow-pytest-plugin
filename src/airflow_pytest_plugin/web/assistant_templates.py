@@ -1,0 +1,1232 @@
+# Copyright 2026 the airflow-pytest-plugin contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Isolated HTML/CSS/JS fragments for the dependency-free assistant dialog."""
+
+from __future__ import annotations
+
+_CSS = r"""
+  /* -- Report assistant: a focused, resizable workspace over the dashboard. -------- */
+  #assistant-dialog.ast-dialog {
+    width: min(960px, 94vw); height: min(760px, 88dvh);
+    min-width: min(680px, 94vw); min-height: min(520px, 88dvh);
+    max-width: 94vw; max-height: 90dvh; margin: auto; padding: 0;
+    overflow: hidden; resize: both; background: var(--surface); color: var(--fg);
+    border: 1px solid var(--border); border-radius: 14px;
+    box-shadow: 0 24px 72px #0008;
+  }
+  .ast-head { min-height: 68px; padding: 12px 12px 12px 16px;
+    border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; }
+  .ast-title-wrap { min-width: 0; flex: 1 1 auto; }
+  .ast-title { margin: 0; display: flex; align-items: center; gap: 8px;
+    font-size: 17px; line-height: 1.3; font-weight: 650; }
+  .ast-beta { padding: 2px 5px; border: 1px solid var(--border); border-radius: 5px;
+    background: var(--surface-2); color: var(--primary);
+    font: 700 10px/1.3 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    letter-spacing: .04em; }
+  .ast-provider { color: var(--muted); font-size: 11px; white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis; }
+  .ast-head-actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+  .ast-close { width: 44px; height: 44px; padding: 0; justify-content: center;
+    flex: 0 0 auto; }
+  .ast-context { padding: 6px 16px; border-bottom: 1px solid var(--border);
+    background: var(--surface-2); }
+  .ast-clear { position: relative; min-height: 44px; border: 0; padding: 2px 6px;
+    background: transparent;
+    color: var(--muted); cursor: pointer; font: inherit; font-size: 11px; }
+  .ast-clear:hover { color: var(--fg); text-decoration: underline; }
+  .ast-scope-row { display: flex; align-items: center; gap: 10px; min-height: 32px; }
+  .ast-scope { display: block; min-width: 0; flex: 1 1 auto; font-size: 12px;
+    line-height: 1.45; overflow-wrap: anywhere; }
+  .ast-processing { display: flex; min-width: 0; color: var(--muted); font-size: 11px;
+    line-height: 1.45; overflow-wrap: anywhere; }
+  .ast-processing-copy { margin: 0 0 10px; color: var(--muted); }
+  .ast-processing-copy code, .ast-msg-meta code { padding: 1px 4px;
+    border: 1px solid var(--border); border-radius: 4px; background: var(--surface-2);
+    color: var(--primary); font: 600 10.5px/1.35 ui-monospace, SFMono-Regular, Menlo,
+      Consolas, monospace; }
+  .ast-limit-disclosure { position: relative; display: inline-flex; align-items: center;
+    color: var(--fg); }
+  .ast-limit-button { min-height: 44px; padding: 0 12px; display: inline-flex;
+    align-items: center; border: 1px solid var(--border); border-radius: 8px;
+    background: var(--surface); color: var(--fg); cursor: pointer; font: inherit;
+    font-size: 12px; font-weight: 600; }
+  .ast-limit-button:hover { background: var(--surface-2); }
+  .ast-limit-button[aria-expanded="true"] { background: var(--surface-2);
+    border-color: var(--primary); }
+  .ast-limit-button:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+  .ast-limit-tooltip { position: absolute; z-index: 20; right: 0;
+    bottom: calc(100% + 8px);
+    width: min(390px, calc(94vw - 32px)); padding: 12px 14px;
+    visibility: hidden; opacity: 0; transform: translateY(3px); pointer-events: none;
+    border: 1px solid var(--border); border-radius: 10px; background: var(--surface);
+    box-shadow: 0 12px 32px #0005; transition: opacity .15s ease, transform .15s ease,
+      visibility 0s linear .15s; }
+  .ast-limit-disclosure[data-open="true"] .ast-limit-tooltip {
+    visibility: visible; opacity: 1; transform: translateY(0); pointer-events: auto;
+    transition-delay: 0s; }
+  .ast-limits { display: block; margin: 0; padding-left: 18px; }
+  .ast-limit + .ast-limit { margin-top: 7px; }
+  .ast-limit::marker { color: var(--primary); }
+  .ast-limit code { display: inline; max-width: 100%; padding: 2px 5px;
+    border: 1px solid var(--border); border-radius: 5px; background: var(--surface-2);
+    color: var(--primary); font: 600 10.5px/1.35 ui-monospace, SFMono-Regular, Menlo,
+      Consolas, monospace; overflow-wrap: anywhere; }
+  .ast-scope-list { min-height: 32px; padding: 0 9px; flex: 0 0 auto; border-radius: 7px;
+    border: 1px solid var(--border); background: var(--surface); color: var(--fg);
+    cursor: pointer; font: inherit; font-size: 12px; }
+  .ast-scope-list:hover { background: var(--border); }
+  .ast-scope-list:focus-visible, .ast-scope-dialog-close:focus-visible {
+    outline: 2px solid var(--ring); outline-offset: 2px; }
+  #ast-scope-dialog { max-width: min(560px, 92vw); max-height: 82vh; }
+  .ast-scope-dialog-head { padding: 14px 16px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 10px; flex: 0 0 auto; }
+  .ast-scope-dialog-title-wrap { min-width: 0; flex: 1 1 auto; }
+  .ast-scope-dialog-head h2 { margin: 0; font-size: 16px; line-height: 1.35; }
+  .ast-scope-dialog-summary { margin-top: 2px; color: var(--muted); font-size: 12px; }
+  .ast-scope-dialog-close { width: 44px; height: 44px; padding: 0; flex: 0 0 auto;
+    justify-content: center; }
+  .ast-scope-dialog-body { min-height: 0; overflow-y: auto; padding: 8px 16px 18px; }
+  .ast-scope-runs { margin: 0; padding: 0; list-style: none; }
+  .ast-scope-run { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 8px;
+    padding: 10px 0; border-bottom: 1px solid var(--border); }
+  .ast-scope-run:last-child { border-bottom: 0; }
+  .ast-scope-run-num { color: var(--muted); font-size: 11px; padding-top: 2px;
+    font-variant-numeric: tabular-nums; }
+  .ast-scope-run-main { min-width: 0; }
+  .ast-scope-run-main strong, .ast-scope-run-main code { display: block;
+    overflow-wrap: anywhere; }
+  .ast-scope-run-main strong { font-size: 13px; font-weight: 600; }
+  .ast-scope-run-main code { margin-top: 2px; color: var(--muted); font-size: 11px; }
+  .ast-scope-limit { padding: 10px 0; color: var(--muted); font-size: 12px;
+    border-bottom: 1px solid var(--border); }
+  .ast-messages { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 22px 24px;
+    display: flex; flex-direction: column; gap: 12px; scroll-behavior: smooth; }
+  .ast-empty { width: min(100%, 720px); margin: auto; color: var(--muted); text-align: center; }
+  .ast-empty strong { display: block; color: var(--fg); font-size: 15px; margin-bottom: 5px; }
+  .ast-starters { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px; margin-top: 18px; text-align: left; }
+  .ast-starter { min-height: 44px; width: 100%; padding: 9px 11px; border-radius: 9px;
+    border: 1px solid var(--border); background: var(--surface); color: var(--fg);
+    cursor: pointer; text-align: left; line-height: 1.35; transition: background .15s; }
+  .ast-starter:hover { background: var(--surface-2); }
+  .ast-starter:focus-visible, .ast-close:focus-visible, .ast-send:focus-visible,
+  .ast-source:focus-visible, .ast-clear:focus-visible, .ast-copy:focus-visible {
+    outline: 2px solid var(--ring); outline-offset: 2px; }
+  .ast-msg { max-width: 92%; border-radius: 12px; padding: 12px 14px;
+    overflow-wrap: anywhere; }
+  .ast-msg.user { max-width: 76%; align-self: flex-end; background: var(--primary); color: var(--on-primary);
+    border-bottom-right-radius: 4px; }
+  .ast-msg.assistant { width: min(92%, 840px); align-self: flex-start; background: var(--surface-2);
+    border: 1px solid var(--border); border-bottom-left-radius: 4px; }
+  .ast-answer { line-height: 1.55; }
+  .ast-msg.user .ast-answer, .ast-answer.ast-error { white-space: pre-wrap; }
+  .ast-answer > :first-child { margin-top: 0; }
+  .ast-answer > :last-child { margin-bottom: 0; }
+  .ast-answer p { margin: 0 0 9px; }
+  .ast-answer h3 { margin: 14px 0 7px; font-size: 14px; line-height: 1.35; }
+  .ast-answer ul, .ast-answer ol { margin: 7px 0 10px; padding-left: 22px; }
+  .ast-answer li + li { margin-top: 5px; }
+  .ast-answer code { padding: 1px 4px; border-radius: 4px; background: var(--surface);
+    border: 1px solid var(--border); font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo,
+      Consolas, monospace; }
+  .ast-answer pre { max-width: 100%; margin: 8px 0 10px; padding: 10px;
+    overflow-x: auto; border-radius: 7px; background: var(--surface);
+    border: 1px solid var(--border); }
+  .ast-answer pre code { padding: 0; border: 0; background: transparent; white-space: pre; }
+  .ast-answer blockquote { margin: 8px 0; padding-left: 10px; color: var(--muted);
+    border-left: 3px solid var(--border); }
+  .ast-answer a { color: var(--primary); text-underline-offset: 2px; }
+  .ast-table-wrap { max-width: 100%; margin: 10px 0 12px; overflow-x: auto;
+    border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+  .ast-table-wrap:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+  .ast-answer table { width: max-content; min-width: 100%; border-collapse: collapse;
+    font-size: 12px; line-height: 1.45; }
+  .ast-answer th, .ast-answer td { min-width: 108px; max-width: 260px; padding: 8px 10px;
+    border-right: 1px solid var(--border); border-bottom: 1px solid var(--border);
+    text-align: left; vertical-align: top; white-space: normal; overflow-wrap: anywhere; }
+  .ast-answer th { background: var(--surface-2); font-weight: 650; }
+  .ast-answer tr:last-child td { border-bottom: 0; }
+  .ast-answer th:last-child, .ast-answer td:last-child { border-right: 0; }
+  .ast-error { color: var(--fail); }
+  .ast-msg-meta { color: var(--muted); font-size: 11px; margin-top: 8px; }
+  .ast-msg.user .ast-msg-meta { color: var(--on-primary); opacity: .9; }
+  .ast-msg.user .ast-msg-meta code { border-color: currentColor; background: #0002;
+    color: inherit; }
+  .ast-prompt-title { display: block; margin-bottom: 5px; font-weight: 650; }
+  .ast-prompt-parts { display: grid; gap: 3px; margin: 0; }
+  .ast-prompt-row { display: grid; grid-template-columns: minmax(94px, 1fr) auto;
+    align-items: baseline; gap: 10px; }
+  .ast-prompt-row dt, .ast-prompt-row dd { margin: 0; }
+  .ast-prompt-row dt { min-width: 0; overflow-wrap: anywhere; }
+  .ast-prompt-row dd { font-variant-numeric: tabular-nums; }
+  .ast-prompt-total { margin-top: 3px; padding-top: 5px;
+    border-top: 1px solid currentColor; font-weight: 650; }
+  .ast-msg-footer { display: flex; align-items: center; justify-content: space-between;
+    gap: 10px; margin-top: 8px; }
+  .ast-msg-footer .ast-msg-meta { margin-top: 0; }
+  .ast-msg-footer > .ast-copy:first-child { margin-left: auto; }
+  .ast-copy { min-width: 44px; min-height: 44px; padding: 0 10px; flex: 0 0 auto;
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    border: 1px solid var(--border); border-radius: 8px; background: var(--surface);
+    color: var(--muted); cursor: pointer; font: inherit; font-size: 11px; }
+  .ast-copy:hover { color: var(--fg); background: var(--surface-2); }
+  .ast-copy:disabled { cursor: wait; opacity: .75; }
+  .ast-copy svg { width: 14px; height: 14px; }
+  .ast-sources { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
+  .ast-source { min-height: 32px; max-width: 100%; padding: 5px 8px; border-radius: 7px;
+    border: 1px solid var(--border); background: var(--surface); color: var(--primary);
+    cursor: pointer; font-size: 11px; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; }
+  .ast-retry { margin-top: 9px; min-height: 36px; }
+  .ast-thinking { display: inline-flex; align-items: center; gap: 4px; min-height: 20px; }
+  .ast-thinking i { width: 6px; height: 6px; border-radius: 50%; background: var(--muted);
+    animation: ast-pulse 1.1s ease-in-out infinite; }
+  .ast-thinking i:nth-child(2) { animation-delay: .14s; }
+  .ast-thinking i:nth-child(3) { animation-delay: .28s; }
+  .ast-msg.assistant.ast-waiting { width: auto; max-width: none; padding: 9px 11px;
+    flex: 0 0 auto; }
+  @keyframes ast-pulse { 0%, 70%, 100% { opacity: .25; } 35% { opacity: 1; } }
+  .ast-form { flex: 0 0 auto; border-top: 1px solid var(--border); padding: 14px 24px 20px;
+    background: var(--surface); }
+  .ast-label { display: block; font-size: 12px; font-weight: 600; margin-bottom: 6px; }
+  .ast-question { display: block; width: 100%; min-height: 88px; max-height: 220px;
+    resize: vertical; padding: 10px 11px; border: 1px solid var(--border); border-radius: 9px;
+    background: var(--surface-2); color: var(--fg); font: inherit; line-height: 1.45; }
+  .ast-question:focus { outline: 2px solid var(--ring); outline-offset: 1px;
+    border-color: var(--primary); }
+  .ast-form-row { display: flex; align-items: center; gap: 10px; margin-top: 9px; }
+  .ast-hint { color: var(--muted); font-size: 11px; flex: 1 1 auto; }
+  .ast-form-actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+  .ast-send { min-height: 44px; padding: 0 15px; }
+  .ast-send[disabled] { opacity: .5; cursor: not-allowed; }
+  .ast-send svg { width: 16px; height: 16px; }
+  @media (max-width: 700px) {
+    #assistant-dialog.ast-dialog {
+      width: 100vw !important; height: 100dvh !important;
+      min-width: 0; min-height: 0; max-width: none; max-height: none;
+      margin: 0; border: 0; border-radius: 0; resize: none;
+    }
+    .ast-starters { grid-template-columns: 1fr; }
+    .ast-limit-tooltip { position: fixed; left: 12px; right: 12px;
+      bottom: max(64px, calc(52px + env(safe-area-inset-bottom))); width: auto; }
+    .ast-messages { padding: 14px 12px; }
+    .ast-form { padding: 10px 12px max(12px, env(safe-area-inset-bottom)); }
+    .ast-question { font-size: 16px; }
+    .ast-msg.user { max-width: 88%; }
+    .ast-prompt-row { grid-template-columns: minmax(84px, 1fr) auto; }
+  }
+  @media (max-height: 620px) {
+    #assistant-dialog.ast-dialog { height: 96dvh; min-height: 0; }
+    .ast-question { min-height: 58px; max-height: 100px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .ast-messages { scroll-behavior: auto; }
+    .ast-thinking i { animation: none; opacity: .65; }
+    .ast-limit-tooltip { transition: none; }
+  }
+"""
+
+_BUTTON = r"""
+    <button id="assistant-btn" class="btn" type="button" aria-controls="assistant-dialog"
+            aria-expanded="false" hidden>
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"/>
+        <path d="M8 9h8M8 13h5"/>
+      </svg>
+      <span id="assistant-btn-label">AI assistant</span>
+    </button>
+"""
+
+_PANEL = r"""
+<dialog id="assistant-dialog" class="ast-dialog" aria-labelledby="ast-title">
+  <div class="ast-head">
+    <div class="ast-title-wrap">
+      <h2 id="ast-title" class="ast-title">
+        <span id="ast-title-text">Report assistant</span><code class="ast-beta">BETA</code>
+      </h2>
+      <div id="ast-provider" class="ast-provider"></div>
+    </div>
+    <div class="ast-head-actions">
+      <button id="ast-clear" class="ast-clear" type="button" hidden>Clear chat</button>
+      <button id="ast-close" class="btn ast-close" type="button" aria-label="Close assistant">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M18 6 6 18M6 6l12 12"/>
+        </svg>
+      </button>
+    </div>
+  </div>
+  <div id="ast-context" class="ast-context" hidden>
+    <div class="ast-scope-row">
+      <span id="ast-scope" class="ast-scope" aria-live="polite"></span>
+      <button id="ast-scope-list" class="ast-scope-list" type="button"
+              aria-haspopup="dialog" aria-controls="ast-scope-dialog"
+              aria-expanded="false" hidden>View list</button>
+    </div>
+  </div>
+  <div id="ast-messages" class="ast-messages" aria-live="polite" aria-busy="false"></div>
+  <form id="ast-form" class="ast-form">
+    <label id="ast-question-label" class="ast-label" for="ast-question">Ask about reports</label>
+    <textarea id="ast-question" class="ast-question" maxlength="4000" required></textarea>
+    <div class="ast-form-row">
+      <span id="ast-hint" class="ast-hint">Ctrl/⌘ + Enter to send</span>
+      <div class="ast-form-actions">
+        <div id="ast-processing" class="ast-processing" aria-live="polite"></div>
+        <button id="ast-send" class="btn primary ast-send" type="submit">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/>
+          </svg>
+          <span id="ast-send-label">Send</span>
+        </button>
+      </div>
+    </div>
+  </form>
+</dialog>
+<dialog id="ast-scope-dialog" aria-labelledby="ast-scope-dialog-title">
+  <div class="ast-scope-dialog-head">
+    <div class="ast-scope-dialog-title-wrap">
+      <h2 id="ast-scope-dialog-title">Selected runs</h2>
+      <div id="ast-scope-dialog-summary" class="ast-scope-dialog-summary"></div>
+    </div>
+    <button id="ast-scope-dialog-close" class="btn ast-scope-dialog-close" type="button"
+            aria-label="Close selected runs">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M18 6 6 18M6 6l12 12"/>
+      </svg>
+    </button>
+  </div>
+  <div class="ast-scope-dialog-body">
+    <ol id="ast-scope-runs" class="ast-scope-runs"></ol>
+  </div>
+</dialog>
+"""
+
+_JS = r"""
+  // -- Report assistant ---------------------------------------------------------------
+  // Kept in a separate Python module but injected inside this IIFE so it can reuse the
+  // dashboard's current filters, selected report ids and safe openDetail() navigation.
+  var AST_I18N = {
+    en: {
+      button: "AI assistant", title: "Report assistant", close: "Close assistant",
+      tableLabel: "Answer table",
+      allScope: "All readable reports", selectedScope: "{n} reports selected",
+      selectedScopeLimited: "{total} reports selected · the first {used} will be used",
+      scopeList: "View list", scopeListTitle: "Selected runs",
+      scopeListClose: "Close selected runs", scopeListSummary: "{n} runs selected",
+      scopeListLimit: "The reports below are selected too, but are outside the {n}-report assistant limit.",
+      filtersScope: "Current filters: {value}", ask: "Ask about reports", limits: "Limits",
+      localProcessing: "Readable in this scope: {visible}. The local model will process the complete test tree for {processed}; only compacted evidence leaves the server.",
+      directProcessing: "Readable in this scope: {visible}. The external API receives a newest-first snapshot. If it exceeds the limit, older summaries or non-fitting failure records are omitted and the answer is marked as context-limited.",
+      directLimitSummaries: "summaries ≤ {value} newest",
+      contextLimit: "all report evidence in this request ≤ {value}",
+      tracebackLimit: "traceback ≤ {value} / test",
+      captureLimit: "stdout/stderr/log ≤ {value} / test",
+      localLimitReports: "reports processed: {value}",
+      localLimitCases: "test cases: all in scope",
+      localOutboundLimit: "external evidence ≤ {value}",
+      placeholder: "What changed in the latest runs?", hint: "Ctrl/⌘ + Enter to send",
+      send: "Send", clear: "Clear chat", introTitle: "Ask the report history",
+      promptSize: "Sent to LLM", promptSystem: "System", promptUser: "User",
+      promptContext: "Context data", promptHistory: "History",
+      promptStructure: "Prompt structure", promptTotal: "Total",
+      copyAnswer: "Copy", copied: "Copied", copyFailed: "Copy failed",
+      tokens: "LLM tokens: input {input} · output {output} · total {total}",
+      intro: "Answers use only reports you may read. This tab keeps the chat after refresh.",
+      thinking: "Reviewing reports…", retry: "Try again", noDetail: "The request failed.",
+      truncated: "Context was limited", reports: "{n} reports", direct: "direct context",
+      starters: ["What broke in the latest runs?", "Which failures look flaky?", "What became slower?"]
+    },
+    ru: {
+      button: "AI-ассистент", title: "Помощник по отчётам", close: "Закрыть помощника",
+      tableLabel: "Таблица ответа",
+      allScope: "Все доступные отчёты", selectedScope: "Выбрано отчётов: {n}",
+      selectedScopeLimited: "Выбрано отчётов: {total} · будут использованы первые {used}",
+      scopeList: "Список", scopeListTitle: "Выбранные прогоны",
+      scopeListClose: "Закрыть список выбранных прогонов", scopeListSummary: "Выбрано прогонов: {n}",
+      scopeListLimit: "Следующие отчёты тоже выбраны, но не входят в лимит помощника из {n} отчётов.",
+      filtersScope: "Текущие фильтры: {value}", ask: "Спросить об отчётах", limits: "Ограничения",
+      localProcessing: "Доступно в этой области: {visible}. Локальная модель обработает полное дерево тестов для {processed}; наружу уйдут только сжатые факты.",
+      directProcessing: "Доступно в этой области: {visible}. Во внешний API уйдёт срез от новых прогонов. Если данные превысят лимит, старые сводки или не поместившиеся целиком записи падений не войдут в запрос, а ответ будет отмечен как ограниченный.",
+      directLimitSummaries: "сводки ≤ {value} последних",
+      contextLimit: "данные всех отчётов в запросе ≤ {value}",
+      tracebackLimit: "traceback ≤ {value} / тест",
+      captureLimit: "stdout/stderr/log ≤ {value} / тест",
+      localLimitReports: "обработано отчётов: {value}",
+      localLimitCases: "test cases: все в области",
+      localOutboundLimit: "факты наружу ≤ {value}",
+      placeholder: "Что изменилось в последних прогонах?", hint: "Ctrl/⌘ + Enter — отправить",
+      send: "Отправить", clear: "Очистить чат", introTitle: "Спросите историю прогонов",
+      promptSize: "Отправлено в LLM", promptSystem: "System", promptUser: "User",
+      promptContext: "Данные отчётов", promptHistory: "История",
+      promptStructure: "Структура промпта", promptTotal: "Всего",
+      copyAnswer: "Копировать", copied: "Скопировано", copyFailed: "Ошибка копирования",
+      tokens: "Токены LLM: вход {input} · ответ {output} · всего {total}",
+      intro: "Ответ строится только по доступным вам отчётам. Эта вкладка сохранит чат после обновления.",
+      thinking: "Изучаю отчёты…", retry: "Повторить", noDetail: "Запрос не выполнен.",
+      truncated: "Контекст был ограничен", reports: "Отчётов: {n}", direct: "контекст без сжатия",
+      starters: ["Что сломалось в последних прогонах?", "Какие падения похожи на flaky?", "Какие тесты замедлились?"]
+    }
+  };
+  function astT(key) {
+    var dict = AST_I18N[LOCALE] || AST_I18N.en;
+    return dict[key] == null ? AST_I18N.en[key] : dict[key];
+  }
+  function astFmt(text, key, value) { return String(text).replace("{" + key + "}", value); }
+
+  var astButton = document.getElementById("assistant-btn");
+  var astDialog = document.getElementById("assistant-dialog");
+  var astMessages = document.getElementById("ast-messages");
+  var astQuestion = document.getElementById("ast-question");
+  var astSend = document.getElementById("ast-send");
+  var astClear = document.getElementById("ast-clear");
+  var astContext = document.getElementById("ast-context");
+  var astScopeList = document.getElementById("ast-scope-list");
+  var astScopeDialog = document.getElementById("ast-scope-dialog");
+  var AST_STORAGE_PREFIX = "airflow-pytest-plugin:assistant:v2:" + location.pathname + ":";
+  var AST_WINDOW_PREFIX = "airflow-pytest-plugin:assistant-window:v1:" + location.pathname + ":";
+  var AST_STORAGE_KEY = null;
+  var AST_WINDOW_PREFS_KEY = null, AST_WINDOW_OPEN_KEY = null;
+  var AST_MAX_MESSAGES = 12;
+  var astLastFocus = null, astPending = false, astLastQuestion = "", astStatus = null;
+  var astResizeTimer = null, astWindowWidth = null, astWindowHeight = null;
+  var astWindowDirty = false;
+  var astTranscript = [];
+
+  function astApplyText() {
+    document.getElementById("assistant-btn-label").textContent = astT("button");
+    document.getElementById("ast-title-text").textContent = astT("title");
+    document.getElementById("ast-close").setAttribute("aria-label", astT("close"));
+    document.getElementById("ast-question-label").textContent = astT("ask");
+    astClear.textContent = astT("clear");
+    astQuestion.placeholder = astT("placeholder");
+    document.getElementById("ast-hint").textContent = astT("hint");
+    document.getElementById("ast-send-label").textContent = astT("send");
+    astScopeList.textContent = astT("scopeList");
+    document.getElementById("ast-scope-dialog-title").textContent = astT("scopeListTitle");
+    document.getElementById("ast-scope-dialog-close").setAttribute("aria-label", astT("scopeListClose"));
+    astApplyProviderText(); astUpdateScope();
+    if (astTranscript.length && astMessages.children.length) astRenderTranscript();
+    else if (astMessages.querySelector(".ast-empty")) astEmpty();
+  }
+
+  function astApplyProviderText() {
+    if (!astStatus) return;
+    var parts = [astStatus.provider, astStatus.model].filter(Boolean);
+    parts.push(astStatus.context_model || astT("direct"));
+    document.getElementById("ast-provider").textContent = parts.join(" · ");
+  }
+
+  function astSelectedReports() {
+    var available = (typeof allReports !== "undefined" && allReports.length) ? allReports : reports;
+    return available.filter(function (report) { return selectedIds.has(report.id); });
+  }
+
+  function astScopeLimit() {
+    return astStatus && Number.isFinite(astStatus.max_scope_reports)
+      ? astStatus.max_scope_reports : 100;
+  }
+
+  function astReadableReports(scope) {
+    var available = (typeof allReports !== "undefined" && allReports.length) ? allReports : reports;
+    if (scope.selected.length) return scope.selected;
+    var filters = scope.payload || {};
+    return available.filter(function (report) {
+      return (!filters.dag_id || String(report.dag_id).toLowerCase().indexOf(filters.dag_id.toLowerCase()) !== -1)
+        && (!filters.task_id || String(report.task_id).toLowerCase().indexOf(filters.task_id.toLowerCase()) !== -1)
+        && (!filters.run_id || String(report.run_id).toLowerCase().indexOf(filters.run_id.toLowerCase()) !== -1);
+    });
+  }
+
+  function astByteLabel(value) {
+    var bytes = Number(value);
+    if (!Number.isFinite(bytes) || bytes < 0) return "?";
+    if (bytes === 0) return "0 B";
+    if (bytes >= 1024) {
+      var kib = bytes / 1024;
+      return (Math.round(kib * 100) / 100) + " KiB";
+    }
+    return bytes + " B";
+  }
+
+  function astLimitText(key, value) {
+    return astFmt(astT(key), "value", value);
+  }
+
+  function astAppendCodeValue(root, text, key, value) {
+    var marker = "{" + key + "}", index = String(text).indexOf(marker);
+    if (index < 0) { root.textContent = text; return; }
+    root.appendChild(document.createTextNode(String(text).slice(0, index)));
+    var code = document.createElement("code"); code.textContent = String(value);
+    root.appendChild(code);
+    root.appendChild(document.createTextNode(String(text).slice(index + marker.length)));
+  }
+
+  function astProcessingModel(scope) {
+    var visible = astReadableReports(scope).length;
+    var selectedCap = scope.selected.length ? astScopeLimit() : visible;
+    var contextBytes = astStatus && Number.isFinite(astStatus.max_context_bytes)
+      ? astStatus.max_context_bytes : 49152;
+    var failureBytes = astStatus && Number.isFinite(astStatus.max_failure_bytes)
+      ? astStatus.max_failure_bytes : 3072;
+    var captureBytes = astStatus && Number.isFinite(astStatus.max_capture_bytes)
+      ? astStatus.max_capture_bytes : 2048;
+    if (astStatus && astStatus.context_mode === "local-full-tree") {
+      var processed = Math.min(visible, selectedCap);
+      return {
+        copy: astFmt(astT("localProcessing"), "processed", processed),
+        visible: visible,
+        limits: [
+          astLimitText("localLimitReports", processed),
+          astT("localLimitCases"),
+          astLimitText("tracebackLimit", astByteLabel(failureBytes)),
+          astLimitText("captureLimit", astByteLabel(captureBytes)),
+          astLimitText("localOutboundLimit", astByteLabel(contextBytes))
+        ]
+      };
+    }
+    var summaryLimit = astStatus && Number.isFinite(astStatus.direct_max_summaries)
+      ? astStatus.direct_max_summaries : 100;
+    return {
+      copy: astT("directProcessing"),
+      visible: visible,
+      limits: [
+        astLimitText("directLimitSummaries", summaryLimit),
+        astLimitText("contextLimit", astByteLabel(contextBytes)),
+        astLimitText("tracebackLimit", astByteLabel(failureBytes)),
+        astLimitText("captureLimit", astByteLabel(captureBytes))
+      ]
+    };
+  }
+
+  function astRenderProcessing(scope) {
+    var root = document.getElementById("ast-processing");
+    var model = astProcessingModel(scope); root.textContent = "";
+    var disclosure = document.createElement("div");
+    disclosure.className = "ast-limit-disclosure";
+    disclosure.id = "ast-limit-disclosure"; disclosure.dataset.open = "false";
+    var button = document.createElement("button"); button.type = "button";
+    button.className = "ast-limit-button"; button.textContent = astT("limits");
+    button.setAttribute("aria-expanded", "false");
+    button.setAttribute("aria-controls", "ast-limit-tooltip");
+    disclosure.appendChild(button);
+    var tooltip = document.createElement("div"); tooltip.id = "ast-limit-tooltip";
+    tooltip.className = "ast-limit-tooltip"; tooltip.setAttribute("role", "region");
+    tooltip.setAttribute("aria-label", astT("limits"));
+    var copy = document.createElement("p"); copy.className = "ast-processing-copy";
+    astAppendCodeValue(copy, model.copy, "visible", model.visible); tooltip.appendChild(copy);
+    var limits = document.createElement("ul"); limits.className = "ast-limits";
+    model.limits.forEach(function (value) {
+      var item = document.createElement("li"); item.className = "ast-limit";
+      var code = document.createElement("code"); code.textContent = value;
+      item.appendChild(code); limits.appendChild(item);
+    });
+    tooltip.appendChild(limits); disclosure.appendChild(tooltip); root.appendChild(disclosure);
+    button.addEventListener("click", function () {
+      var open = disclosure.dataset.open !== "true";
+      disclosure.dataset.open = String(open);
+      button.setAttribute("aria-expanded", String(open));
+    });
+  }
+
+  function astCloseLimits(returnFocus) {
+    var disclosure = document.getElementById("ast-limit-disclosure");
+    if (!disclosure || disclosure.dataset.open !== "true") return false;
+    disclosure.dataset.open = "false";
+    var button = disclosure.querySelector(".ast-limit-button");
+    if (button) {
+      button.setAttribute("aria-expanded", "false");
+      if (returnFocus) button.focus();
+    }
+    return true;
+  }
+
+  function astScope() {
+    var allSelected = astSelectedReports(), limit = astScopeLimit();
+    var selected = allSelected.slice(0, limit);
+    var total = allSelected.length;
+    if (selected.length) {
+      var label = total > selected.length
+        ? astFmt(astFmt(astT("selectedScopeLimited"), "used", selected.length), "total", total)
+        : astFmt(astT("selectedScope"), "n", total);
+      return { payload: { report_ids: selected.map(function (r) { return r.id; }) },
+        label: label, selected: allSelected };
+    }
+    var scope = {}, labels = [];
+    [["dag_id", "f-dag"], ["task_id", "f-task"], ["run_id", "f-run"]].forEach(function (pair) {
+      var value = document.getElementById(pair[1]).value.trim();
+      if (value) { scope[pair[0]] = value; labels.push(pair[0] + "~" + value); }
+    });
+    return { payload: scope, label: labels.length
+      ? astFmt(astT("filtersScope"), "value", labels.join(" · ")) : astT("allScope"),
+      selected: [] };
+  }
+
+  function astRenderScopeList(scope) {
+    var runs = document.getElementById("ast-scope-runs"); runs.textContent = "";
+    document.getElementById("ast-scope-dialog-summary").textContent =
+      astFmt(astT("scopeListSummary"), "n", scope.selected.length);
+    var limitAt = astScopeLimit();
+    scope.selected.forEach(function (report, index) {
+      if (index === limitAt) {
+        var limit = document.createElement("li"); limit.className = "ast-scope-limit";
+        limit.textContent = astFmt(astT("scopeListLimit"), "n", limitAt); runs.appendChild(limit);
+      }
+      var item = document.createElement("li"); item.className = "ast-scope-run";
+      var number = document.createElement("span"); number.className = "ast-scope-run-num";
+      number.textContent = String(index + 1);
+      var main = document.createElement("div"); main.className = "ast-scope-run-main";
+      var name = document.createElement("strong");
+      name.textContent = report.dag_id + " · " + report.task_id;
+      var run = document.createElement("code"); run.textContent = report.run_id;
+      main.appendChild(name); main.appendChild(run); item.appendChild(number); item.appendChild(main);
+      runs.appendChild(item);
+    });
+  }
+
+  function astUpdateScope() {
+    var scope = astScope();
+    document.getElementById("ast-scope").textContent = scope.label;
+    astRenderProcessing(scope);
+    astScopeList.hidden = !scope.selected.length;
+    astContext.hidden = !scope.selected.length && !Object.keys(scope.payload).length;
+    if (astScopeDialog.open) astRenderScopeList(scope);
+  }
+
+  function astUseStorageNamespace(namespace) {
+    var token = String(namespace || "standalone").slice(0, 64);
+    AST_STORAGE_KEY = AST_STORAGE_PREFIX + token;
+    AST_WINDOW_PREFS_KEY = AST_WINDOW_PREFIX + token;
+    AST_WINDOW_OPEN_KEY = AST_WINDOW_PREFS_KEY + ":open";
+    astTranscript = astLoadTranscript();
+    var lastUsers = astTranscript.filter(function (item) { return item.role === "user"; });
+    astLastQuestion = lastUsers.length ? lastUsers[lastUsers.length - 1].text : "";
+    astClear.hidden = !astTranscript.length;
+    if (astDialog.open) {
+      if (astTranscript.length) astRenderTranscript(); else astEmpty();
+    }
+  }
+
+  function astCleanPromptParts(raw) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+    var names = ["system", "user", "context", "history", "structure"], clean = {};
+    for (var i = 0; i < names.length; i++) {
+      var value = raw[names[i]];
+      if (!Number.isFinite(value) || value < 0) return null;
+      clean[names[i]] = Math.min(Math.floor(value), 100 * 1024 * 1024);
+    }
+    clean.total = names.reduce(function (sum, name) { return sum + clean[name]; }, 0);
+    return clean;
+  }
+
+  function astCleanTokenUsage(raw) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+    var names = ["input_tokens", "output_tokens", "total_tokens", "cached_input_tokens"];
+    var clean = {};
+    for (var i = 0; i < names.length; i++) {
+      var value = raw[names[i]];
+      if (!Number.isFinite(value) || value < 0) return null;
+      clean[names[i]] = Math.min(Math.floor(value), 1_000_000_000_000);
+    }
+    return clean;
+  }
+
+  function astTokenText(usage) {
+    var locale = LOCALE === "ru" ? "ru-RU" : "en-US";
+    var text = astFmt(astT("tokens"), "input", usage.input_tokens.toLocaleString(locale));
+    text = astFmt(text, "output", usage.output_tokens.toLocaleString(locale));
+    return astFmt(text, "total", usage.total_tokens.toLocaleString(locale));
+  }
+
+  function astLoadTranscript() {
+    if (!AST_STORAGE_KEY) return [];
+    try {
+      var saved = JSON.parse(sessionStorage.getItem(AST_STORAGE_KEY) || "null");
+      if (!saved || saved.version !== 1 || !Array.isArray(saved.messages)) return [];
+      return saved.messages.filter(function (item) {
+        return item && (item.role === "user" || item.role === "assistant")
+          && typeof item.text === "string";
+      }).slice(-AST_MAX_MESSAGES).map(function (item) {
+        var evidence = Array.isArray(item.evidence) ? item.evidence.filter(function (ref) {
+          return ref && typeof ref.key === "string" && typeof ref.report_id === "string"
+            && typeof ref.dag_id === "string" && typeof ref.task_id === "string"
+            && typeof ref.run_id === "string";
+        }).slice(0, astScopeLimit()).map(function (ref) {
+          return { key: ref.key.slice(0, 8), report_id: ref.report_id.slice(0, 4096),
+            dag_id: ref.dag_id.slice(0, 512), task_id: ref.task_id.slice(0, 512),
+            run_id: ref.run_id.slice(0, 512) };
+        }) : [];
+        return {
+          role: item.role,
+          text: item.text.slice(0, 20000),
+          evidence: evidence,
+          reports: Number.isFinite(item.reports) ? item.reports : null,
+          promptParts: astCleanPromptParts(item.promptParts),
+          tokenUsage: astCleanTokenUsage(item.tokenUsage),
+          promptBytes: Number.isFinite(item.promptBytes) && item.promptBytes >= 0
+            ? Math.min(Math.floor(item.promptBytes), 100 * 1024 * 1024) : null,
+          contextLimited: item.contextLimited === true,
+          truncated: item.truncated === true
+        };
+      });
+    } catch (error) { return []; }
+  }
+
+  function astPersistTranscript() {
+    astTranscript = astTranscript.slice(-AST_MAX_MESSAGES);
+    try { if (AST_STORAGE_KEY) {
+      sessionStorage.setItem(AST_STORAGE_KEY,
+        JSON.stringify({ version: 1, messages: astTranscript }));
+    } } catch (error) { /* Storage may be blocked or full; chat still works in memory. */ }
+    astClear.hidden = !astTranscript.length;
+  }
+
+  function astHistoryPayload() {
+    return astTranscript.filter(function (item) {
+      return item.role === "user" || item.role === "assistant";
+    }).slice(-AST_MAX_MESSAGES).map(function (item) {
+      return { role: item.role, content: item.text };
+    });
+  }
+
+  function astMessageMeta(item) {
+    if (item.role === "user" && item.promptParts) {
+      return { title: astT("promptSize"), items: [
+        { label: astT("promptSystem"), value: astByteLabel(item.promptParts.system) },
+        { label: astT("promptUser"), value: astByteLabel(item.promptParts.user) },
+        { label: astT("promptContext"), value: astByteLabel(item.promptParts.context) },
+        { label: astT("promptHistory"), value: astByteLabel(item.promptParts.history) },
+        { label: astT("promptStructure"), value: astByteLabel(item.promptParts.structure) },
+        { label: astT("promptTotal"), value: astByteLabel(item.promptParts.total), total: true }
+      ] };
+    }
+    if (item.role === "user" && Number.isFinite(item.promptBytes)) {
+      return { title: astT("promptSize"), items: [
+        { label: astT("promptTotal"), value: astByteLabel(item.promptBytes), total: true }
+      ] };
+    }
+    if (item.role !== "assistant" || item.reports == null) return "";
+    var meta = astFmt(astT("reports"), "n", item.reports);
+    if (item.contextLimited) meta += " · " + astT("truncated");
+    if (item.tokenUsage) meta += " · " + astTokenText(item.tokenUsage);
+    return meta;
+  }
+
+  function astRenderTranscript() {
+    astMessages.textContent = "";
+    astTranscript.forEach(function (item) {
+      astAddMessage(item.role, item.text, item.evidence || [], astMessageMeta(item), false);
+    });
+    astClear.hidden = !astTranscript.length;
+  }
+
+  function astClearTranscript() {
+    astTranscript = []; astLastQuestion = "";
+    try { if (AST_STORAGE_KEY) sessionStorage.removeItem(AST_STORAGE_KEY); } catch (error) {}
+    astClear.hidden = true; astEmpty(); astQuestion.focus();
+  }
+
+  function astEmpty() {
+    astMessages.textContent = "";
+    var empty = document.createElement("div"); empty.className = "ast-empty";
+    var title = document.createElement("strong"); title.textContent = astT("introTitle");
+    var copy = document.createElement("span"); copy.textContent = astT("intro");
+    var starters = document.createElement("div"); starters.className = "ast-starters";
+    astT("starters").forEach(function (question) {
+      var button = document.createElement("button"); button.type = "button";
+      button.className = "ast-starter"; button.textContent = question;
+      button.addEventListener("click", function () { astQuestion.value = question; astQuestion.focus(); });
+      starters.appendChild(button);
+    });
+    empty.appendChild(title); empty.appendChild(copy); empty.appendChild(starters);
+    astMessages.appendChild(empty);
+  }
+
+  function astAppendInline(root, raw) {
+    var text = String(raw || "");
+    var tokens = /(`[^`\n]+`|´[^´\n]+´|｀[^｀\n]+｀|\*\*[^*\n]+\*\*|__[^_\n]+__|\*[^*\n]+\*|_[^_\n]+_|\[[^\]\n]+\]\(https?:\/\/[^\s)]+\))/g;
+    var last = 0, match;
+    while ((match = tokens.exec(text)) !== null) {
+      var rawToken = match[0];
+      if (rawToken.charAt(0) === "_" &&
+          (/[A-Za-z0-9]/.test(text.charAt(match.index - 1)) ||
+           /[A-Za-z0-9]/.test(text.charAt(match.index + rawToken.length)))) {
+        root.appendChild(document.createTextNode(text.slice(last, match.index + 1)));
+        last = match.index + 1; tokens.lastIndex = last; continue;
+      }
+      if (match.index > last) root.appendChild(document.createTextNode(text.slice(last, match.index)));
+      var token = match[0], node;
+      if (token.charAt(0) === "`" || token.charAt(0) === "´" || token.charAt(0) === "｀") {
+        node = document.createElement("code"); node.textContent = token.slice(1, -1);
+      } else if (token.slice(0, 2) === "**" || token.slice(0, 2) === "__") {
+        node = document.createElement("strong"); astAppendInline(node, token.slice(2, -2));
+      } else if (token.charAt(0) === "*" || token.charAt(0) === "_") {
+        node = document.createElement("em"); astAppendInline(node, token.slice(1, -1));
+      } else {
+        var link = /^\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)$/.exec(token);
+        node = document.createElement("a"); node.textContent = link ? link[1] : token;
+        if (link) { node.href = link[2]; node.target = "_blank"; node.rel = "noopener noreferrer"; }
+      }
+      root.appendChild(node); last = match.index + token.length;
+    }
+    if (last < text.length) root.appendChild(document.createTextNode(text.slice(last)));
+  }
+
+  function astTableCells(raw) {
+    var line = String(raw || "").trim();
+    if (line.charAt(0) === "|") line = line.slice(1);
+    if (line.charAt(line.length - 1) === "|" && !/\\\|$/.test(line)) line = line.slice(0, -1);
+    var cells = [], cell = "", code = false;
+    for (var i = 0; i < line.length; i++) {
+      var char = line.charAt(i);
+      if (char === "\\" && line.charAt(i + 1) === "|") { cell += "|"; i++; continue; }
+      if (char === "`") { code = !code; cell += char; continue; }
+      if (char === "|" && !code) { cells.push(cell.trim()); cell = ""; continue; }
+      cell += char;
+    }
+    cells.push(cell.trim()); return cells;
+  }
+
+  function astTableDivider(raw, columns) {
+    var cells = astTableCells(raw);
+    return cells.length === columns && cells.every(function (cell) {
+      return /^:?-{3,}:?$/.test(cell.replace(/\s/g, ""));
+    });
+  }
+
+  function astAppendTable(root, headers, rows) {
+    var wrap = document.createElement("div"); wrap.className = "ast-table-wrap";
+    wrap.tabIndex = 0; wrap.setAttribute("role", "region");
+    wrap.setAttribute("aria-label", astT("tableLabel"));
+    var table = document.createElement("table"), head = document.createElement("thead");
+    var headRow = document.createElement("tr");
+    headers.forEach(function (text) {
+      var cell = document.createElement("th"); cell.scope = "col"; astAppendInline(cell, text);
+      headRow.appendChild(cell);
+    });
+    head.appendChild(headRow); table.appendChild(head);
+    var body = document.createElement("tbody");
+    rows.forEach(function (values) {
+      var row = document.createElement("tr");
+      values.forEach(function (text) {
+        var cell = document.createElement("td"); astAppendInline(cell, text); row.appendChild(cell);
+      });
+      body.appendChild(row);
+    });
+    table.appendChild(body); wrap.appendChild(table); root.appendChild(wrap);
+  }
+
+  function astRenderMarkdown(root, raw) {
+    root.textContent = "";
+    var lines = String(raw || "").replace(/\r\n?/g, "\n").split("\n");
+    var paragraph = [], list = null, listKind = "";
+    function flushParagraph() {
+      if (!paragraph.length) return;
+      var p = document.createElement("p"); astAppendInline(p, paragraph.join(" ").trim());
+      root.appendChild(p); paragraph = [];
+    }
+    function closeList() { list = null; listKind = ""; }
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i], heading = /^(#{1,6})\s+(.+)$/.exec(line);
+      var ordered = /^\s*\d+[.)]\s+(.+)$/.exec(line);
+      var bullet = /^\s*[-+*]\s+(.+)$/.exec(line);
+      var headers = astTableCells(line);
+      if (headers.length >= 2 && i + 1 < lines.length
+          && astTableDivider(lines[i + 1], headers.length)) {
+        flushParagraph(); closeList(); var rows = []; i += 2;
+        while (i < lines.length && lines[i].trim()) {
+          var values = astTableCells(lines[i]);
+          if (values.length !== headers.length) break;
+          rows.push(values); i++;
+        }
+        astAppendTable(root, headers, rows); i--; continue;
+      }
+      if (/^\s*```/.test(line)) {
+        flushParagraph(); closeList(); var codeLines = [];
+        while (++i < lines.length && !/^\s*```/.test(lines[i])) codeLines.push(lines[i]);
+        var pre = document.createElement("pre"), code = document.createElement("code");
+        code.textContent = codeLines.join("\n"); pre.appendChild(code); root.appendChild(pre); continue;
+      }
+      if (!line.trim()) { flushParagraph(); closeList(); continue; }
+      if (heading) {
+        flushParagraph(); closeList(); var title = document.createElement("h3");
+        astAppendInline(title, heading[2]); root.appendChild(title); continue;
+      }
+      if (ordered || bullet) {
+        flushParagraph(); var kind = ordered ? "ol" : "ul";
+        if (!list || listKind !== kind) {
+          list = document.createElement(kind); listKind = kind; root.appendChild(list);
+        }
+        var item = document.createElement("li"); astAppendInline(item, (ordered || bullet)[1]);
+        list.appendChild(item); continue;
+      }
+      if (/^\s*>\s?/.test(line)) {
+        flushParagraph(); closeList(); var quote = document.createElement("blockquote");
+        astAppendInline(quote, line.replace(/^\s*>\s?/, "")); root.appendChild(quote); continue;
+      }
+      closeList(); paragraph.push(line.trim());
+    }
+    flushParagraph();
+  }
+
+  function astAppendMessageMeta(box, meta) {
+    if (!meta) return;
+    var note = document.createElement("div"); note.className = "ast-msg-meta";
+    if (typeof meta === "string") note.textContent = meta;
+    else {
+      var title = document.createElement("strong"); title.className = "ast-prompt-title";
+      title.textContent = meta.title; note.appendChild(title);
+      var parts = document.createElement("dl"); parts.className = "ast-prompt-parts";
+      meta.items.forEach(function (item) {
+        var row = document.createElement("div"); row.className = "ast-prompt-row";
+        if (item.total) row.classList.add("ast-prompt-total");
+        var label = document.createElement("dt"); label.textContent = item.label;
+        var value = document.createElement("dd"), code = document.createElement("code");
+        code.textContent = item.value; value.appendChild(code);
+        row.appendChild(label); row.appendChild(value); parts.appendChild(row);
+      });
+      note.appendChild(parts);
+    }
+    box.appendChild(note);
+  }
+
+  function astLegacyCopy(text) {
+    var input = document.createElement("textarea"); input.value = text;
+    input.setAttribute("readonly", ""); input.style.position = "fixed";
+    input.style.left = "-9999px"; document.body.appendChild(input);
+    input.select(); input.setSelectionRange(0, input.value.length);
+    var copied = false;
+    try { copied = document.execCommand("copy"); } catch (error) { copied = false; }
+    input.remove(); return copied;
+  }
+
+  function astCopyText(text) {
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === "function"
+        && window.isSecureContext) {
+      try {
+        return navigator.clipboard.writeText(text).catch(function () {
+          if (astLegacyCopy(text)) return;
+          throw new Error("clipboard unavailable");
+        });
+      } catch (error) { /* Fall through to the compatibility path. */ }
+    }
+    return astLegacyCopy(text) ? Promise.resolve() : Promise.reject(new Error("clipboard unavailable"));
+  }
+
+  function astCopyButton(text) {
+    var button = document.createElement("button"); button.type = "button";
+    button.className = "ast-copy"; button.setAttribute("aria-live", "polite");
+    var icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    icon.setAttribute("viewBox", "0 0 24 24"); icon.setAttribute("fill", "none");
+    icon.setAttribute("stroke", "currentColor"); icon.setAttribute("stroke-width", "2");
+    icon.setAttribute("stroke-linecap", "round"); icon.setAttribute("stroke-linejoin", "round");
+    icon.setAttribute("aria-hidden", "true");
+    var front = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+    front.setAttribute("width", "14"); front.setAttribute("height", "14");
+    front.setAttribute("x", "8"); front.setAttribute("y", "8"); front.setAttribute("rx", "2");
+    var back = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    back.setAttribute("d", "M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2");
+    icon.appendChild(front); icon.appendChild(back);
+    var label = document.createElement("span"); label.textContent = astT("copyAnswer");
+    button.appendChild(icon); button.appendChild(label);
+    button.addEventListener("click", function () {
+      button.disabled = true;
+      astCopyText(text).then(function () { label.textContent = astT("copied"); })
+        .catch(function () { label.textContent = astT("copyFailed"); })
+        .then(function () {
+          setTimeout(function () {
+            if (!button.isConnected) return;
+            label.textContent = astT("copyAnswer"); button.disabled = false;
+          }, 1500);
+        });
+    });
+    return button;
+  }
+
+  function astAddMessage(role, text, evidence, meta, isError) {
+    var empty = astMessages.querySelector(".ast-empty"); if (empty) empty.remove();
+    var box = document.createElement("div"); box.className = "ast-msg " + role;
+    var body = document.createElement("div"); body.className = "ast-answer" + (isError ? " ast-error" : "");
+    if (role === "assistant" && !isError) astRenderMarkdown(body, text);
+    else body.textContent = text;
+    box.appendChild(body);
+    if (evidence && evidence.length) {
+      var sources = document.createElement("div"); sources.className = "ast-sources";
+      evidence.forEach(function (item) {
+        var button = document.createElement("button"); button.type = "button"; button.className = "ast-source";
+        button.textContent = "[" + item.key + "] " + item.dag_id + " · " + item.task_id + " · " + item.run_id;
+        button.addEventListener("click", function () { openDetail(item.report_id); });
+        sources.appendChild(button);
+      });
+      box.appendChild(sources);
+    }
+    if (role === "assistant" && !isError) {
+      var footer = document.createElement("div"); footer.className = "ast-msg-footer";
+      astAppendMessageMeta(footer, meta); footer.appendChild(astCopyButton(text));
+      box.appendChild(footer);
+    } else astAppendMessageMeta(box, meta);
+    if (isError) {
+      var retry = document.createElement("button"); retry.type = "button"; retry.className = "btn ast-retry";
+      retry.textContent = astT("retry"); retry.addEventListener("click", function () { astSendQuestion(astLastQuestion); });
+      box.appendChild(retry);
+    }
+    astMessages.appendChild(box); astMessages.scrollTop = astMessages.scrollHeight;
+    return box;
+  }
+
+  function astThinking() {
+    var box = document.createElement("div"); box.className = "ast-msg assistant ast-waiting";
+    box.setAttribute("role", "status"); box.setAttribute("aria-label", astT("thinking"));
+    var dots = document.createElement("span"); dots.className = "ast-thinking";
+    for (var i = 0; i < 3; i++) dots.appendChild(document.createElement("i"));
+    box.appendChild(dots); astMessages.appendChild(box); astMessages.scrollTop = astMessages.scrollHeight;
+    return box;
+  }
+
+  function astSetPending(on) {
+    astPending = on; astSend.disabled = on; astQuestion.disabled = on;
+    astMessages.setAttribute("aria-busy", String(on));
+  }
+
+  function astSendQuestion(raw) {
+    var question = String(raw || "").trim(); if (!question || astPending) return;
+    var history = astHistoryPayload();
+    astLastQuestion = question;
+    var userItem = { role: "user", text: question, evidence: [], reports: null,
+      promptParts: null, promptBytes: null, truncated: false };
+    astTranscript.push(userItem);
+    astPersistTranscript(); var userBox = astAddMessage("user", question); astQuestion.value = "";
+    var waiting = astThinking(), scope = astScope(); astUpdateScope(); astSetPending(true);
+    fetch(API + "assistant/query", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question: question, scope: scope.payload, history: history })
+    }).then(function (response) {
+      return response.json().catch(function () { return {}; }).then(function (body) {
+        if (!response.ok) throw new Error(body.detail || ("HTTP " + response.status));
+        return body;
+      });
+    }).then(function (body) {
+      waiting.remove();
+      userItem.promptParts = astCleanPromptParts(body.prompt_bytes);
+      if (userItem.promptParts) {
+        userItem.promptBytes = userItem.promptParts.total;
+        astAppendMessageMeta(userBox, astMessageMeta(userItem));
+      } else if (Number.isFinite(body.provider_input_bytes) && body.provider_input_bytes >= 0) {
+        userItem.promptBytes = Math.floor(body.provider_input_bytes);
+        astAppendMessageMeta(userBox, astMessageMeta(userItem));
+      }
+      var contextLimited = body.context_limited === true
+        || (body.context_limited == null && body.truncated === true);
+      var assistantItem = { role: "assistant", text: body.answer || "",
+        evidence: body.evidence || [], reports: body.reports_considered || 0,
+        tokenUsage: astCleanTokenUsage(body.token_usage),
+        contextLimited: contextLimited, truncated: body.truncated === true };
+      astAddMessage("assistant", assistantItem.text, assistantItem.evidence,
+        astMessageMeta(assistantItem), false);
+      astTranscript.push(assistantItem);
+      astPersistTranscript();
+    }).catch(function (error) {
+      waiting.remove(); astAddMessage("assistant", error.message || astT("noDetail"), [], "", true);
+    }).then(function () { astSetPending(false); astQuestion.focus(); });
+  }
+
+  function astWindowIsCompact() { return window.innerWidth <= 700; }
+
+  function astHasWindowPrefs() {
+    try { return Boolean(AST_WINDOW_PREFS_KEY && localStorage.getItem(AST_WINDOW_PREFS_KEY)); }
+    catch (error) { return false; }
+  }
+
+  function astTrackWindowSize() {
+    if (!astDialog.open) return;
+    var rect = astDialog.getBoundingClientRect();
+    astWindowWidth = rect.width; astWindowHeight = rect.height;
+  }
+
+  function astApplyWindowPrefs() {
+    if (!AST_WINDOW_PREFS_KEY || astWindowIsCompact()) return;
+    try {
+      var saved = JSON.parse(localStorage.getItem(AST_WINDOW_PREFS_KEY) || "null");
+      if (!saved || !Number.isFinite(saved.width) || !Number.isFinite(saved.height)) return;
+      var maxWidth = Math.max(320, window.innerWidth * .94);
+      var maxHeight = Math.max(320, window.innerHeight * .90);
+      var minWidth = Math.min(680, maxWidth), minHeight = Math.min(520, maxHeight);
+      astDialog.style.width = Math.round(Math.max(minWidth, Math.min(saved.width, maxWidth))) + "px";
+      astDialog.style.height = Math.round(Math.max(minHeight, Math.min(saved.height, maxHeight))) + "px";
+    } catch (error) { /* Corrupt or blocked preferences fall back to the CSS defaults. */ }
+  }
+
+  function astPersistWindowPrefs() {
+    if (!AST_WINDOW_PREFS_KEY || !astDialog.open || astWindowIsCompact()) return;
+    if (!astWindowDirty && !astHasWindowPrefs()) return;
+    try {
+      var rect = astDialog.getBoundingClientRect();
+      if (rect.width >= 320 && rect.height >= 320) {
+        localStorage.setItem(AST_WINDOW_PREFS_KEY, JSON.stringify({
+          width: Math.round(rect.width), height: Math.round(rect.height)
+        }));
+        astWindowDirty = false;
+      }
+    } catch (error) { /* Window sizing remains usable when storage is unavailable. */ }
+  }
+
+  function astRememberOpen(open) {
+    try { if (AST_WINDOW_OPEN_KEY) sessionStorage.setItem(AST_WINDOW_OPEN_KEY, open ? "1" : "0"); }
+    catch (error) {}
+  }
+  function astWasOpen() {
+    try { return AST_WINDOW_OPEN_KEY && sessionStorage.getItem(AST_WINDOW_OPEN_KEY) === "1"; }
+    catch (error) { return false; }
+  }
+
+  function astOpen() {
+    if (astDialog.open) return;
+    astLastFocus = document.activeElement; astApplyText(); astUpdateScope();
+    astApplyWindowPrefs();
+    if (typeof astDialog.showModal === "function") astDialog.showModal();
+    else astDialog.setAttribute("open", "");
+    astWindowDirty = false; astTrackWindowSize();
+    astButton.setAttribute("aria-expanded", "true"); astRememberOpen(true);
+    if (typeof updateParentDim === "function") updateParentDim();
+    if (!astMessages.children.length) {
+      if (astTranscript.length) astRenderTranscript(); else astEmpty();
+    }
+    astQuestion.focus();
+  }
+  function astClose() {
+    astPersistWindowPrefs();
+    if (astDialog.open && typeof astDialog.close === "function") astDialog.close();
+    else astDialog.removeAttribute("open");
+  }
+
+  function astOpenScopeList() {
+    var scope = astScope(); if (!scope.selected.length) return;
+    astRenderScopeList(scope);
+    if (typeof astScopeDialog.showModal === "function") {
+      if (!astScopeDialog.open) astScopeDialog.showModal();
+    } else astScopeDialog.setAttribute("open", "");
+    astScopeList.setAttribute("aria-expanded", "true");
+    if (typeof updateParentDim === "function") updateParentDim();
+  }
+  function astCloseScopeList() {
+    if (astScopeDialog.open && typeof astScopeDialog.close === "function") astScopeDialog.close();
+    else astScopeDialog.removeAttribute("open");
+    astScopeList.setAttribute("aria-expanded", "false");
+  }
+
+  function astLoadStatus() {
+    fetch(API + "assistant/status").then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (status) {
+        if (!status || !status.enabled) return;
+        astStatus = status;
+        if (Number.isFinite(status.max_history_messages)) {
+          AST_MAX_MESSAGES = status.max_history_messages;
+        }
+        astUseStorageNamespace(status.storage_namespace);
+        astButton.hidden = false;
+        astQuestion.maxLength = status.max_question_chars || 4000;
+        astApplyProviderText();
+        if (astWasOpen()) astOpen();
+      }).catch(function () { /* Optional feature: keep its button hidden. */ });
+  }
+
+  astButton.addEventListener("click", function () { astDialog.open ? astClose() : astOpen(); });
+  document.getElementById("ast-close").addEventListener("click", astClose);
+  astClear.addEventListener("click", astClearTranscript);
+  astScopeList.addEventListener("click", astOpenScopeList);
+  document.addEventListener("click", function (event) {
+    var disclosure = document.getElementById("ast-limit-disclosure");
+    if (disclosure && !disclosure.contains(event.target)) astCloseLimits(false);
+  });
+  document.addEventListener("keydown", function (event) {
+    if (event.key === "Escape" && astCloseLimits(true)) {
+      event.preventDefault(); event.stopPropagation();
+    }
+  });
+  document.getElementById("ast-scope-dialog-close").addEventListener("click", astCloseScopeList);
+  astScopeDialog.addEventListener("close", function () {
+    astScopeList.setAttribute("aria-expanded", "false");
+    if (typeof updateParentDim === "function") updateParentDim();
+  });
+  if (typeof closeOnBackdrop === "function") closeOnBackdrop(astScopeDialog, astCloseScopeList);
+  if (typeof closeOnBackdrop === "function") closeOnBackdrop(astDialog, astClose);
+  astDialog.addEventListener("close", function () {
+    astButton.setAttribute("aria-expanded", "false"); astRememberOpen(false);
+    if (typeof updateParentDim === "function") updateParentDim();
+    if (astLastFocus && astLastFocus.focus) astLastFocus.focus();
+  });
+  if (window.ResizeObserver) {
+    new ResizeObserver(function () {
+      if (!astDialog.open || astWindowIsCompact()) return;
+      var rect = astDialog.getBoundingClientRect();
+      if (astWindowWidth == null || astWindowHeight == null) {
+        astWindowWidth = rect.width; astWindowHeight = rect.height; return;
+      }
+      var changed = Math.abs(rect.width - astWindowWidth) > 2
+        || Math.abs(rect.height - astWindowHeight) > 2;
+      astWindowWidth = rect.width; astWindowHeight = rect.height;
+      if (!changed) return;
+      astWindowDirty = true;
+      clearTimeout(astResizeTimer);
+      astResizeTimer = setTimeout(astPersistWindowPrefs, 180);
+    }).observe(astDialog);
+  }
+  window.addEventListener("pagehide", astPersistWindowPrefs);
+  document.getElementById("ast-form").addEventListener("submit", function (event) {
+    event.preventDefault(); astSendQuestion(astQuestion.value);
+  });
+  astQuestion.addEventListener("keydown", function (event) {
+    if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+      event.preventDefault(); astSendQuestion(astQuestion.value);
+    }
+  });
+  ["f-dag", "f-task", "f-run"].forEach(function (id) {
+    document.getElementById(id).addEventListener("input", function () {
+      if (astDialog.open) astUpdateScope();
+    });
+  });
+  astClear.hidden = true;
+  astApplyText(); astLoadStatus();
+"""
+
+
+def assistant_css() -> str:
+    """Return the assistant-only stylesheet fragment."""
+    return _CSS
+
+
+def assistant_button_html() -> str:
+    """Return the lazy header trigger."""
+    return _BUTTON
+
+
+def assistant_panel_html() -> str:
+    """Return the centered, resizable assistant dialog markup."""
+    return _PANEL
+
+
+def assistant_js() -> str:
+    """Return behavior injected inside the dashboard's existing JS closure."""
+    return _JS
+
+
+__all__ = [
+    "assistant_button_html",
+    "assistant_css",
+    "assistant_js",
+    "assistant_panel_html",
+]

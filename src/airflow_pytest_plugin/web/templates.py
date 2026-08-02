@@ -16,6 +16,13 @@
 
 from __future__ import annotations
 
+from .assistant_templates import (
+    assistant_button_html,
+    assistant_css,
+    assistant_js,
+    assistant_panel_html,
+)
+
 _INDEX_HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -727,6 +734,18 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   .case-tri { margin-left: 8px; vertical-align: middle; }
 
   .state { padding: 56px 20px; text-align: center; color: var(--muted); }
+  .report-empty { min-height: 250px; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; padding: 48px 24px; }
+  .report-empty-mark { width: 48px; height: 48px; display: grid; place-items: center;
+    margin-bottom: 14px; border: 1px solid var(--border); border-radius: 13px;
+    background: var(--surface-2); color: var(--primary); }
+  .report-empty-mark svg { width: 23px; height: 23px; }
+  .report-empty-copy { max-width: 650px; }
+  .report-empty-copy strong { display: block; margin-bottom: 5px; color: var(--fg);
+    font-size: 16px; line-height: 1.35; font-weight: 650; }
+  .report-empty-copy span { display: block; line-height: 1.55; }
+  .empty-help { min-height: 44px; height: 44px; margin-top: 20px; padding: 0 16px;
+    text-decoration: none; }
   .skeleton { height: 14px; border-radius: 6px;
     background: linear-gradient(90deg, var(--surface-2) 25%, var(--border) 37%, var(--surface-2) 63%);
     background-size: 400% 100%; animation: shimmer 1.2s ease infinite; }
@@ -1045,6 +1064,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     .dlg-body { padding: 14px 14px 18px; }
   }
   @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+__ASSISTANT_CSS__
 </style>
 <script>
 /* Pre-paint theme + bg from the parent before body renders, so dark Airflow never flashes light. */
@@ -1096,6 +1116,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
         <path d="M18 6 6 18M6 6l12 12"/>
       </svg>
     </button>
+__ASSISTANT_BUTTON__
     <span class="menu-wrap">
       <button id="links-btn" class="btn" type="button" data-i18n-al="linksAl"
               aria-haspopup="true" aria-expanded="false">
@@ -1224,6 +1245,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   </div>
   <div class="card"><div id="list"></div></div>
 </main>
+
+__ASSISTANT_PANEL__
 
 <dialog id="detail" aria-labelledby="d-title">
   <div class="dlg-head">
@@ -1589,6 +1612,9 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       capOut: "Captured output",
       noMatch: "No reports match the current filter.",
       noReports: "No reports found yet. Run a PytestOperator task with ArchivingResultParser to populate this view.",
+      noReportsTitle: "No reports yet",
+      noReportsBody: "Run a PytestOperator task with ArchivingResultParser to populate this dashboard.",
+      emptyHelp: "Open setup guide",
       noCases: "No matching cases.", tryWord: "try",
       triTitle: "AI triage",
       triMarkJudged: "AI triage", triMarkBroken: "AI triage failed",
@@ -1785,6 +1811,9 @@ _INDEX_HTML = r"""<!DOCTYPE html>
       capOut: "Вывод теста",
       noMatch: "Нет отчётов под текущий фильтр.",
       noReports: "Отчётов пока нет. Запусти задачу PytestOperator с ArchivingResultParser, чтобы они появились здесь.",
+      noReportsTitle: "Отчётов пока нет",
+      noReportsBody: "Запустите задачу PytestOperator с ArchivingResultParser — отчёты появятся здесь.",
+      emptyHelp: "Открыть руководство",
       noCases: "Нет подходящих тестов.", tryWord: "попытка",
       triTitle: "ИИ-триаж",
       triMarkJudged: "ИИ-разбор", triMarkBroken: "ИИ-разбор не удался",
@@ -1931,6 +1960,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     error: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/><path d="M12 9v4M12 17h.01"/></svg>',
   };
   var CHEV = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>';
+  var EMPTY_BOOK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2Z"/></svg>';
   var TRASH = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M10 11v6M14 11v6"/></svg>';
 
   function esc(s) {
@@ -2008,10 +2038,16 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     } catch (e) { /* cross-origin parent: keep our own --bg */ }
   }
 
-  function syncFromParent() {
-    applyTheme();
+  function syncLocale() {
     var loc = detectLocale();
-    if (loc !== LOCALE) { LOCALE = loc; applyI18n(); renderAll(); }
+    if (loc !== LOCALE) {
+      LOCALE = loc; applyI18n(); renderAll();
+      if (typeof astApplyText === "function") astApplyText();
+    }
+  }
+
+  function syncFromParent() {
+    applyTheme(); syncLocale();
     syncPanelPrefsFromStorage();
   }
   // Panel prefs live in localStorage, which is shared across this origin's tabs -- so a
@@ -2027,17 +2063,17 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     refreshPanels();
   }
   applyTheme(); applyI18n();
-  // The parent may still be booting when this frame runs: Airflow's React app can write
-  // i18nextLng / set <html lang> a moment AFTER our first read. The storage event and the
-  // MutationObserver below catch later changes, but not one that lands in the gap before
-  // they are attached -- so re-check briefly, then stop (this is a startup race, not a
-  // poll loop). syncFromParent is a no-op when nothing changed.
-  (function catchLateLocale() {
-    var tries = 0;
-    var timer = setInterval(function () {
-      syncFromParent();
-      if (++tries >= 6) clearInterval(timer);  // ~3s at 500ms
-    }, 500);
+  // Some Airflow shells update i18next's storage without changing <html lang>, and a
+  // storage event is not guaranteed to cross every iframe boundary. A tiny locale-only
+  // check keeps this long-lived page in sync without re-reading theme styles or rendering
+  // anything unless the language actually changed.
+  (function watchLiveLocale() {
+    var timer = setInterval(function () { if (!document.hidden) syncLocale(); }, 500);
+    window.addEventListener("focus", syncLocale);
+    document.addEventListener("visibilitychange", function () {
+      if (!document.hidden) syncLocale();
+    });
+    window.addEventListener("pagehide", function () { clearInterval(timer); });
   })();
   // Airflow shows our nav icon as a plain <img> with a baked stroke colour, so (unlike
   // its own currentColor icons) it can't whiten when selected -- on the light theme the
@@ -2886,8 +2922,14 @@ _INDEX_HTML = r"""<!DOCTYPE html>
 
   function renderList() {
     if (!reports.length) {
-      listEl.innerHTML = '<div class="state">'
-        + esc(allReports.length ? t("noMatch") : t("noReports")) + "</div>";
+      listEl.innerHTML = allReports.length
+        ? '<div class="state">' + esc(t("noMatch")) + "</div>"
+        : '<div class="state report-empty">'
+          + '<div class="report-empty-mark">' + EMPTY_BOOK + "</div>"
+          + '<div class="report-empty-copy"><strong>' + esc(t("noReportsTitle")) + "</strong>"
+          + "<span>" + esc(t("noReportsBody")) + "</span></div>"
+          + '<a id="empty-help" class="btn primary empty-help" href="' + esc(helpUrl()) + '">'
+          + "<span>" + esc(t("emptyHelp")) + "</span></a></div>";
       updateBulkBar();  // no rows -> drop any stale bulk bar
       return;
     }
@@ -3100,6 +3142,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
 
   function updateBulkBar() {
     var bar = document.getElementById("bulk-bar"), n = selectedIds.size;
+    if (typeof astUpdateScope === "function") astUpdateScope();
     if (!n) { bar.hidden = true; bar.innerHTML = ""; return; }
     bar.hidden = false;
     bar.innerHTML = '<span class="bulk-count">' + esc(t("nSelected").replace("{n}", n)) + "</span>"
@@ -4585,13 +4628,17 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     // read it fresh by id. A modal missing from this list won't lift the iframe when embedded
     // in Airflow, and clicks then fall THROUGH the un-lifted iframe onto the Airflow chrome.
     var settingsDlg = document.getElementById("settings");
+    var assistantDlg = document.getElementById("assistant-dialog");
+    var assistantScopeDlg = document.getElementById("ast-scope-dialog");
     var anyOpen = (dlg && dlg.open) || (confirmDlg && confirmDlg.open)
       || (failuresDlg && failuresDlg.open) || (compareDlg && compareDlg.open)
       || (flakyDlg && flakyDlg.open) || (historyDlg && historyDlg.open)
       || (uniqueDlg && uniqueDlg.open) || (slowDlg && slowDlg.open)
       || (heatmapDlg && heatmapDlg.open) || (relInfoDlg && relInfoDlg.open)
       || (panelInfoDlg && panelInfoDlg.open) || (emailDlg && emailDlg.open)
-      || (alertsDlg && alertsDlg.open) || (settingsDlg && settingsDlg.open);
+      || (alertsDlg && alertsDlg.open) || (settingsDlg && settingsDlg.open)
+      || (assistantDlg && assistantDlg.open)
+      || (assistantScopeDlg && assistantScopeDlg.open);
     setLocalDim(anyOpen);   // dim our own page/iframe once
     setParentDim(anyOpen);  // and, embedded, the Airflow chrome around the iframe
   }
@@ -5650,9 +5697,8 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   heatmapDlg.addEventListener("close", updateParentDim);
   closeOnBackdrop(heatmapDlg, closeHeatmap);
 
-  function openHelp() {
-    window.location.assign(location.pathname.replace(/\/+$/, "") + "/help");
-  }
+  function helpUrl() { return location.pathname.replace(/\/+$/, "") + "/help"; }
+  function openHelp() { window.location.assign(helpUrl()); }
   document.getElementById("refresh").addEventListener("click", load);
   // Links menu: the user guide replaces this page; GitHub + API docs open in a new tab.
   // Airflow's iframe sandbox blocks _blank from inside, so those external links use the
@@ -5726,6 +5772,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     clearTimeout(_rsTimer);
     _rsTimer = setTimeout(function () { if (reports.length) { chartScroll = null; renderChart(); } }, 150);
   });
+__ASSISTANT_JS__
   load();
 })();
 </script>
@@ -5736,4 +5783,9 @@ _INDEX_HTML = r"""<!DOCTYPE html>
 
 def index_html() -> str:
     """Return the single-page viewer HTML."""
-    return _INDEX_HTML
+    return (
+        _INDEX_HTML.replace("__ASSISTANT_CSS__", assistant_css())
+        .replace("__ASSISTANT_BUTTON__", assistant_button_html())
+        .replace("__ASSISTANT_PANEL__", assistant_panel_html())
+        .replace("__ASSISTANT_JS__", assistant_js())
+    )

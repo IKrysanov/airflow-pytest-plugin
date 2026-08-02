@@ -18,9 +18,11 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
+from ..assistant import AssistantRuntime, configured_assistant_runtime
 from ..compat import (
     airflow_auth_available,
     airflow_available,
@@ -65,6 +67,10 @@ _OPENAPI_TAGS = [
     {
         "name": "flaky",
         "description": "Tests that both pass and fail across recent runs.",
+    },
+    {
+        "name": "assistant",
+        "description": "Read-only, RBAC-scoped questions about archived reports.",
     },
 ]
 
@@ -247,6 +253,7 @@ def create_app(
     authorizer: Authorizer | None = None,
     read_authorizer: Authorizer | None = None,
     user_dependency: Callable[[], Any] | None = None,
+    assistant: AssistantRuntime | None = None,
 ) -> FastAPI:
     """Build the FastAPI app for ``source`` (defaults to the filesystem source).
 
@@ -257,9 +264,11 @@ def create_app(
     from fastapi import FastAPI
     from fastapi.exceptions import RequestValidationError
 
+    from .routes import assistant as assistant_routes
     from .routes import compare, failures, flaky, monitoring, reports
 
     src = source or FileSystemReportSource()
+    assistant_runtime = assistant or configured_assistant_runtime()
 
     # Said once, at startup, where an operator will see it: the hardened XML parser is an
     # extra, so the default install reads archived reports with the stdlib one. That is fine
@@ -307,6 +316,14 @@ def create_app(
         src=src, read_auth=read_auth, delete_auth=delete_auth, user_dep=user_dep
     )
 
+    @asynccontextmanager
+    async def lifespan(app_: Any) -> AsyncIterator[None]:
+        del app_
+        try:
+            yield
+        finally:
+            assistant_runtime.close()
+
     app = FastAPI(
         title="Airflow Pytest Reports",
         version=__version__,
@@ -315,12 +332,19 @@ def create_app(
         openapi_tags=_OPENAPI_TAGS,
         docs_url="/api/docs",
         openapi_url="/api/openapi.json",
+        lifespan=lifespan,
     )
     app.add_middleware(
         _RequestBodyLimitMiddleware,
         path="/api/reports/delete",
         method="POST",
         max_bytes=MAX_BULK_DELETE_BODY_BYTES,
+    )
+    app.add_middleware(
+        _RequestBodyLimitMiddleware,
+        path="/api/assistant/query",
+        method="POST",
+        max_bytes=64 * 1024,
     )
 
     @app.exception_handler(RequestValidationError)
@@ -339,6 +363,7 @@ def create_app(
 
     for module in (monitoring, reports, failures, compare, flaky):
         app.include_router(module.build_router(deps))
+    app.include_router(assistant_routes.build_router(deps, assistant_runtime))
 
     # Viewer and icons are UI assets, not part of the documented JSON API.
     @app.get("/icon.svg", include_in_schema=False)

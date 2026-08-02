@@ -57,6 +57,8 @@ world it needs instead of building one:
 | `declining_dash` | health declining over time | the run-health trend must slope down |
 | `email_dash` | server with an SMTP host | the ✉ button appears |
 | `triage_dash` | all three triage states at once: `alpha` judged by a model (its newest run's pass broke), `gamma` report-only with no provider, `beta` never triaged | `test_ui_triage.py`: the card, the category filter, the per-failure panel, and the three run-list mark states |
+| `assistant_dash` | report chat enabled with the offline fake provider | resizable dialog settings, evidence navigation, focus return, and 375 px full-screen layout |
+| `empty_base_url` | no reports yet | localized first-run guidance and the mount-aware `/help` action |
 | `evil_dash` | XSS payloads in test names, messages **and verdict prose**, plus a rerun selector carrying `;` | everything must render as inert text, and the copy line must be shell-quoted |
 
 ## CI

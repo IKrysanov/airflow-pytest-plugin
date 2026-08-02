@@ -49,6 +49,7 @@ Two halves sharing one on-disk layout:
 - [Captured output](#captured-output)
 - [Coverage](#coverage)
 - [AI triage](#ai-triage)
+- [Report assistant](#report-assistant)
 - [Allure / TestOps export](#allure--testops-export)
 - [Configuration](#configuration)
 - [Prometheus metrics](#prometheus-metrics)
@@ -121,9 +122,12 @@ newest of them.
 | `secure-xml` | reader | `defusedxml`, hardened parsing of untrusted JUnit reports |
 | `triage` | **worker** | `pytest-triage` plus its offline `fake` provider ([AI triage](#ai-triage)) |
 | `triage-anthropic` / `triage-openai` / `triage-gigachat` | **worker** | the same, with that provider's SDK |
+| `assistant` | **API server** | dependency-free report chat with its bundled offline `fake` provider ([Report assistant](#report-assistant)) |
+| `assistant-anthropic` / `assistant-openai` / `assistant-gigachat` | **API server** | report chat plus only that provider's direct SDK; no `pytest-triage` dependency |
+| `assistant-local` | **API server** | `llama-cpp-python` for an optional in-process GGUF context reducer |
 
-The triage extras belong on the **worker**, where the tests run — the reader only reads what
-was archived.
+Triage extras belong on the **worker**, where the tests run. Assistant extras belong in the
+**API-server** image, where questions are answered from the archived reports.
 
 ## Quickstart
 
@@ -222,6 +226,8 @@ runtime. Endpoints (relative to the mount):
 | `DELETE /api/reports/{report_id}` | delete a report (RBAC-gated) |
 | `POST /api/reports/delete` | delete up to 200 reports in one request (RBAC-gated per DAG; partial success is reported per id) |
 | `GET /api/reports/{report_id}/allure.zip` | raw Allure results as a zip (if any) |
+| `GET /api/assistant/status` | whether report chat is configured; does not load either model |
+| `POST /api/assistant/query` | answer from an RBAC-filtered, bounded report snapshot |
 | `GET /api/health` | liveness + readiness: `status`, `ready`, `reports_root`(+`_exists`), `auth`, `secure_xml` |
 | `GET /api/version` | `{"name": ..., "version": ...}` from package metadata |
 | `GET /api/metrics` | Prometheus exposition — opt-in, bearer-token (see [Prometheus metrics](#prometheus-metrics)) |
@@ -473,6 +479,163 @@ adds the per-test judgements.
 > line, so pytest aborts on unrecognized arguments if it is missing. Nothing else about
 > triage can fail a run: an unreadable report just leaves the archive without an AI section.
 
+## Report assistant
+
+The **AI assistant** button on the dashboard opens a centered, resizable chat window over the
+current report selection. Its size is remembered per Airflow user in `localStorage`, and an
+open window is restored after a refresh in the same tab. On a narrow screen the window
+becomes full-screen.
+If rows are selected, those runs become the scope; otherwise the current DAG, task and run
+filters are used. Every request repeats Airflow's DAG read checks on the server. Chat history
+lives in `sessionStorage`: it survives a refresh in the same tab, is separated by an opaque
+namespace for the current Airflow user, but is not written to the API server and disappears
+when the tab is closed or the user clicks **Clear chat**. Replies render headings, lists,
+tables, emphasis, code, quotes and safe HTTP(S) links from Markdown; wide tables scroll inside
+the answer, while model-provided HTML remains text. Each completed answer can be copied as its
+original Markdown. The sent user bubble shows system, user, report-context, history, prompt-
+structure and total UTF-8 sizes separately. After an answer, the assistant also shows the
+final provider's exact input, output and total token counts when its SDK returns usage data.
+When runs are selected, the scope shows their count and a **View list** button instead of
+cramming run identifiers into the chat window. The compact **Limits** button beside **Send**
+opens a vertical list with the RBAC-readable report count, the current local full-tree or
+direct bounded mode, and the effective limits. The values come from
+`GET /api/assistant/status`, so the UI reflects the API-server configuration instead of
+maintaining a separate set of numbers.
+
+Each user question produces one final remote-provider call. The assistant sends its rules as
+the provider's system message and one user message containing `USER QUESTION`, bounded
+`RECENT CHAT`, and `REPORT EVIDENCE` sections. In direct mode the evidence is compact JSON
+Lines: one labelled `[R1]` run-summary object per line followed by whole failed/error case
+objects that refer back to those labels. In local mode the raw report tree is consumed in
+bounded chunks by the in-process GGUF reducer; only its merged, labelled facts occupy the
+final `REPORT EVIDENCE` section. Local map/reduce invocations are not network requests.
+
+Install one final-answer provider in the **API-server** image and set it explicitly:
+
+```bash
+pip install 'airflow-pytest-plugin[assistant-anthropic]'
+export AIRFLOW_PYTEST_ASSISTANT_PROVIDER=anthropic
+export ANTHROPIC_API_KEY=sk-ant-...
+```
+
+The provider can be `anthropic`, `openai`, `gigachat`, or `fake`. The assistant adapters use
+those SDKs directly and do not import or install `pytest-triage`; they only share the same
+key, model and compatible-endpoint environment conventions (`ANTHROPIC_*`, `OPENAI_*`,
+`GIGACHAT_*`). `AIRFLOW_PYTEST_ASSISTANT_MODEL` overrides the provider's model variable for
+chat only. Until the provider is ready, the button remains hidden.
+
+### Optional local context model
+
+Without a local model, the API server deliberately builds a bounded direct snapshot: by
+default at most 100 of the newest readable run summaries in the current scope. Summaries are
+written first; every included summary keeps `total`, `passed`, `failed`, `errors`, `skipped`,
+`duration` and `success`. Failed/error details are then added newest-first for every
+problematic run and every failed/error case while the shared context byte budget has room.
+There is no separate eight-run or 12-failure cut-off. Each included failure still has at most
+3 KiB of traceback and 2 KiB of captured output. Older runs do not have to be deleted: use a
+narrower dashboard filter or explicit selection to bring them into scope.
+
+The default 48 KiB is one strict global report-evidence budget for all reports in that
+request, not 48 KiB per report. The 100-summary setting is therefore a ceiling, not a promise:
+if even the summary records exceed the byte budget, the oldest non-fitting summaries are
+omitted too. Failure detail records are appended whole; the collector never sends half a JSON
+record. When the next record does not fit, collection stops instead of failing the request and
+the response is marked as context-limited. A failure-heavy new run can therefore consume the
+detail remainder before older problematic runs, while every summary that did fit still keeps
+its aggregate success counters. This protects a remote provider from an unbounded request,
+but it is not a complete-tree mode.
+
+With a local model, the flow changes. The API server reads **every report in the authorized
+scope and every test case in those reports**. Each case contributes its node ID, outcome and
+duration; failed and errored cases additionally contribute the bounded traceback, captured
+stdout/stderr/log and saved triage verdict. The tree is streamed as independently bounded
+chunks, so raw chunks are reduced one at a time instead of accumulated in memory. A local
+chunk is automatically reduced below `CONTEXT_BYTES` when necessary to fit the configured
+`CONTEXT_N_CTX`, the question, the reducer system prompt and its output reservation. An
+impossible `n_ctx`/output combination disables the assistant with a configuration error
+instead of failing during inference. The GGUF
+model summarizes every chunk and then hierarchically merges those partial summaries until
+one final-provider context fits. The 100-summary direct-mode cut-off is not applied on this
+path. Per-field caps still prevent one pathological traceback or captured stream from taking
+over a chunk.
+
+The local model does **not** answer the user. It costs API-server RAM, CPU and latency in
+proportion to the selected tree, and semantic compression can still discard a useful fact.
+A small GGUF model can be configured as this optional map/reduce stage:
+
+```bash
+# Run in the SAME Python environment/image as the Airflow API server.
+pip install 'airflow-pytest-plugin[assistant-anthropic,assistant-local]'
+
+# The extra installs llama-cpp-python, not a model. Download one GGUF file separately.
+mkdir -p /models
+curl -fL \
+  'https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf?download=true' \
+  -o /models/qwen2.5-0.5b-instruct-q4_k_m.gguf
+
+export AIRFLOW_PYTEST_ASSISTANT_CONTEXT_MODEL=/models/qwen2.5-0.5b-instruct-q4_k_m.gguf
+```
+
+The variable is a **filesystem path to the `.gguf` file**, not a URL and not a directory.
+Restart every Airflow API-server process after installing the package or changing the path.
+For Docker or Kubernetes, put the file in the image or mount it read-only at `/models`, then
+set the same environment variable in the API-server container. Workers and schedulers do not
+need this model unless they also run the web/API server. The Qwen 0.5B Q4_K_M file above is a
+small starting point; replace it with another instruction-tuned GGUF after measuring quality,
+latency and memory in your own report tree.
+
+The GGUF model is loaded lazily **inside each API-server process**, so four API-server
+workers mean four copies in memory. Assistant concurrency remains bounded per process. It
+preserves useful report labels such as `[R1]`; the remote model still writes the answer.
+Without this variable, the bounded direct snapshot goes to the provider instead.
+
+The outbound context can contain run summaries, case IDs/outcomes/durations, failure
+tracebacks, saved triage verdicts and up to 2 KiB of captured stdout/stderr/log for each
+included failure. Known secrets and values from the server environment are redacted before
+either model sees them, but redaction is a guard rail rather than a proof: enable the
+assistant only where sending tracebacks and captured failure output to the chosen provider
+is allowed. Recent chat context is at most 12 messages (six complete exchanges), 4,000
+characters per message and 16,000 UTF-8 bytes in total. History has this separate cap and does
+not take space from the 48 KiB report-evidence budget; because it is still sent to the final
+provider, it is included in the displayed total prompt bytes and input-token usage. Explicit
+selection accepts at most 100 runs; filter-based scope has no run-count cut-off when local
+reduction is enabled.
+
+All byte limits are shown as binary units: `1 KiB = 1024 bytes`. The defaults therefore mean
+exactly 49,152 bytes of provider evidence, 3,072 bytes per traceback and 2,048 bytes of
+captured output. Set the variables below on the **API-server container/process** and restart
+it; they are resolved once when the web app starts. Values outside the documented safe range
+fall back to the default. The question/history/HTTP envelope and the 100-ID explicit-selection
+cap remain fixed abuse-safety contracts rather than deployment tuning knobs.
+
+| Environment variable | Default | Purpose |
+|:--|:--|:--|
+| `AIRFLOW_PYTEST_ASSISTANT_PROVIDER` | — | enables chat: `anthropic`, `openai`, `gigachat`, or `fake` |
+| `AIRFLOW_PYTEST_ASSISTANT_MODEL` | provider default | final-answer model; overrides the provider-native model variable |
+| `AIRFLOW_PYTEST_ASSISTANT_CONTEXT_MODEL` | — | absolute or expanded path to the local GGUF reducer; unset = direct bounded context |
+| `AIRFLOW_PYTEST_ASSISTANT_CONTEXT_BYTES` | `49152` | direct mode's total context and final remote-evidence budget (4 KiB–256 KiB); local chunks may be made smaller automatically to fit `n_ctx` |
+| `AIRFLOW_PYTEST_ASSISTANT_DIRECT_MAX_SUMMARIES` | `100` | newest summaries in direct mode (1–1000); does not limit filter-based local full-tree mode |
+| `AIRFLOW_PYTEST_ASSISTANT_TRACEBACK_BYTES` | `3072` | traceback/message bytes retained per failed or errored test (0–65536) |
+| `AIRFLOW_PYTEST_ASSISTANT_CAPTURE_BYTES` | `2048` | captured stdout/stderr/log bytes retained per failed or errored test (0–65536; `0` disables captured output) |
+| `AIRFLOW_PYTEST_ASSISTANT_CONTEXT_N_CTX` | `16384` | local model context window; must fit fixed prompts, the question, local output and at least a 4 KiB evidence chunk |
+| `AIRFLOW_PYTEST_ASSISTANT_CONTEXT_MAX_TOKENS` | `1024` | most tokens produced by the local reducer |
+| `AIRFLOW_PYTEST_ASSISTANT_MAX_OUTPUT_TOKENS` | `1536` | most tokens requested for the final answer |
+| `AIRFLOW_PYTEST_ASSISTANT_TIMEOUT` | `45` | provider timeout in seconds |
+| `AIRFLOW_PYTEST_ASSISTANT_MAX_CONCURRENT` | `1` | simultaneous assistant calls in one API-server process |
+
+For Docker Compose, put the same values on the service that runs the Airflow API server;
+quoted strings avoid YAML coercion surprises:
+
+```yaml
+services:
+  airflow-api-server:
+    environment:
+      AIRFLOW_PYTEST_ASSISTANT_CONTEXT_BYTES: "49152"
+      AIRFLOW_PYTEST_ASSISTANT_DIRECT_MAX_SUMMARIES: "100"
+      AIRFLOW_PYTEST_ASSISTANT_TRACEBACK_BYTES: "3072"
+      AIRFLOW_PYTEST_ASSISTANT_CAPTURE_BYTES: "2048"
+```
+
 ## Configuration
 
 | Setting | Default | Purpose |
@@ -671,6 +834,8 @@ Mirrors the operator's layering — each piece has one reason to change:
 | `notifications` | pure `evaluate_alerts` decision + `notify_for_run` over any `ReportSource` + a pluggable `Mailer` |
 | `flaky_core` | web-free flaky scoring behind `/api/flaky` |
 | `triage` | the pytest-triage contract in one place: node-id canonicalisation, distillation, the reader's view |
+| `assistant.context` / `assistant.runtime` | bounded RBAC evidence and lazy orchestration |
+| `assistant.{anthropic,openai,gigachat,fake,llama}` | one isolated model adapter per module; `llama` only reduces context |
 | `plugin.PytestReportsPlugin` | register the app with Airflow |
 | `compat` | the only module that imports Airflow |
 | `models` | JSON-serializable view types; the web layer never sees operator types |

@@ -438,6 +438,16 @@ def test_links_menu_uses_a_question_mark_and_code_icons(client):
     assert 'd="m8 9-3 3 3 3M16 9l3 3-3 3M14 5l-4 14"' in api_item
 
 
+def test_empty_report_state_links_to_the_mount_aware_user_guide(client):
+    html = client.get("/").text
+
+    assert 'id="empty-help" class="btn primary empty-help"' in html
+    assert 'emptyHelp: "Open setup guide"' in html
+    assert 'emptyHelp: "Открыть руководство"' in html
+    assert "function helpUrl()" in html
+    assert """href="' + esc(helpUrl()) + '">""" in html
+
+
 def test_inline_script_is_syntactically_valid(client, tmp_path):
     # The viewer's JS lives in a Python string; syntax-check each inline <script> with Node.
     node = shutil.which("node")
@@ -558,6 +568,7 @@ def test_openapi_and_docs_serve(client):
         "failures",
         "compare",
         "flaky",
+        "assistant",
     ]
     assert paths["/api/flaky"]["get"]["tags"] == ["flaky"]
     assert paths["/api/compare"]["get"]["tags"] == ["compare"]
@@ -2857,8 +2868,9 @@ def test_locale_prefers_the_stored_choice_over_a_static_lang_attribute(client):
     assert body.index("i18nextLng") < body.index('getAttribute("lang")'), (
         "the stored i18next choice must outrank the parent's <html lang> attribute"
     )
-    # And the startup race is covered: the parent may write the language after we boot.
-    assert "catchLateLocale" in html
+    # And later in-place Airflow language changes are covered even when an iframe receives
+    # neither a storage event nor a useful <html lang> mutation.
+    assert "watchLiveLocale" in html and "setInterval" in html
     assert "syncFromParent" in html and 'addEventListener("storage"' in html
 
 
