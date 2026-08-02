@@ -57,7 +57,10 @@ at most six columns, and short cells. Put tracebacks and long test identifiers o
 as bullets or fenced code blocks. Never emit HTML. Do not expose raw JSON field names when a
 plain-language explanation is clearer. Wrap run ids, task ids, DAG ids, and test node ids in
 matched ASCII backticks. Never use underscores as emphasis delimiters around identifiers.
-Keep the answer concise and practical.\
+Keep the answer concise and practical. Start with a direct conclusion that remains useful if
+the provider reaches its output-token limit. Fit the whole answer into the available budget:
+never start a table unless you can finish its header and every row. If space is uncertain,
+use short bullets instead.\
 """
 
 _CITATION = re.compile(r"\[R([1-9][0-9]*)\]")

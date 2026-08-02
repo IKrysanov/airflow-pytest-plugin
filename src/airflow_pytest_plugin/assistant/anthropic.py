@@ -19,7 +19,12 @@ from __future__ import annotations
 import contextlib
 from typing import Any
 
-from .common import AssistantProviderResponse, AssistantTokenUsage, usage_count
+from .common import (
+    AssistantProviderResponse,
+    AssistantTokenUsage,
+    response_text,
+    usage_count,
+)
 from .settings import DEFAULT_MODELS, AssistantSettings
 
 
@@ -69,7 +74,11 @@ class AnthropicAssistant:
                 total_tokens=input_tokens + output,
                 cached_input_tokens=cached,
             )
-        return AssistantProviderResponse(text=text, token_usage=token_usage)
+        return AssistantProviderResponse(
+            text=text,
+            token_usage=token_usage,
+            stop_reason=response_text(message, "stop_reason"),
+        )
 
     def close(self) -> None:
         with contextlib.suppress(Exception):

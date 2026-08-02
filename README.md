@@ -493,8 +493,18 @@ when the tab is closed or the user clicks **Clear chat**. Replies render heading
 tables, emphasis, code, quotes and safe HTTP(S) links from Markdown; wide tables scroll inside
 the answer, while model-provided HTML remains text. Each completed answer can be copied as its
 original Markdown. The sent user bubble shows system, user, report-context, history, prompt-
-structure and total UTF-8 sizes separately. After an answer, the assistant also shows the
+structure and total UTF-8 sizes separately. Its **Context overview** button opens the exact
+`REPORT EVIDENCE` block delivered to the final provider: direct-mode header plus JSON Lines,
+or the locally reduced text. The preview is persisted with the tab's transcript, rendered as
+plain text, and contains neither the system prompt nor chat history. It has already passed the
+same server-side RBAC filter in both direct and local modes. After an answer, the assistant also shows the
 final provider's exact input, output and total token counts when its SDK returns usage data.
+The window header keeps a cumulative total of those provider-reported tokens for the whole
+chat session, including requests whose messages have already left the recent-history window.
+The total survives refresh in the same tab and resets with **Clear chat**.
+If the provider reports that it stopped at the output-token limit, the answer is preserved
+but visibly marked as potentially incomplete. The default answer budget is 3,072 tokens and
+can be changed on the API server.
 When runs are selected, the scope shows their count and a **View list** button instead of
 cramming run identifiers into the chat window. The compact **Limits** button beside **Send**
 opens a vertical list with the RBAC-readable report count, the current local full-tree or
@@ -619,7 +629,7 @@ cap remain fixed abuse-safety contracts rather than deployment tuning knobs.
 | `AIRFLOW_PYTEST_ASSISTANT_CAPTURE_BYTES` | `2048` | captured stdout/stderr/log bytes retained per failed or errored test (0–65536; `0` disables captured output) |
 | `AIRFLOW_PYTEST_ASSISTANT_CONTEXT_N_CTX` | `16384` | local model context window; must fit fixed prompts, the question, local output and at least a 4 KiB evidence chunk |
 | `AIRFLOW_PYTEST_ASSISTANT_CONTEXT_MAX_TOKENS` | `1024` | most tokens produced by the local reducer |
-| `AIRFLOW_PYTEST_ASSISTANT_MAX_OUTPUT_TOKENS` | `1536` | most tokens requested for the final answer |
+| `AIRFLOW_PYTEST_ASSISTANT_MAX_OUTPUT_TOKENS` | `3072` | most tokens requested for the final answer (128–8192) |
 | `AIRFLOW_PYTEST_ASSISTANT_TIMEOUT` | `45` | provider timeout in seconds |
 | `AIRFLOW_PYTEST_ASSISTANT_MAX_CONCURRENT` | `1` | simultaneous assistant calls in one API-server process |
 
@@ -634,6 +644,7 @@ services:
       AIRFLOW_PYTEST_ASSISTANT_DIRECT_MAX_SUMMARIES: "100"
       AIRFLOW_PYTEST_ASSISTANT_TRACEBACK_BYTES: "3072"
       AIRFLOW_PYTEST_ASSISTANT_CAPTURE_BYTES: "2048"
+      AIRFLOW_PYTEST_ASSISTANT_MAX_OUTPUT_TOKENS: "3072"
 ```
 
 ## Configuration

@@ -85,6 +85,7 @@ _EX_STATUS = {
     "direct_max_detail_reports": None,
     "direct_max_failures_per_report": None,
     "max_context_bytes": 49_152,
+    "max_output_tokens": 3_072,
     "max_failure_bytes": 3_072,
     "max_capture_bytes": 2_048,
     "local_complete_tree": True,
@@ -108,6 +109,7 @@ _EX_REPLY = {
     "reports_considered": 30,
     "truncated": False,
     "context_limited": False,
+    "output_limited": False,
     "scope": "dag~etl_daily · task~unit_tests",
     "provider_input_bytes": 32_768,
     "prompt_bytes": {
@@ -123,6 +125,14 @@ _EX_REPLY = {
         "output_tokens": 312,
         "total_tokens": 8_552,
         "cached_input_tokens": 0,
+    },
+    "report_context": {
+        "content": (
+            "Scope: dag~etl_daily\n\n"
+            'RUN SUMMARIES\n[R1] {"total":8,"passed":6,"failed":2}'
+        ),
+        "format": "direct-snapshot-jsonl",
+        "bytes": 74,
     },
 }
 

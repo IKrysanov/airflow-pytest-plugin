@@ -53,6 +53,21 @@ def test_assistant_asks_real_offline_api_and_opens_evidence(assistant_dash):
     expect(rows.nth(4)).to_contain_text("Prompt structure")
     expect(rows.nth(5)).to_contain_text("Total")
     expect(rows.nth(5).locator("code")).to_contain_text("KiB")
+    context_review = prompt_meta.locator(".ast-context-review")
+    expect(context_review).to_have_text("Context overview")
+    context_review.click()
+    context_dialog = page.locator("#ast-report-context-dialog")
+    expect(context_dialog).to_be_visible()
+    expect(page.locator("#ast-report-context-format")).to_have_text(
+        "Direct snapshot · header + JSON Lines"
+    )
+    expect(page.locator("#ast-report-context-code")).to_contain_text("RUN SUMMARIES")
+    expect(page.locator("#ast-report-context-note")).to_contain_text(
+        "after RBAC filtering"
+    )
+    page.locator("#ast-report-context-close").click()
+    expect(context_dialog).to_be_hidden()
+    expect(context_review).to_be_focused()
     answer_meta = page.locator(".ast-msg.assistant .ast-msg-meta").last
     expect(answer_meta).not_to_contain_text("Context was limited")
     expect(page.locator(".ast-msg.assistant .ast-copy").last).to_be_visible()
@@ -88,6 +103,84 @@ def test_assistant_is_full_width_on_mobile_and_restores_focus(assistant_dash):
     page.keyboard.press("Escape")
     expect(dialog).to_be_hidden()
     expect(button).to_be_focused()
+    assert assistant_dash.errors == []
+
+
+@pytest.mark.parametrize("theme", ["light", "dark"])
+def test_assistant_prompt_breakdown_uses_readable_theme_colors(assistant_dash, theme):
+    page = assistant_dash.page
+    page.evaluate(
+        "theme => document.documentElement.setAttribute('data-theme', theme)", theme
+    )
+    page.locator("#assistant-btn").click()
+    page.locator("#ast-question").fill("Show the request size")
+    page.locator("#ast-send").click()
+    expect(page.locator(".ast-msg.assistant .ast-answer").last).to_contain_text(
+        "Offline assistant", timeout=15_000
+    )
+
+    appearance = page.locator(".ast-msg.user .ast-msg-meta").last.evaluate(
+        r"""el => {
+          const parse = value => {
+            const channels = (value.match(/-?(?:\d+\.?\d*|\.\d+)/g) || [])
+              .slice(0, 3).map(Number);
+            return value.startsWith('color(srgb')
+              ? channels.map(channel => channel * 255) : channels;
+          };
+          const luminance = value => {
+            const rgb = parse(value).map(channel => {
+              channel /= 255;
+              return channel <= .04045 ? channel / 12.92
+                : Math.pow((channel + .055) / 1.055, 2.4);
+            });
+            return .2126 * rgb[0] + .7152 * rgb[1] + .0722 * rgb[2];
+          };
+          const style = getComputedStyle(el);
+          const bubble = getComputedStyle(el.closest('.ast-msg.user'));
+          const review = getComputedStyle(el.querySelector('.ast-context-review'));
+          const foreground = luminance(bubble.color);
+          const background = luminance(bubble.backgroundColor);
+          return {
+            ratio: (Math.max(foreground, background) + .05)
+              / (Math.min(foreground, background) + .05),
+            metaBackground: style.backgroundColor,
+            metaBorder: [style.borderTopWidth, style.borderRightWidth,
+              style.borderBottomWidth, style.borderLeftWidth],
+            reviewBorder: [review.borderTopWidth, review.borderRightWidth,
+              review.borderBottomWidth, review.borderLeftWidth],
+            opacity: style.opacity,
+            bubbleBackground: bubble.backgroundColor,
+            bubbleRgb: parse(bubble.backgroundColor)
+          };
+        }"""
+    )
+    assert appearance["ratio"] >= 4.5
+    assert appearance["metaBackground"] == "rgba(0, 0, 0, 0)"
+    assert appearance["metaBorder"] == ["0px"] * 4
+    assert appearance["reviewBorder"] == ["0px"] * 4
+    assert appearance["opacity"] == "1"
+    assert appearance["bubbleBackground"] != "rgba(0, 0, 0, 0)"
+    assert appearance["bubbleRgb"][2] > appearance["bubbleRgb"][1]
+    assert appearance["bubbleRgb"][2] > appearance["bubbleRgb"][0]
+
+    messages = page.locator("#ast-messages")
+    idle_scrollbar = messages.evaluate(
+        """el => ({
+          width: getComputedStyle(el, '::-webkit-scrollbar').width,
+          track: getComputedStyle(el, '::-webkit-scrollbar-track').backgroundColor,
+          thumb: getComputedStyle(el, '::-webkit-scrollbar-thumb').backgroundColor
+        })"""
+    )
+    assert idle_scrollbar == {
+        "width": "8px",
+        "track": "rgba(0, 0, 0, 0)",
+        "thumb": "rgba(0, 0, 0, 0)",
+    }
+    messages.hover()
+    active_thumb = messages.evaluate(
+        "el => getComputedStyle(el, '::-webkit-scrollbar-thumb').backgroundColor"
+    )
+    assert active_thumb != "rgba(0, 0, 0, 0)"
     assert assistant_dash.errors == []
 
 
@@ -163,11 +256,12 @@ def test_assistant_scope_updates_as_soon_as_runs_are_selected(assistant_dash):
     expect(tooltip).to_be_visible()
     expect(copy).to_be_visible()
     limits = processing.locator(".ast-limit code")
-    expect(limits).to_have_count(4)
+    expect(limits).to_have_count(5)
     expect(limits.nth(0)).to_have_text("summaries ≤ 100 newest")
     expect(limits.nth(1)).to_have_text("all report evidence in this request ≤ 48 KiB")
     expect(limits.nth(2)).to_have_text("traceback ≤ 3 KiB / test")
     expect(limits.nth(3)).to_have_text("stdout/stderr/log ≤ 2 KiB / test")
+    expect(limits.nth(4)).to_have_text("answer output ≤ 3072 tokens")
     page.locator("#ast-title").click()
     expect(tooltip).to_be_hidden()
     limits_button.focus()
@@ -389,6 +483,161 @@ def test_assistant_marks_actual_shared_budget_loss_as_context_limited(
     assert assistant_dash.errors == []
 
 
+def test_assistant_warns_when_provider_truncates_the_answer(assistant_dash):
+    page = assistant_dash.page
+    partial_answer = (
+        "### Run comparison\n\n"
+        "| Parameter | [R1] | [R2] |\n"
+        "|---|---|---|\n\n"
+        "| DAG | `pytest_reports_example`"
+    )
+
+    def output_limited_reply(route):
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "answer": partial_answer,
+                    "evidence": [],
+                    "provider": "anthropic",
+                    "model": "claude-sonnet-5",
+                    "context_model": None,
+                    "reports_considered": 2,
+                    "truncated": False,
+                    "context_limited": False,
+                    "output_limited": True,
+                    "scope": "two selected reports",
+                    "prompt_bytes": {
+                        "system": 2_000,
+                        "user": 30,
+                        "context": 3_000,
+                        "history": 1_200,
+                        "structure": 202,
+                    },
+                    "report_context": None,
+                    "token_usage": {
+                        "input_tokens": 6_432,
+                        "output_tokens": 1_536,
+                        "total_tokens": 7_968,
+                        "cached_input_tokens": 0,
+                    },
+                }
+            ),
+        )
+
+    page.route("**/api/assistant/query", output_limited_reply)
+    page.locator("#assistant-btn").click()
+    page.locator("#ast-question").fill("Compare these two runs")
+    page.locator("#ast-send").click()
+
+    warning = page.locator(".ast-msg.assistant .ast-output-warning").last
+    expect(warning).to_be_visible()
+    expect(warning).to_contain_text("reached its output-token limit")
+    expect(warning).to_have_attribute("role", "status")
+    expect(page.locator(".ast-msg.assistant .ast-msg-meta").last).to_contain_text(
+        "output 1,536"
+    )
+
+    page.evaluate("history.replaceState(null, document.title)")
+    page.reload()
+    page.wait_for_selector("#assistant-btn:not([hidden])", timeout=20_000)
+    expect(page.locator("#assistant-dialog")).to_be_visible()
+    expect(page.locator(".ast-output-warning")).to_have_count(1)
+    expect(page.locator(".ast-output-warning")).to_contain_text(
+        "reached its output-token limit"
+    )
+    assert assistant_dash.errors == []
+
+
+def test_assistant_context_overview_is_exact_safe_and_copyable(assistant_dash):
+    page = assistant_dash.page
+    report_context = (
+        "Scope: all readable reports\n\nRUN SUMMARIES\n"
+        '[R1] {"dag_id":"public","captured":"</code><img src=x '
+        'onerror=window.__assistantContextXss=true>","long":"' + "x" * 2_000 + '"}'
+    )
+    context_bytes = len(report_context.encode())
+
+    def context_reply(route):
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "answer": "The readable report was inspected [R1].",
+                    "evidence": [],
+                    "provider": "fake",
+                    "model": "offline-fake",
+                    "context_model": None,
+                    "reports_considered": 1,
+                    "truncated": False,
+                    "context_limited": False,
+                    "output_limited": False,
+                    "scope": "all readable reports",
+                    "prompt_bytes": {
+                        "system": 1,
+                        "user": 1,
+                        "context": context_bytes,
+                        "history": 0,
+                        "structure": 1,
+                    },
+                    "report_context": {
+                        "content": report_context,
+                        "format": "direct-snapshot-jsonl",
+                        "bytes": context_bytes,
+                    },
+                }
+            ),
+        )
+
+    page.route("**/api/assistant/query", context_reply)
+    page.locator("#assistant-btn").click()
+    page.locator("#ast-question").fill("What was sent?")
+    page.locator("#ast-send").click()
+    page.locator(".ast-context-review").click()
+
+    code = page.locator("#ast-report-context-code")
+    assert code.text_content() == report_context
+    wrap = page.locator("#ast-report-context-wrap")
+    content = page.locator("#ast-report-context-content")
+    expect(wrap).to_have_attribute("aria-pressed", "true")
+    expect(content).to_have_class("ast-report-context-content ast-wrap")
+    assert content.evaluate("el => el.scrollWidth <= el.clientWidth + 2")
+    wrap.click()
+    expect(wrap).to_have_attribute("aria-pressed", "false")
+    expect(content).to_have_class("ast-report-context-content")
+    assert content.evaluate("el => el.scrollWidth > el.clientWidth")
+    expect(page.locator("#ast-report-context-dialog img")).to_have_count(0)
+    assert page.evaluate("window.__assistantContextXss === true") is False
+    page.evaluate(
+        """() => {
+          Object.defineProperty(navigator, "clipboard", {
+            configurable: true,
+            value: {writeText: async text => { window.__assistantContextCopied = text; }}
+          });
+        }"""
+    )
+    page.locator("#ast-report-context-copy").click()
+    expect(page.locator("#ast-report-context-copy")).to_have_text("Copied")
+    assert page.evaluate("window.__assistantContextCopied") == report_context
+
+    page.locator("#ast-report-context-close").click()
+    page.evaluate("history.replaceState(null, document.title)")
+    page.reload()
+    page.wait_for_selector("#assistant-btn:not([hidden])", timeout=20_000)
+    expect(page.locator("#assistant-dialog")).to_be_visible()
+    page.locator(".ast-context-review").click()
+    expect(page.locator("#ast-report-context-wrap")).to_have_attribute(
+        "aria-pressed", "false"
+    )
+    expect(page.locator("#ast-report-context-content")).to_have_class(
+        "ast-report-context-content"
+    )
+    page.locator("#ast-report-context-wrap").click()
+    assert assistant_dash.errors == []
+
+
 def test_assistant_prompt_breakdown_counts_followup_history(assistant_dash):
     page = assistant_dash.page
     page.locator("#assistant-btn").click()
@@ -404,6 +653,78 @@ def test_assistant_prompt_breakdown_counts_followup_history(assistant_dash):
     second_history = page.locator(".ast-msg.user .ast-prompt-row").nth(9)
     expect(first_history.locator("code")).to_have_text("0 B")
     expect(second_history.locator("code")).not_to_have_text("0 B")
+    assert assistant_dash.errors == []
+
+
+def test_assistant_sums_provider_tokens_for_the_whole_chat_session(assistant_dash):
+    page = assistant_dash.page
+    totals = [100, 250, 650, 1, 999, 10, 5, None]
+    calls = 0
+
+    def token_reply(route):
+        nonlocal calls
+        total = totals[calls]
+        calls += 1
+        usage = (
+            {
+                "input_tokens": total - 1,
+                "output_tokens": 1,
+                "total_tokens": total,
+                "cached_input_tokens": 0,
+            }
+            if total is not None
+            else None
+        )
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "answer": f"Answer {calls}",
+                    "evidence": [],
+                    "provider": "fake",
+                    "model": "offline-fake",
+                    "context_model": None,
+                    "reports_considered": 1,
+                    "truncated": False,
+                    "context_limited": False,
+                    "output_limited": False,
+                    "scope": "all readable reports",
+                    "token_usage": usage,
+                    "report_context": None,
+                }
+            ),
+        )
+
+    page.route("**/api/assistant/query", token_reply)
+    page.locator("#assistant-btn").click()
+    for index in range(len(totals)):
+        page.locator("#ast-question").fill(f"Question {index + 1}")
+        page.locator("#ast-send").click()
+        expect(page.locator(".ast-msg.assistant .ast-answer").last).to_have_text(
+            f"Answer {index + 1}"
+        )
+
+    session_total = page.locator("#ast-session-tokens")
+    expect(session_total).to_have_attribute("aria-live", "polite")
+    expect(session_total).to_have_text("Session total: 2,015 tokens")
+
+    page.evaluate("history.replaceState(null, document.title)")
+    page.reload()
+    page.wait_for_selector("#assistant-btn:not([hidden])", timeout=20_000)
+    expect(page.locator("#assistant-dialog")).to_be_visible()
+    expect(page.locator(".ast-msg")).to_have_count(12)
+    expect(page.locator("#ast-session-tokens")).to_have_text(
+        "Session total: 2,015 tokens"
+    )
+
+    page.evaluate("localStorage.setItem('i18nextLng', 'ru')")
+    expect(page.locator("#ast-session-tokens")).to_have_text(
+        "За сессию: 2 015 токенов", timeout=3_000
+    )
+    page.locator("#ast-clear").click()
+    expect(page.locator("#ast-session-tokens")).to_be_hidden()
+    page.evaluate("localStorage.removeItem('i18nextLng')")
     assert assistant_dash.errors == []
 
 
@@ -432,6 +753,11 @@ def test_assistant_restores_chat_after_refresh_and_can_clear_it(assistant_dash):
     restored_meta = page.locator(".ast-msg.user .ast-msg-meta")
     expect(restored_meta).to_contain_text("Sent to LLM")
     expect(restored_meta.locator(".ast-prompt-row")).to_have_count(6)
+    restored_review = restored_meta.locator(".ast-context-review")
+    expect(restored_review).to_be_visible()
+    restored_review.click()
+    expect(page.locator("#ast-report-context-code")).to_contain_text("RUN SUMMARIES")
+    page.locator("#ast-report-context-close").click()
     expect(page.locator(".ast-msg.assistant .ast-copy")).to_be_visible()
 
     page.locator("#ast-clear").click()
@@ -538,6 +864,7 @@ def test_assistant_controls_follow_airflow_locale_without_refresh(assistant_dash
     expect(page.locator(".ast-msg.user .ast-msg-meta").last).to_contain_text(
         "Отправлено в LLM"
     )
+    expect(page.locator(".ast-context-review").last).to_have_text("Обзор контекста")
 
     page.locator("#ast-scope-list").click()
     expect(page.locator("#ast-scope-dialog-title")).to_have_text("Выбранные прогоны")
@@ -548,6 +875,7 @@ def test_assistant_controls_follow_airflow_locale_without_refresh(assistant_dash
     expect(page.locator(".ast-msg.user .ast-msg-meta").last).to_contain_text(
         "Sent to LLM"
     )
+    expect(page.locator(".ast-context-review").last).to_have_text("Context overview")
     page.evaluate("localStorage.removeItem('i18nextLng')")
     assert assistant_dash.errors == []
 
@@ -697,8 +1025,9 @@ def test_assistant_explains_local_full_tree_mode_before_submit(assistant_dash):
     )
     expect(processing).to_contain_text("only compacted evidence leaves the server")
     limits = processing.locator(".ast-limit code")
-    expect(limits).to_have_count(5)
+    expect(limits).to_have_count(6)
     expect(limits.nth(0)).to_have_text("reports processed: 18")
     expect(limits.nth(1)).to_have_text("test cases: all in scope")
     expect(limits.nth(4)).to_have_text("external evidence ≤ 48 KiB")
+    expect(limits.nth(5)).to_have_text("answer output ≤ 3072 tokens")
     assert assistant_dash.errors == []

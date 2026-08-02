@@ -118,7 +118,7 @@ class AssistantSettings:
                 CONTEXT_MAX_TOKENS_ENV, 1_024, minimum=128, maximum=8_192
             ),
             max_output_tokens=_bounded_int(
-                MAX_OUTPUT_TOKENS_ENV, 1_536, minimum=128, maximum=8_192
+                MAX_OUTPUT_TOKENS_ENV, 3_072, minimum=128, maximum=8_192
             ),
             timeout=_bounded_float(TIMEOUT_ENV, 45.0, minimum=1.0, maximum=300.0),
             max_concurrent=_bounded_int(MAX_CONCURRENT_ENV, 1, minimum=1, maximum=8),

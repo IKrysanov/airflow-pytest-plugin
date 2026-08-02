@@ -32,6 +32,7 @@ from airflow_pytest_plugin.assistant import (
     DIRECT_MAX_SUMMARIES_ENV,
     MAX_CONCURRENT_ENV,
     MAX_HISTORY_BYTES,
+    MAX_OUTPUT_TOKENS_ENV,
     MODEL_ENV,
     PROVIDER_ENV,
     TRACEBACK_BYTES_ENV,
@@ -41,6 +42,7 @@ from airflow_pytest_plugin.assistant import (
     AssistantProviderError,
     AssistantProviderResponse,
     AssistantQuery,
+    AssistantReportContext,
     AssistantRuntime,
     AssistantScope,
     AssistantSettings,
@@ -143,7 +145,7 @@ def _settings(**changes) -> AssistantSettings:
         max_context_bytes=48 * 1024,
         context_n_ctx=16_384,
         context_max_tokens=1_024,
-        max_output_tokens=1_536,
+        max_output_tokens=3_072,
         timeout=12.5,
         max_concurrent=1,
         direct_max_summaries=100,
@@ -430,6 +432,60 @@ def test_runtime_returns_exact_final_provider_token_usage(reports_root):
         "total_tokens": 366,
         "cached_input_tokens": 100,
     }
+    assert reply.output_limited is False
+
+
+@pytest.mark.parametrize("stop_reason", ["max_tokens", "length", "max-output-tokens"])
+def test_runtime_marks_provider_output_limit(stop_reason, reports_root):
+    class LimitedProvider(_CapturingProvider):
+        def answer(self, *, system: str, prompt: str, max_tokens: int):
+            self.calls.append((system, prompt, max_tokens))
+            return AssistantProviderResponse(
+                text="## Comparison\n\n| Parameter | R1 | R2 |\n|---|---|---|",
+                token_usage=AssistantTokenUsage(
+                    input_tokens=250,
+                    output_tokens=100,
+                    total_tokens=350,
+                ),
+                stop_reason=stop_reason,
+            )
+
+    write_report(reports_root, ReportRef("dag", "run", "task", 1), failed=1)
+
+    reply = _runtime(LimitedProvider(), PassthroughReducer()).ask(
+        source=FileSystemReportSource(report_root=reports_root),
+        can_read=lambda dag, user: True,
+        user=None,
+        query=AssistantQuery(question="Compare the runs"),
+    )
+
+    assert reply.output_limited is True
+    assert reply.to_dict()["output_limited"] is True
+
+
+def test_runtime_uses_exact_output_usage_as_limit_fallback(reports_root):
+    class LimitedProvider(_CapturingProvider):
+        def answer(self, *, system: str, prompt: str, max_tokens: int):
+            self.calls.append((system, prompt, max_tokens))
+            return AssistantProviderResponse(
+                text="The response may end here",
+                token_usage=AssistantTokenUsage(
+                    input_tokens=250,
+                    output_tokens=max_tokens,
+                    total_tokens=250 + max_tokens,
+                ),
+            )
+
+    write_report(reports_root, ReportRef("dag", "run", "task", 1), failed=1)
+
+    reply = _runtime(LimitedProvider(), PassthroughReducer()).ask(
+        source=FileSystemReportSource(report_root=reports_root),
+        can_read=lambda dag, user: True,
+        user=None,
+        query=AssistantQuery(question="Compare the runs"),
+    )
+
+    assert reply.output_limited is True
 
 
 def test_provider_prompt_contains_only_bounded_chat_and_report_evidence(reports_root):
@@ -464,6 +520,8 @@ def test_provider_prompt_contains_only_bounded_chat_and_report_evidence(reports_
     assert reply.prompt_bytes.user == len(b"Compare the run")
     assert reply.prompt_bytes.context > 0 and reply.prompt_bytes.history > 0
     assert system == SYSTEM_PROMPT and "valid GitHub-style Markdown" in system
+    assert "Start with a direct conclusion" in system
+    assert "never start a table unless you can finish" in system
     assert max_tokens == 512
     assert prompt.startswith("USER QUESTION\nCompare the run\n\n")
     assert (
@@ -552,6 +610,15 @@ def test_each_user_models_receive_only_their_rbac_visible_reports(
         assert reply.reports_considered == 2
         assert "common" in provider_prompt and f"{username}_private" in provider_prompt
         assert forbidden not in provider_prompt
+        assert reply.report_context is not None
+        assert reply.report_context.content in provider_prompt
+        assert forbidden not in reply.report_context.content
+        assert reply.report_context.format == (
+            "locally-reduced-text" if local_mode else "direct-snapshot-jsonl"
+        )
+        assert reply.report_context.to_dict()["bytes"] == len(
+            reply.report_context.content.encode()
+        )
         if local_mode:
             local_inputs = "\n".join(context for _, context in reducer.calls)
             assert "common" in local_inputs and f"{username}_private" in local_inputs
@@ -623,11 +690,13 @@ def test_settings_reuse_provider_model_env_and_bound_bad_numbers(monkeypatch):
     monkeypatch.delenv(MODEL_ENV, raising=False)
     monkeypatch.setenv(CONTEXT_BYTES_ENV, "not-a-number")
     monkeypatch.setenv(MAX_CONCURRENT_ENV, "500")
+    monkeypatch.delenv(MAX_OUTPUT_TOKENS_ENV, raising=False)
 
     settings = AssistantSettings.from_env()
 
     assert settings.provider == "gigachat" and settings.model == "GigaChat-Pro"
     assert settings.max_context_bytes == 48 * 1024
+    assert settings.max_output_tokens == 3_072
     assert settings.max_concurrent == 1
 
 
@@ -677,6 +746,7 @@ def test_anthropic_adapter_sends_separated_system_prompt(monkeypatch):
                         cache_read_input_tokens=20,
                         output_tokens=30,
                     ),
+                    stop_reason="end_turn",
                 )
             )
         ),
@@ -705,6 +775,7 @@ def test_anthropic_adapter_sends_separated_system_prompt(monkeypatch):
             total_tokens=160,
             cached_input_tokens=30,
         ),
+        stop_reason="end_turn",
     )
     assert closed == [True]
 
@@ -732,7 +803,12 @@ def test_openai_adapter_uses_bounded_deterministic_chat(monkeypatch):
     def create(**kwargs):
         calls.append(kwargs)
         return SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content="Answer [R1]"))],
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content="Answer [R1]"),
+                    finish_reason="stop",
+                )
+            ],
             usage=SimpleNamespace(
                 prompt_tokens=120,
                 completion_tokens=24,
@@ -771,6 +847,7 @@ def test_openai_adapter_uses_bounded_deterministic_chat(monkeypatch):
             total_tokens=144,
             cached_input_tokens=40,
         ),
+        stop_reason="stop",
     )
     assert closed == [True]
 
@@ -788,7 +865,7 @@ def test_gigachat_adapter_accepts_both_sdk_message_shapes(monkeypatch, message):
         chat=lambda payload: (
             calls.append(payload)
             or SimpleNamespace(
-                choices=[SimpleNamespace(message=message)],
+                choices=[SimpleNamespace(message=message, finish_reason="stop")],
                 usage={
                     "prompt_tokens": 100,
                     "completion_tokens": 20,
@@ -823,6 +900,7 @@ def test_gigachat_adapter_accepts_both_sdk_message_shapes(monkeypatch, message):
         total_tokens=120,
         cached_input_tokens=5,
     )
+    assert answer.stop_reason == "stop"
 
 
 def test_llama_reducer_uses_safe_untrusted_prompt_and_releases_model(
@@ -1277,6 +1355,18 @@ def test_prompt_byte_response_includes_zero_and_total_boundaries():
     assert parts.to_dict()["total"] == sum(
         value for key, value in parts.to_dict().items() if key != "total"
     )
+
+
+def test_report_context_response_counts_multibyte_utf8_exactly():
+    context = AssistantReportContext(
+        content="Факт 😀 [R1]", format="locally-reduced-text"
+    )
+
+    assert context.to_dict() == {
+        "content": "Факт 😀 [R1]",
+        "format": "locally-reduced-text",
+        "bytes": len("Факт 😀 [R1]".encode()),
+    }
 
 
 def test_report_context_includes_redacted_bounded_failed_capture(

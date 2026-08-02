@@ -35,8 +35,12 @@ _CSS = r"""
     background: var(--surface-2); color: var(--primary);
     font: 700 10px/1.3 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     letter-spacing: .04em; }
-  .ast-provider { color: var(--muted); font-size: 11px; white-space: nowrap;
+  .ast-title-meta { min-width: 0; margin-top: 2px; display: flex; align-items: center;
+    gap: 7px; color: var(--muted); font-size: 11px; }
+  .ast-provider { min-width: 0; flex: 1 1 auto; white-space: nowrap;
     overflow: hidden; text-overflow: ellipsis; }
+  .ast-session-tokens { flex: 0 0 auto; padding-left: 7px; border-left: 1px solid var(--border);
+    color: var(--fg); font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
   .ast-head-actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
   .ast-close { width: 44px; height: 44px; padding: 0; justify-content: center;
     flex: 0 0 auto; }
@@ -90,6 +94,8 @@ _CSS = r"""
   .ast-scope-list:focus-visible, .ast-scope-dialog-close:focus-visible {
     outline: 2px solid var(--ring); outline-offset: 2px; }
   #ast-scope-dialog { max-width: min(560px, 92vw); max-height: 82vh; }
+  #ast-report-context-dialog { width: min(860px, 94vw); max-width: min(860px, 94vw);
+    height: min(720px, 86dvh); max-height: 86dvh; }
   .ast-scope-dialog-head { padding: 14px 16px; border-bottom: 1px solid var(--border);
     display: flex; align-items: center; gap: 10px; flex: 0 0 auto; }
   .ast-scope-dialog-title-wrap { min-width: 0; flex: 1 1 auto; }
@@ -98,6 +104,31 @@ _CSS = r"""
   .ast-scope-dialog-close { width: 44px; height: 44px; padding: 0; flex: 0 0 auto;
     justify-content: center; }
   .ast-scope-dialog-body { min-height: 0; overflow-y: auto; padding: 8px 16px 18px; }
+  .ast-report-context-body { min-height: 0; flex: 1 1 auto; padding: 14px 16px 18px;
+    display: flex; flex-direction: column; gap: 10px; overflow: hidden; }
+  .ast-report-context-note { margin: 0; color: var(--muted); font-size: 12px;
+    line-height: 1.5; }
+  .ast-report-context-toolbar { display: flex; align-items: center; gap: 10px; }
+  .ast-report-context-format { min-width: 0; flex: 1 1 auto; color: var(--muted);
+    font-size: 12px; overflow-wrap: anywhere; }
+  .ast-report-context-copy, .ast-report-context-wrap { min-height: 44px; padding: 0 12px;
+    border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2);
+    color: var(--fg); cursor: pointer; font: inherit; font-size: 12px; font-weight: 600; }
+  .ast-report-context-copy:hover, .ast-report-context-wrap:hover { border-color: var(--primary); }
+  .ast-report-context-wrap[aria-pressed="true"] { border-color: var(--primary);
+    background: var(--primary); color: var(--on-primary); }
+  .ast-report-context-copy:focus-visible, .ast-report-context-wrap:focus-visible,
+  .ast-context-review:focus-visible,
+  .ast-report-context-content:focus-visible { outline: 2px solid var(--ring);
+    outline-offset: 2px; }
+  .ast-report-context-copy:disabled { cursor: wait; opacity: .7; }
+  .ast-report-context-content { min-width: 0; min-height: 0; flex: 1 1 auto; margin: 0;
+    padding: 12px 14px; overflow: auto; border: 1px solid var(--border);
+    border-radius: 9px; background: var(--surface-2); color: var(--fg);
+    font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    white-space: pre; tab-size: 2; }
+  .ast-report-context-content.ast-wrap { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .ast-report-context-content code { font: inherit; }
   .ast-scope-runs { margin: 0; padding: 0; list-style: none; }
   .ast-scope-run { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 8px;
     padding: 10px 0; border-bottom: 1px solid var(--border); }
@@ -112,7 +143,20 @@ _CSS = r"""
   .ast-scope-limit { padding: 10px 0; color: var(--muted); font-size: 12px;
     border-bottom: 1px solid var(--border); }
   .ast-messages { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 22px 24px;
-    display: flex; flex-direction: column; gap: 12px; scroll-behavior: smooth; }
+    display: flex; flex-direction: column; gap: 12px; scroll-behavior: smooth;
+    scrollbar-width: thin; scrollbar-color: transparent transparent; }
+  .ast-messages:hover, .ast-messages:focus-within {
+    scrollbar-color: color-mix(in srgb, var(--muted) 52%, transparent) transparent; }
+  html[data-theme] .ast-messages::-webkit-scrollbar { width: 8px; height: 8px; }
+  html[data-theme] .ast-messages::-webkit-scrollbar-track { background: transparent; }
+  html[data-theme] .ast-messages::-webkit-scrollbar-thumb {
+    min-height: 32px; border: 2px solid transparent; border-radius: 999px;
+    background: transparent; background-clip: padding-box; }
+  html[data-theme] .ast-messages:hover::-webkit-scrollbar-thumb,
+  html[data-theme] .ast-messages:focus-within::-webkit-scrollbar-thumb {
+    background: color-mix(in srgb, var(--muted) 52%, transparent);
+    background-clip: padding-box; }
+  html[data-theme] .ast-messages::-webkit-scrollbar-corner { background: transparent; }
   .ast-empty { width: min(100%, 720px); margin: auto; color: var(--muted); text-align: center; }
   .ast-empty strong { display: block; color: var(--fg); font-size: 15px; margin-bottom: 5px; }
   .ast-starters { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -126,8 +170,10 @@ _CSS = r"""
     outline: 2px solid var(--ring); outline-offset: 2px; }
   .ast-msg { max-width: 92%; border-radius: 12px; padding: 12px 14px;
     overflow-wrap: anywhere; }
-  .ast-msg.user { max-width: 76%; align-self: flex-end; background: var(--primary); color: var(--on-primary);
-    border-bottom-right-radius: 4px; }
+  .ast-msg.user { max-width: 76%; align-self: flex-end;
+    background: color-mix(in srgb, var(--primary) 88%, #000); color: var(--on-primary);
+    border: 0; border-bottom-right-radius: 4px; box-shadow: none; }
+  .ast-msg.user.ast-has-meta { width: min(360px, 100%); }
   .ast-msg.assistant { width: min(92%, 840px); align-self: flex-start; background: var(--surface-2);
     border: 1px solid var(--border); border-bottom-left-radius: 4px; }
   .ast-answer { line-height: 1.55; }
@@ -161,9 +207,9 @@ _CSS = r"""
   .ast-answer th:last-child, .ast-answer td:last-child { border-right: 0; }
   .ast-error { color: var(--fail); }
   .ast-msg-meta { color: var(--muted); font-size: 11px; margin-top: 8px; }
-  .ast-msg.user .ast-msg-meta { color: var(--on-primary); opacity: .9; }
-  .ast-msg.user .ast-msg-meta code { border-color: currentColor; background: #0002;
-    color: inherit; }
+  .ast-msg.user .ast-msg-meta { color: inherit; opacity: 1; }
+  .ast-msg.user .ast-msg-meta code { border: 0;
+    background: color-mix(in srgb, var(--on-primary) 14%, transparent); color: inherit; }
   .ast-prompt-title { display: block; margin-bottom: 5px; font-weight: 650; }
   .ast-prompt-parts { display: grid; gap: 3px; margin: 0; }
   .ast-prompt-row { display: grid; grid-template-columns: minmax(94px, 1fr) auto;
@@ -171,8 +217,14 @@ _CSS = r"""
   .ast-prompt-row dt, .ast-prompt-row dd { margin: 0; }
   .ast-prompt-row dt { min-width: 0; overflow-wrap: anywhere; }
   .ast-prompt-row dd { font-variant-numeric: tabular-nums; }
-  .ast-prompt-total { margin-top: 3px; padding-top: 5px;
-    border-top: 1px solid currentColor; font-weight: 650; }
+  .ast-prompt-total { margin-top: 5px; font-weight: 650; }
+  .ast-context-review { min-height: 44px; margin-top: 4px; padding: 0; border: 0;
+    background: transparent; color: var(--primary); cursor: pointer; font: inherit;
+    font-size: 12px; font-weight: 650; text-align: left; }
+  .ast-msg.user .ast-context-review { color: inherit; }
+  .ast-context-review:hover { text-decoration: underline; text-underline-offset: 3px; }
+  .ast-output-warning { margin: 10px 0 2px; padding: 9px 11px; border-radius: 8px;
+    background: var(--warn-bg); color: var(--warn); font-size: 12px; line-height: 1.5; }
   .ast-msg-footer { display: flex; align-items: center; justify-content: space-between;
     gap: 10px; margin-top: 8px; }
   .ast-msg-footer .ast-msg-meta { margin-top: 0; }
@@ -226,6 +278,11 @@ _CSS = r"""
     .ast-question { font-size: 16px; }
     .ast-msg.user { max-width: 88%; }
     .ast-prompt-row { grid-template-columns: minmax(84px, 1fr) auto; }
+    #ast-report-context-dialog { width: 100vw; max-width: none; height: 100dvh;
+      max-height: none; margin: 0; border: 0; border-radius: 0; }
+    .ast-report-context-toolbar { align-items: stretch; flex-wrap: wrap; }
+    .ast-report-context-format { flex-basis: 100%; }
+    .ast-report-context-copy, .ast-report-context-wrap { flex: 1 1 140px; }
   }
   @media (max-height: 620px) {
     #assistant-dialog.ast-dialog { height: 96dvh; min-height: 0; }
@@ -257,7 +314,10 @@ _PANEL = r"""
       <h2 id="ast-title" class="ast-title">
         <span id="ast-title-text">Report assistant</span><code class="ast-beta">BETA</code>
       </h2>
-      <div id="ast-provider" class="ast-provider"></div>
+      <div class="ast-title-meta">
+        <div id="ast-provider" class="ast-provider"></div>
+        <span id="ast-session-tokens" class="ast-session-tokens" aria-live="polite" hidden></span>
+      </div>
     </div>
     <div class="ast-head-actions">
       <button id="ast-clear" class="ast-clear" type="button" hidden>Clear chat</button>
@@ -314,6 +374,34 @@ _PANEL = r"""
     <ol id="ast-scope-runs" class="ast-scope-runs"></ol>
   </div>
 </dialog>
+<dialog id="ast-report-context-dialog" aria-labelledby="ast-report-context-dialog-title">
+  <div class="ast-scope-dialog-head">
+    <div class="ast-scope-dialog-title-wrap">
+      <h2 id="ast-report-context-dialog-title">Report context sent to LLM</h2>
+      <div id="ast-report-context-summary" class="ast-scope-dialog-summary"></div>
+    </div>
+    <button id="ast-report-context-close" class="btn ast-scope-dialog-close" type="button"
+            aria-label="Close report context">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M18 6 6 18M6 6l12 12"/>
+      </svg>
+    </button>
+  </div>
+  <div class="ast-report-context-body">
+    <p id="ast-report-context-note" class="ast-report-context-note"></p>
+    <div class="ast-report-context-toolbar">
+      <div id="ast-report-context-format" class="ast-report-context-format"></div>
+      <button id="ast-report-context-wrap" class="ast-report-context-wrap" type="button"
+              aria-pressed="true">Wrap lines</button>
+      <button id="ast-report-context-copy" class="ast-report-context-copy" type="button">
+        Copy context
+      </button>
+    </div>
+    <pre id="ast-report-context-content" class="ast-report-context-content"
+         tabindex="0"><code id="ast-report-context-code"></code></pre>
+  </div>
+</dialog>
 """
 
 _JS = r"""
@@ -336,6 +424,7 @@ _JS = r"""
       contextLimit: "all report evidence in this request ≤ {value}",
       tracebackLimit: "traceback ≤ {value} / test",
       captureLimit: "stdout/stderr/log ≤ {value} / test",
+      outputTokenLimit: "answer output ≤ {value} tokens",
       localLimitReports: "reports processed: {value}",
       localLimitCases: "test cases: all in scope",
       localOutboundLimit: "external evidence ≤ {value}",
@@ -344,10 +433,18 @@ _JS = r"""
       promptSize: "Sent to LLM", promptSystem: "System", promptUser: "User",
       promptContext: "Context data", promptHistory: "History",
       promptStructure: "Prompt structure", promptTotal: "Total",
+      contextReview: "Context overview", contextDialogTitle: "Report context sent to LLM",
+      contextDialogClose: "Close report context", copyContext: "Copy context",
+      contextWrap: "Wrap lines", contextWrapTitle: "Toggle wrapping of long context lines",
+      contextDirectFormat: "Direct snapshot · header + JSON Lines",
+      contextLocalFormat: "Local reduction · plain text",
+      contextNote: "Exact report-evidence block after RBAC filtering. System instructions, your question and chat history are not shown here.",
       copyAnswer: "Copy", copied: "Copied", copyFailed: "Copy failed",
       tokens: "LLM tokens: input {input} · output {output} · total {total}",
+      sessionTokens: "Session total: {total} tokens",
       intro: "Answers use only reports you may read. This tab keeps the chat after refresh.",
       thinking: "Reviewing reports…", retry: "Try again", noDetail: "The request failed.",
+      outputLimited: "The model reached its output-token limit, so this answer may be incomplete. Ask a narrower question or increase AIRFLOW_PYTEST_ASSISTANT_MAX_OUTPUT_TOKENS.",
       truncated: "Context was limited", reports: "{n} reports", direct: "direct context",
       starters: ["What broke in the latest runs?", "Which failures look flaky?", "What became slower?"]
     },
@@ -366,6 +463,7 @@ _JS = r"""
       contextLimit: "данные всех отчётов в запросе ≤ {value}",
       tracebackLimit: "traceback ≤ {value} / тест",
       captureLimit: "stdout/stderr/log ≤ {value} / тест",
+      outputTokenLimit: "ответ ≤ {value} токенов",
       localLimitReports: "обработано отчётов: {value}",
       localLimitCases: "test cases: все в области",
       localOutboundLimit: "факты наружу ≤ {value}",
@@ -374,10 +472,18 @@ _JS = r"""
       promptSize: "Отправлено в LLM", promptSystem: "System", promptUser: "User",
       promptContext: "Данные отчётов", promptHistory: "История",
       promptStructure: "Структура промпта", promptTotal: "Всего",
+      contextReview: "Обзор контекста", contextDialogTitle: "Контекст отчётов, отправленный в LLM",
+      contextDialogClose: "Закрыть контекст отчётов", copyContext: "Копировать контекст",
+      contextWrap: "Перенос строк", contextWrapTitle: "Включить или выключить перенос длинных строк контекста",
+      contextDirectFormat: "Прямой срез · заголовок + JSON Lines",
+      contextLocalFormat: "Локальное сжатие · обычный текст",
+      contextNote: "Точный блок данных отчётов после проверки RBAC. Системная инструкция, ваш вопрос и история чата здесь не показаны.",
       copyAnswer: "Копировать", copied: "Скопировано", copyFailed: "Ошибка копирования",
       tokens: "Токены LLM: вход {input} · ответ {output} · всего {total}",
+      sessionTokens: "За сессию: {total} токенов",
       intro: "Ответ строится только по доступным вам отчётам. Эта вкладка сохранит чат после обновления.",
       thinking: "Изучаю отчёты…", retry: "Повторить", noDetail: "Запрос не выполнен.",
+      outputLimited: "Модель достигла лимита токенов ответа, поэтому текст может быть неполным. Сузьте вопрос или увеличьте AIRFLOW_PYTEST_ASSISTANT_MAX_OUTPUT_TOKENS.",
       truncated: "Контекст был ограничен", reports: "Отчётов: {n}", direct: "контекст без сжатия",
       starters: ["Что сломалось в последних прогонах?", "Какие падения похожи на flaky?", "Какие тесты замедлились?"]
     }
@@ -391,20 +497,26 @@ _JS = r"""
   var astButton = document.getElementById("assistant-btn");
   var astDialog = document.getElementById("assistant-dialog");
   var astMessages = document.getElementById("ast-messages");
+  var astSessionTokens = document.getElementById("ast-session-tokens");
   var astQuestion = document.getElementById("ast-question");
   var astSend = document.getElementById("ast-send");
   var astClear = document.getElementById("ast-clear");
   var astContext = document.getElementById("ast-context");
   var astScopeList = document.getElementById("ast-scope-list");
   var astScopeDialog = document.getElementById("ast-scope-dialog");
+  var astReportContextDialog = document.getElementById("ast-report-context-dialog");
+  var astReportContextCopy = document.getElementById("ast-report-context-copy");
+  var astReportContextWrap = document.getElementById("ast-report-context-wrap");
   var AST_STORAGE_PREFIX = "airflow-pytest-plugin:assistant:v2:" + location.pathname + ":";
   var AST_WINDOW_PREFIX = "airflow-pytest-plugin:assistant-window:v1:" + location.pathname + ":";
   var AST_STORAGE_KEY = null;
-  var AST_WINDOW_PREFS_KEY = null, AST_WINDOW_OPEN_KEY = null;
+  var AST_WINDOW_PREFS_KEY = null, AST_WINDOW_OPEN_KEY = null, AST_CONTEXT_WRAP_KEY = null;
   var AST_MAX_MESSAGES = 12;
+  var AST_MAX_SESSION_TOKENS = 1_000_000_000_000_000;
   var astLastFocus = null, astPending = false, astLastQuestion = "", astStatus = null;
   var astResizeTimer = null, astWindowWidth = null, astWindowHeight = null;
-  var astWindowDirty = false;
+  var astWindowDirty = false, astActiveReportContext = null, astReportContextTrigger = null;
+  var astContextWrapped = true, astSessionTotalTokens = 0;
   var astTranscript = [];
 
   function astApplyText() {
@@ -419,6 +531,15 @@ _JS = r"""
     astScopeList.textContent = astT("scopeList");
     document.getElementById("ast-scope-dialog-title").textContent = astT("scopeListTitle");
     document.getElementById("ast-scope-dialog-close").setAttribute("aria-label", astT("scopeListClose"));
+    document.getElementById("ast-report-context-dialog-title").textContent = astT("contextDialogTitle");
+    document.getElementById("ast-report-context-close").setAttribute("aria-label", astT("contextDialogClose"));
+    document.getElementById("ast-report-context-note").textContent = astT("contextNote");
+    astReportContextCopy.textContent = astT("copyContext");
+    astReportContextWrap.textContent = astT("contextWrap");
+    astReportContextWrap.title = astT("contextWrapTitle");
+    astApplyContextWrap();
+    astRenderSessionTokens();
+    if (astActiveReportContext) astRenderReportContext(astActiveReportContext);
     astApplyProviderText(); astUpdateScope();
     if (astTranscript.length && astMessages.children.length) astRenderTranscript();
     else if (astMessages.querySelector(".ast-empty")) astEmpty();
@@ -485,6 +606,8 @@ _JS = r"""
       ? astStatus.max_failure_bytes : 3072;
     var captureBytes = astStatus && Number.isFinite(astStatus.max_capture_bytes)
       ? astStatus.max_capture_bytes : 2048;
+    var outputTokens = astStatus && Number.isFinite(astStatus.max_output_tokens)
+      ? astStatus.max_output_tokens : 3072;
     if (astStatus && astStatus.context_mode === "local-full-tree") {
       var processed = Math.min(visible, selectedCap);
       return {
@@ -495,7 +618,8 @@ _JS = r"""
           astT("localLimitCases"),
           astLimitText("tracebackLimit", astByteLabel(failureBytes)),
           astLimitText("captureLimit", astByteLabel(captureBytes)),
-          astLimitText("localOutboundLimit", astByteLabel(contextBytes))
+          astLimitText("localOutboundLimit", astByteLabel(contextBytes)),
+          astLimitText("outputTokenLimit", outputTokens)
         ]
       };
     }
@@ -508,7 +632,8 @@ _JS = r"""
         astLimitText("directLimitSummaries", summaryLimit),
         astLimitText("contextLimit", astByteLabel(contextBytes)),
         astLimitText("tracebackLimit", astByteLabel(failureBytes)),
-        astLimitText("captureLimit", astByteLabel(captureBytes))
+        astLimitText("captureLimit", astByteLabel(captureBytes)),
+        astLimitText("outputTokenLimit", outputTokens)
       ]
     };
   }
@@ -612,7 +737,14 @@ _JS = r"""
     AST_STORAGE_KEY = AST_STORAGE_PREFIX + token;
     AST_WINDOW_PREFS_KEY = AST_WINDOW_PREFIX + token;
     AST_WINDOW_OPEN_KEY = AST_WINDOW_PREFS_KEY + ":open";
+    AST_CONTEXT_WRAP_KEY = AST_WINDOW_PREFS_KEY + ":context-wrap";
+    try {
+      var savedWrap = localStorage.getItem(AST_CONTEXT_WRAP_KEY);
+      astContextWrapped = savedWrap == null ? true : savedWrap === "1";
+    } catch (error) { astContextWrapped = true; }
+    astApplyContextWrap();
     astTranscript = astLoadTranscript();
+    astRenderSessionTokens();
     var lastUsers = astTranscript.filter(function (item) { return item.role === "user"; });
     astLastQuestion = lastUsers.length ? lastUsers[lastUsers.length - 1].text : "";
     astClear.hidden = !astTranscript.length;
@@ -631,6 +763,18 @@ _JS = r"""
     }
     clean.total = names.reduce(function (sum, name) { return sum + clean[name]; }, 0);
     return clean;
+  }
+
+  function astCleanReportContext(raw) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)
+        || typeof raw.content !== "string"
+        || (raw.format !== "direct-snapshot-jsonl"
+          && raw.format !== "locally-reduced-text")) return null;
+    var content = raw.content.slice(0, 256 * 1024);
+    var bytes;
+    try { bytes = new TextEncoder().encode(content).length; }
+    catch (error) { bytes = new Blob([content]).size; }
+    return { content: content, format: raw.format, bytes: bytes };
   }
 
   function astCleanTokenUsage(raw) {
@@ -652,12 +796,36 @@ _JS = r"""
     return astFmt(text, "total", usage.total_tokens.toLocaleString(locale));
   }
 
+  function astBoundSessionTokens(value) {
+    if (!Number.isFinite(value) || value < 0) return 0;
+    return Math.min(Math.floor(value), AST_MAX_SESSION_TOKENS);
+  }
+
+  function astRenderSessionTokens() {
+    if (astSessionTotalTokens <= 0) {
+      astSessionTokens.textContent = ""; astSessionTokens.hidden = true; return;
+    }
+    var locale = LOCALE === "ru" ? "ru-RU" : "en-US";
+    var total = astSessionTotalTokens.toLocaleString(locale);
+    astSessionTokens.textContent = astFmt(astT("sessionTokens"), "total", total);
+    astSessionTokens.hidden = false;
+  }
+
+  function astAddSessionTokens(usage) {
+    if (!usage) return;
+    astSessionTotalTokens = astBoundSessionTokens(
+      astSessionTotalTokens + usage.total_tokens
+    );
+    astRenderSessionTokens();
+  }
+
   function astLoadTranscript() {
+    astSessionTotalTokens = 0;
     if (!AST_STORAGE_KEY) return [];
     try {
       var saved = JSON.parse(sessionStorage.getItem(AST_STORAGE_KEY) || "null");
       if (!saved || saved.version !== 1 || !Array.isArray(saved.messages)) return [];
-      return saved.messages.filter(function (item) {
+      var messages = saved.messages.filter(function (item) {
         return item && (item.role === "user" || item.role === "assistant")
           && typeof item.text === "string";
       }).slice(-AST_MAX_MESSAGES).map(function (item) {
@@ -670,27 +838,41 @@ _JS = r"""
             dag_id: ref.dag_id.slice(0, 512), task_id: ref.task_id.slice(0, 512),
             run_id: ref.run_id.slice(0, 512) };
         }) : [];
+        var promptParts = astCleanPromptParts(item.promptParts);
+        var reportContext = astCleanReportContext(item.reportContext);
+        if (promptParts && reportContext && promptParts.context !== reportContext.bytes) {
+          reportContext = null;
+        }
         return {
           role: item.role,
-          text: item.text.slice(0, 20000),
+          text: item.text.slice(0, 64 * 1024),
           evidence: evidence,
           reports: Number.isFinite(item.reports) ? item.reports : null,
-          promptParts: astCleanPromptParts(item.promptParts),
+          promptParts: promptParts,
+          reportContext: reportContext,
           tokenUsage: astCleanTokenUsage(item.tokenUsage),
           promptBytes: Number.isFinite(item.promptBytes) && item.promptBytes >= 0
             ? Math.min(Math.floor(item.promptBytes), 100 * 1024 * 1024) : null,
           contextLimited: item.contextLimited === true,
+          outputLimited: item.outputLimited === true,
           truncated: item.truncated === true
         };
       });
-    } catch (error) { return []; }
+      var visibleTotal = messages.reduce(function (total, item) {
+        return total + (item.tokenUsage ? item.tokenUsage.total_tokens : 0);
+      }, 0);
+      var storedTotal = astBoundSessionTokens(saved.sessionTotalTokens);
+      astSessionTotalTokens = Math.max(storedTotal, astBoundSessionTokens(visibleTotal));
+      return messages;
+    } catch (error) { astSessionTotalTokens = 0; return []; }
   }
 
   function astPersistTranscript() {
     astTranscript = astTranscript.slice(-AST_MAX_MESSAGES);
     try { if (AST_STORAGE_KEY) {
       sessionStorage.setItem(AST_STORAGE_KEY,
-        JSON.stringify({ version: 1, messages: astTranscript }));
+        JSON.stringify({ version: 1, messages: astTranscript,
+          sessionTotalTokens: astSessionTotalTokens }));
     } } catch (error) { /* Storage may be blocked or full; chat still works in memory. */ }
     astClear.hidden = !astTranscript.length;
   }
@@ -712,12 +894,12 @@ _JS = r"""
         { label: astT("promptHistory"), value: astByteLabel(item.promptParts.history) },
         { label: astT("promptStructure"), value: astByteLabel(item.promptParts.structure) },
         { label: astT("promptTotal"), value: astByteLabel(item.promptParts.total), total: true }
-      ] };
+      ], reportContext: item.reportContext };
     }
     if (item.role === "user" && Number.isFinite(item.promptBytes)) {
       return { title: astT("promptSize"), items: [
         { label: astT("promptTotal"), value: astByteLabel(item.promptBytes), total: true }
-      ] };
+      ], reportContext: item.reportContext };
     }
     if (item.role !== "assistant" || item.reports == null) return "";
     var meta = astFmt(astT("reports"), "n", item.reports);
@@ -726,18 +908,55 @@ _JS = r"""
     return meta;
   }
 
+  function astReportContextFormat(context) {
+    return astT(context.format === "locally-reduced-text"
+      ? "contextLocalFormat" : "contextDirectFormat");
+  }
+
+  function astApplyContextWrap() {
+    document.getElementById("ast-report-context-content").classList.toggle(
+      "ast-wrap", astContextWrapped
+    );
+    astReportContextWrap.setAttribute("aria-pressed", String(astContextWrapped));
+  }
+
+  function astRenderReportContext(context) {
+    document.getElementById("ast-report-context-summary").textContent = astByteLabel(context.bytes);
+    document.getElementById("ast-report-context-format").textContent =
+      astReportContextFormat(context);
+    document.getElementById("ast-report-context-code").textContent = context.content;
+  }
+
+  function astOpenReportContext(context, trigger) {
+    if (!context) return;
+    astActiveReportContext = context; astReportContextTrigger = trigger;
+    astRenderReportContext(context);
+    if (typeof astReportContextDialog.showModal === "function") {
+      if (!astReportContextDialog.open) astReportContextDialog.showModal();
+    } else astReportContextDialog.setAttribute("open", "");
+    if (typeof updateParentDim === "function") updateParentDim();
+    document.getElementById("ast-report-context-close").focus();
+  }
+
+  function astCloseReportContext() {
+    if (astReportContextDialog.open && typeof astReportContextDialog.close === "function") {
+      astReportContextDialog.close();
+    } else astReportContextDialog.removeAttribute("open");
+  }
+
   function astRenderTranscript() {
     astMessages.textContent = "";
     astTranscript.forEach(function (item) {
-      astAddMessage(item.role, item.text, item.evidence || [], astMessageMeta(item), false);
+      astAddMessage(item.role, item.text, item.evidence || [], astMessageMeta(item),
+        false, item.outputLimited === true);
     });
     astClear.hidden = !astTranscript.length;
   }
 
   function astClearTranscript() {
-    astTranscript = []; astLastQuestion = "";
+    astTranscript = []; astLastQuestion = ""; astSessionTotalTokens = 0;
     try { if (AST_STORAGE_KEY) sessionStorage.removeItem(AST_STORAGE_KEY); } catch (error) {}
-    astClear.hidden = true; astEmpty(); astQuestion.focus();
+    astRenderSessionTokens(); astClear.hidden = true; astEmpty(); astQuestion.focus();
   }
 
   function astEmpty() {
@@ -885,6 +1104,9 @@ _JS = r"""
 
   function astAppendMessageMeta(box, meta) {
     if (!meta) return;
+    if (typeof meta !== "string" && box.classList && box.classList.contains("ast-msg")) {
+      box.classList.add("ast-has-meta");
+    }
     var note = document.createElement("div"); note.className = "ast-msg-meta";
     if (typeof meta === "string") note.textContent = meta;
     else {
@@ -900,6 +1122,16 @@ _JS = r"""
         row.appendChild(label); row.appendChild(value); parts.appendChild(row);
       });
       note.appendChild(parts);
+      if (meta.reportContext) {
+        var review = document.createElement("button"); review.type = "button";
+        review.className = "ast-context-review"; review.textContent = astT("contextReview");
+        review.setAttribute("aria-haspopup", "dialog");
+        review.setAttribute("aria-controls", "ast-report-context-dialog");
+        review.addEventListener("click", function () {
+          astOpenReportContext(meta.reportContext, review);
+        });
+        note.appendChild(review);
+      }
     }
     box.appendChild(note);
   }
@@ -957,13 +1189,18 @@ _JS = r"""
     return button;
   }
 
-  function astAddMessage(role, text, evidence, meta, isError) {
+  function astAddMessage(role, text, evidence, meta, isError, outputLimited) {
     var empty = astMessages.querySelector(".ast-empty"); if (empty) empty.remove();
     var box = document.createElement("div"); box.className = "ast-msg " + role;
     var body = document.createElement("div"); body.className = "ast-answer" + (isError ? " ast-error" : "");
     if (role === "assistant" && !isError) astRenderMarkdown(body, text);
     else body.textContent = text;
     box.appendChild(body);
+    if (role === "assistant" && outputLimited) {
+      var warning = document.createElement("div"); warning.className = "ast-output-warning";
+      warning.setAttribute("role", "status"); warning.textContent = astT("outputLimited");
+      box.appendChild(warning);
+    }
     if (evidence && evidence.length) {
       var sources = document.createElement("div"); sources.className = "ast-sources";
       evidence.forEach(function (item) {
@@ -1007,7 +1244,7 @@ _JS = r"""
     var history = astHistoryPayload();
     astLastQuestion = question;
     var userItem = { role: "user", text: question, evidence: [], reports: null,
-      promptParts: null, promptBytes: null, truncated: false };
+      promptParts: null, promptBytes: null, reportContext: null, truncated: false };
     astTranscript.push(userItem);
     astPersistTranscript(); var userBox = astAddMessage("user", question); astQuestion.value = "";
     var waiting = astThinking(), scope = astScope(); astUpdateScope(); astSetPending(true);
@@ -1022,6 +1259,11 @@ _JS = r"""
     }).then(function (body) {
       waiting.remove();
       userItem.promptParts = astCleanPromptParts(body.prompt_bytes);
+      userItem.reportContext = astCleanReportContext(body.report_context);
+      if (userItem.promptParts && userItem.reportContext
+          && userItem.promptParts.context !== userItem.reportContext.bytes) {
+        userItem.reportContext = null;
+      }
       if (userItem.promptParts) {
         userItem.promptBytes = userItem.promptParts.total;
         astAppendMessageMeta(userBox, astMessageMeta(userItem));
@@ -1034,9 +1276,11 @@ _JS = r"""
       var assistantItem = { role: "assistant", text: body.answer || "",
         evidence: body.evidence || [], reports: body.reports_considered || 0,
         tokenUsage: astCleanTokenUsage(body.token_usage),
-        contextLimited: contextLimited, truncated: body.truncated === true };
+        contextLimited: contextLimited, outputLimited: body.output_limited === true,
+        truncated: body.truncated === true };
+      astAddSessionTokens(assistantItem.tokenUsage);
       astAddMessage("assistant", assistantItem.text, assistantItem.evidence,
-        astMessageMeta(assistantItem), false);
+        astMessageMeta(assistantItem), false, assistantItem.outputLimited);
       astTranscript.push(assistantItem);
       astPersistTranscript();
     }).catch(function (error) {
@@ -1158,11 +1402,46 @@ _JS = r"""
     }
   });
   document.getElementById("ast-scope-dialog-close").addEventListener("click", astCloseScopeList);
+  document.getElementById("ast-report-context-close").addEventListener("click", astCloseReportContext);
+  astReportContextWrap.addEventListener("click", function () {
+    astContextWrapped = !astContextWrapped; astApplyContextWrap();
+    try {
+      if (AST_CONTEXT_WRAP_KEY) {
+        localStorage.setItem(AST_CONTEXT_WRAP_KEY, astContextWrapped ? "1" : "0");
+      }
+    } catch (error) { /* Wrapping still works when preferences cannot be stored. */ }
+  });
+  astReportContextCopy.addEventListener("click", function () {
+    if (!astActiveReportContext) return;
+    astReportContextCopy.disabled = true;
+    astCopyText(astActiveReportContext.content).then(function () {
+      astReportContextCopy.textContent = astT("copied");
+    }).catch(function () {
+      astReportContextCopy.textContent = astT("copyFailed");
+    }).then(function () {
+      setTimeout(function () {
+        if (!astReportContextCopy.isConnected) return;
+        astReportContextCopy.textContent = astT("copyContext");
+        astReportContextCopy.disabled = false;
+      }, 1500);
+    });
+  });
   astScopeDialog.addEventListener("close", function () {
     astScopeList.setAttribute("aria-expanded", "false");
     if (typeof updateParentDim === "function") updateParentDim();
   });
+  astReportContextDialog.addEventListener("close", function () {
+    var trigger = astReportContextTrigger;
+    astActiveReportContext = null; astReportContextTrigger = null;
+    document.getElementById("ast-report-context-code").textContent = "";
+    if (typeof updateParentDim === "function") updateParentDim();
+    if (trigger && trigger.isConnected && trigger.focus) trigger.focus();
+    else if (astDialog.open) astQuestion.focus();
+  });
   if (typeof closeOnBackdrop === "function") closeOnBackdrop(astScopeDialog, astCloseScopeList);
+  if (typeof closeOnBackdrop === "function") {
+    closeOnBackdrop(astReportContextDialog, astCloseReportContext);
+  }
   if (typeof closeOnBackdrop === "function") closeOnBackdrop(astDialog, astClose);
   astDialog.addEventListener("close", function () {
     astButton.setAttribute("aria-expanded", "false"); astRememberOpen(false);

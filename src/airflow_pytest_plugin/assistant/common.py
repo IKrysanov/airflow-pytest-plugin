@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 MAX_QUESTION_CHARS = 4_000
 MAX_HISTORY_MESSAGES = 12
@@ -30,7 +30,7 @@ MAX_SCOPE_CHARS = 512
 MAX_SUMMARIES = 100
 MAX_FAILURE_BYTES = 3 * 1024
 MAX_CAPTURE_BYTES = 2 * 1024
-MAX_ANSWER_BYTES = 16_000
+MAX_ANSWER_BYTES = 64 * 1024
 
 
 @dataclass(frozen=True)
@@ -58,6 +58,7 @@ class AssistantProviderResponse:
 
     text: str
     token_usage: AssistantTokenUsage | None = None
+    stop_reason: str | None = None
 
 
 def usage_count(usage: Any, key: str) -> int | None:
@@ -68,6 +69,14 @@ def usage_count(usage: Any, key: str) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         return None
     return value
+
+
+def response_text(value: Any, key: str) -> str | None:
+    """Read one short, non-empty SDK response string from an object or mapping."""
+    raw = value.get(key) if isinstance(value, Mapping) else getattr(value, key, None)
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    return raw.strip()[:64]
 
 
 class AnswerProvider(Protocol):
@@ -200,6 +209,22 @@ class AssistantPromptBytes:
 
 
 @dataclass(frozen=True)
+class AssistantReportContext:
+    """Exact report-evidence block sent to the final provider."""
+
+    content: str
+    format: Literal["direct-snapshot-jsonl", "locally-reduced-text"]
+
+    def to_dict(self) -> dict[str, str | int]:
+        """Return the auditable browser payload without system prompt or history."""
+        return {
+            "content": self.content,
+            "format": self.format,
+            "bytes": len(self.content.encode("utf-8")),
+        }
+
+
+@dataclass(frozen=True)
 class AssistantReply:
     """A grounded answer returned by the HTTP layer."""
 
@@ -214,6 +239,8 @@ class AssistantReply:
     scope: str
     prompt_bytes: AssistantPromptBytes
     token_usage: AssistantTokenUsage | None
+    report_context: AssistantReportContext | None
+    output_limited: bool
 
     def to_dict(self) -> dict[str, Any]:
         """Return the JSON response body."""
@@ -232,6 +259,12 @@ class AssistantReply:
             "token_usage": (
                 self.token_usage.to_dict() if self.token_usage is not None else None
             ),
+            "report_context": (
+                self.report_context.to_dict()
+                if self.report_context is not None
+                else None
+            ),
+            "output_limited": self.output_limited,
         }
 
 
@@ -261,10 +294,12 @@ __all__ = [
     "AssistantProviderResponse",
     "AssistantPromptBytes",
     "AssistantQuery",
+    "AssistantReportContext",
     "AssistantReply",
     "AssistantScope",
     "AssistantTurn",
     "AssistantTokenUsage",
     "ContextReducer",
+    "response_text",
     "usage_count",
 ]

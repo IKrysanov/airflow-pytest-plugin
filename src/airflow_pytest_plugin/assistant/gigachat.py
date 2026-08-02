@@ -19,7 +19,12 @@ from __future__ import annotations
 import contextlib
 from typing import Any
 
-from .common import AssistantProviderResponse, AssistantTokenUsage, usage_count
+from .common import (
+    AssistantProviderResponse,
+    AssistantTokenUsage,
+    response_text,
+    usage_count,
+)
 from .settings import DEFAULT_MODELS, AssistantSettings
 
 
@@ -55,7 +60,8 @@ class GigaChatAssistant:
             }
         )
         choices = getattr(completion, "choices", None) or []
-        message = getattr(choices[0], "message", None) if choices else None
+        choice = choices[0] if choices else None
+        message = getattr(choice, "message", None) if choice is not None else None
         usage = getattr(completion, "usage", None)
         prompt_tokens = usage_count(usage, "prompt_tokens")
         output_tokens = usage_count(usage, "completion_tokens")
@@ -79,7 +85,11 @@ class GigaChatAssistant:
             text = str(message.get("content") or "")
         else:
             text = str(getattr(message, "content", "") or "")
-        return AssistantProviderResponse(text=text, token_usage=token_usage)
+        return AssistantProviderResponse(
+            text=text,
+            token_usage=token_usage,
+            stop_reason=response_text(choice, "finish_reason"),
+        )
 
     def close(self) -> None:
         with contextlib.suppress(Exception):

@@ -35,6 +35,7 @@ from .common import (
     AssistantProviderResponse,
     AssistantQuery,
     AssistantReply,
+    AssistantReportContext,
     ContextReducer,
     clip_utf8,
 )
@@ -49,6 +50,21 @@ from .exceptions import (
 from .prompts import SYSTEM_PROMPT, build_provider_prompt, cited_evidence
 from .redaction import redact_text
 from .reduction import reduce_context_tree
+
+_OUTPUT_LIMIT_REASONS = {
+    "length",
+    "max_completion_tokens",
+    "max_output_tokens",
+    "max_tokens",
+    "token_limit",
+}
+
+
+def _provider_output_limited(reason: str | None) -> bool:
+    if not reason:
+        return False
+    normalized = reason.strip().lower().replace("-", "_").replace(" ", "_")
+    return normalized in _OUTPUT_LIMIT_REASONS
 
 
 class AssistantRuntime:
@@ -133,6 +149,7 @@ class AssistantRuntime:
             "direct_max_detail_reports": None,
             "direct_max_failures_per_report": None,
             "max_context_bytes": self._max_context_bytes,
+            "max_output_tokens": self._max_output_tokens,
             "max_failure_bytes": self._max_failure_bytes,
             "max_capture_bytes": self._max_capture_bytes,
             "local_complete_tree": bool(self._context_model_name),
@@ -226,10 +243,23 @@ class AssistantRuntime:
             if isinstance(provider_response, AssistantProviderResponse):
                 raw_answer = provider_response.text
                 token_usage = provider_response.token_usage
+                stop_reason = provider_response.stop_reason
             else:
                 raw_answer = provider_response
                 token_usage = None
-            answer = clip_utf8(raw_answer.strip(), MAX_ANSWER_BYTES)
+                stop_reason = None
+            stripped_answer = raw_answer.strip()
+            answer_was_clipped = (
+                len(stripped_answer.encode("utf-8", "replace")) > MAX_ANSWER_BYTES
+            )
+            output_limited = answer_was_clipped or _provider_output_limited(stop_reason)
+            if (
+                stop_reason is None
+                and token_usage is not None
+                and token_usage.output_tokens >= self._max_output_tokens
+            ):
+                output_limited = True
+            answer = clip_utf8(stripped_answer, MAX_ANSWER_BYTES)
             if not answer:
                 raise AssistantProviderError(
                     "The configured model returned an empty answer. Try again."
@@ -246,6 +276,15 @@ class AssistantRuntime:
                 scope=context.scope_label,
                 prompt_bytes=prompt_bytes,
                 token_usage=token_usage,
+                report_context=AssistantReportContext(
+                    content=reduced,
+                    format=(
+                        "locally-reduced-text"
+                        if self._context_model_name
+                        else "direct-snapshot-jsonl"
+                    ),
+                ),
+                output_limited=output_limited,
             )
         except AssistantError:
             raise
@@ -278,6 +317,8 @@ class AssistantRuntime:
             scope=scope_label,
             prompt_bytes=AssistantPromptBytes(),
             token_usage=None,
+            report_context=None,
+            output_limited=False,
         )
 
     def _models(self) -> tuple[AnswerProvider, ContextReducer]:

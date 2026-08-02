@@ -88,6 +88,7 @@ def test_status_does_not_load_models(reports_root):
     assert body["direct_max_detail_reports"] is None
     assert body["direct_max_failures_per_report"] is None
     assert body["max_context_bytes"] == 8_192
+    assert body["max_output_tokens"] == 256
     assert body["max_failure_bytes"] == 3_072
     assert body["max_capture_bytes"] == 2_048
     assert body["local_complete_tree"] is False
@@ -146,7 +147,14 @@ def test_query_returns_grounded_evidence(reports_root):
     assert body["prompt_bytes"]["user"] == len(b"What failed?")
     assert body["prompt_bytes"]["context"] > 0
     assert body["prompt_bytes"]["history"] == 0
+    report_context = body["report_context"]
+    assert report_context["format"] == "direct-snapshot-jsonl"
+    assert report_context["bytes"] == len(report_context["content"].encode())
+    assert report_context["bytes"] == body["prompt_bytes"]["context"]
+    assert "RUN SUMMARIES" in report_context["content"]
+    assert '"dag_id":"dag"' in report_context["content"]
     assert body["context_limited"] is False
+    assert body["output_limited"] is False
     assert body["token_usage"] is None
     assert body["evidence"][0]["report_id"] == ref.token
 
@@ -160,7 +168,9 @@ def test_query_with_empty_scope_returns_zero_prompt_breakdown(reports_root):
 
     assert body["reports_considered"] == 0
     assert body["context_limited"] is False
+    assert body["output_limited"] is False
     assert body["token_usage"] is None
+    assert body["report_context"] is None
     assert body["provider_input_bytes"] == 0
     assert body["prompt_bytes"] == {
         "system": 0,
@@ -270,6 +280,7 @@ def test_viewer_contains_a_lazy_accessible_assistant_dialog(reports_root):
     assert 'button: "AI-ассистент"' in html
     assert '<span id="ast-title-text">Report assistant</span>' in html
     assert '<code class="ast-beta">BETA</code>' in html
+    assert 'id="ast-session-tokens"' in html
     assert 'id="ast-reset-size"' not in html
     assert 'id="ast-messages"' in html and 'aria-live="polite"' in html
     assert 'id="ast-scope"' in html and 'aria-live="polite"' in html
@@ -290,17 +301,36 @@ def test_viewer_contains_a_lazy_accessible_assistant_dialog(reports_root):
     assert 'promptHistory: "История"' in html
     assert 'copyAnswer: "Copy"' in html
     assert 'copyAnswer: "Копировать"' in html
+    assert 'contextReview: "Context overview"' in html
+    assert 'contextReview: "Обзор контекста"' in html
+    assert 'id="ast-report-context-wrap"' in html
+    assert 'contextWrap: "Wrap lines"' in html
+    assert 'contextWrap: "Перенос строк"' in html
+    assert 'outputLimited: "The model reached its output-token limit' in html
+    assert "body.output_limited === true" in html
     assert (
         'tokens: "LLM tokens: input {input} · output {output} · total {total}"' in html
     )
+    assert 'sessionTokens: "Session total: {total} tokens"' in html
+    assert 'sessionTokens: "За сессию: {total} токенов"' in html
+    assert "astAddSessionTokens(assistantItem.tokenUsage)" in html
+    assert "sessionTotalTokens: astSessionTotalTokens" in html
     assert "astCleanPromptParts(body.prompt_bytes)" in html
     assert "astCleanTokenUsage(body.token_usage)" in html
+    assert "astCleanReportContext(body.report_context)" in html
     assert "if (item.contextLimited)" in html
     assert "body.provider_input_bytes" in html
     assert 'button.className = "ast-copy"' in html
     assert "Math.round(kib * 100)" in html
     assert 'id="ast-scope-list"' in html and 'aria-haspopup="dialog"' in html
     assert 'id="ast-scope-dialog"' in html
+    assert 'id="ast-report-context-dialog"' in html
+    assert 'id="ast-report-context-code"' in html
+    assert 'className = "ast-context-review"' in html
+    assert (
+        'document.getElementById("ast-report-context-code").textContent = context.content'
+        in html
+    )
     assert 'id="ast-question"' in html and 'maxlength="4000"' in html
     assert 'id="ast-clear"' in html
     assert "@media (max-width: 700px)" in html
