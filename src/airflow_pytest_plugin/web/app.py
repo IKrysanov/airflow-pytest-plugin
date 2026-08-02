@@ -186,7 +186,13 @@ class _RequestBodyLimitMiddleware:
         iterator = iter(messages)
 
         async def replay() -> Message:
-            return next(iterator, {"type": "http.disconnect"})
+            message = next(iterator, None)
+            if message is not None:
+                return message
+            # Once the buffered body is replayed, defer to the real transport. Answering
+            # with a synthetic ``http.disconnect`` would tell a streaming response that the
+            # client had already gone, and Starlette would cancel it before the first byte.
+            return await receive()
 
         await self.app(scope, replay, send)
 
@@ -340,12 +346,13 @@ def create_app(
         method="POST",
         max_bytes=MAX_BULK_DELETE_BODY_BYTES,
     )
-    app.add_middleware(
-        _RequestBodyLimitMiddleware,
-        path="/api/assistant/query",
-        method="POST",
-        max_bytes=64 * 1024,
-    )
+    for assistant_path in ("/api/assistant/query", "/api/assistant/stream"):
+        app.add_middleware(
+            _RequestBodyLimitMiddleware,
+            path=assistant_path,
+            method="POST",
+            max_bytes=64 * 1024,
+        )
 
     @app.exception_handler(RequestValidationError)
     async def request_validation_error(
@@ -361,7 +368,8 @@ def create_app(
             content={"detail": _safe_validation_errors(exc.errors())},
         )
 
-    for module in (monitoring, reports, failures, compare, flaky):
+    app.include_router(monitoring.build_router(deps, assistant=assistant_runtime))
+    for module in (reports, failures, compare, flaky):
         app.include_router(module.build_router(deps))
     app.include_router(assistant_routes.build_router(deps, assistant_runtime))
 

@@ -16,7 +16,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
@@ -24,6 +24,11 @@ MAX_QUESTION_CHARS = 4_000
 MAX_HISTORY_MESSAGES = 12
 MAX_HISTORY_CHARS = 4_000
 MAX_HISTORY_BYTES = 16_000
+# The browser replays prior turns verbatim, and an answer is capped at MAX_ANSWER_BYTES,
+# not at the per-turn prompt clip. Rejecting that replay would break the chat for good
+# after one long answer, so the wire contract is deliberately wider than the clip; the
+# 64 KiB body limit remains the real anti-abuse guard.
+MAX_HISTORY_INPUT_CHARS = 64_000
 MAX_SCOPE_REPORTS = 100
 MAX_SCOPE_CHARS = 512
 
@@ -97,6 +102,20 @@ class AnswerProvider(Protocol):
 
     def close(self) -> None:
         """Release provider resources."""
+
+
+class StreamingAnswerProvider(AnswerProvider, Protocol):
+    """A provider that can also emit its answer incrementally.
+
+    Optional: the runtime falls back to :meth:`AnswerProvider.answer` when a provider does
+    not implement ``stream``, so a non-streaming adapter still works -- the browser simply
+    receives the whole answer as one delta.
+    """
+
+    def stream(
+        self, *, system: str, prompt: str, max_tokens: int
+    ) -> Iterator[str | AssistantProviderResponse]:
+        """Yield answer fragments, then one final response carrying usage and stop reason."""
 
 
 class ContextReducer(Protocol):
@@ -284,6 +303,7 @@ __all__ = [
     "MAX_CAPTURE_BYTES",
     "MAX_HISTORY_BYTES",
     "MAX_HISTORY_CHARS",
+    "MAX_HISTORY_INPUT_CHARS",
     "MAX_HISTORY_MESSAGES",
     "MAX_QUESTION_CHARS",
     "MAX_SCOPE_CHARS",
@@ -300,6 +320,7 @@ __all__ = [
     "AssistantTurn",
     "AssistantTokenUsage",
     "ContextReducer",
+    "StreamingAnswerProvider",
     "response_text",
     "usage_count",
 ]

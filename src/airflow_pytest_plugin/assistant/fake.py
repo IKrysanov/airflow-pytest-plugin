@@ -16,6 +16,11 @@
 
 from __future__ import annotations
 
+import time
+from collections.abc import Iterator
+
+from .common import AssistantProviderResponse
+
 
 class FakeAssistant:
     """Return a deterministic answer without loading or calling a model."""
@@ -35,6 +40,19 @@ class FakeAssistant:
             "Offline assistant rehearsal completed. "
             f"The configured evidence was received {first}."
         ).strip()
+
+    def stream(
+        self, *, system: str, prompt: str, max_tokens: int
+    ) -> Iterator[str | AssistantProviderResponse]:
+        """Emit the same answer word by word so the streaming path has a real rehearsal."""
+        words = self.answer(system=system, prompt=prompt, max_tokens=max_tokens).split(
+            " "
+        )
+        for index, word in enumerate(words):
+            if index:
+                time.sleep(0.02)
+            yield word if index == 0 else f" {word}"
+        yield AssistantProviderResponse(text="", stop_reason="stop")
 
     def close(self) -> None:
         return None

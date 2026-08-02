@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import contextlib
+from collections.abc import Iterator
 from typing import Any
 
 from .common import (
@@ -59,25 +60,46 @@ class AnthropicAssistant:
             for block in message.content
             if getattr(block, "type", None) == "text" and getattr(block, "text", None)
         )
-        usage = getattr(message, "usage", None)
-        uncached = usage_count(usage, "input_tokens")
-        cache_creation = usage_count(usage, "cache_creation_input_tokens") or 0
-        cache_read = usage_count(usage, "cache_read_input_tokens") or 0
-        output = usage_count(usage, "output_tokens")
-        token_usage = None
-        if uncached is not None and output is not None:
-            cached = cache_creation + cache_read
-            input_tokens = uncached + cached
-            token_usage = AssistantTokenUsage(
-                input_tokens=input_tokens,
-                output_tokens=output,
-                total_tokens=input_tokens + output,
-                cached_input_tokens=cached,
-            )
+        token_usage = self._usage(getattr(message, "usage", None))
         return AssistantProviderResponse(
             text=text,
             token_usage=token_usage,
             stop_reason=response_text(message, "stop_reason"),
+        )
+
+    def stream(
+        self, *, system: str, prompt: str, max_tokens: int
+    ) -> Iterator[str | AssistantProviderResponse]:
+        """Yield text as the Messages API produces it, then the final usage."""
+        with self._client.messages.stream(
+            model=self._model,
+            max_tokens=max_tokens,
+            system=system,
+            messages=[{"role": "user", "content": prompt}],
+        ) as stream:
+            yield from stream.text_stream
+            message = stream.get_final_message()
+        yield AssistantProviderResponse(
+            text="",
+            token_usage=self._usage(getattr(message, "usage", None)),
+            stop_reason=response_text(message, "stop_reason"),
+        )
+
+    @staticmethod
+    def _usage(usage: Any) -> AssistantTokenUsage | None:
+        uncached = usage_count(usage, "input_tokens")
+        output = usage_count(usage, "output_tokens")
+        if uncached is None or output is None:
+            return None
+        cached = (usage_count(usage, "cache_creation_input_tokens") or 0) + (
+            usage_count(usage, "cache_read_input_tokens") or 0
+        )
+        input_tokens = uncached + cached
+        return AssistantTokenUsage(
+            input_tokens=input_tokens,
+            output_tokens=output,
+            total_tokens=input_tokens + output,
+            cached_input_tokens=cached,
         )
 
     def close(self) -> None:

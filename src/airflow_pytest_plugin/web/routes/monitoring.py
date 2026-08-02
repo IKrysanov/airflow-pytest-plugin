@@ -95,12 +95,89 @@ def _run_ts(created_at: str | None) -> float | None:
         return None
 
 
+def render_assistant_metrics(
+    snapshot: Any,
+    *,
+    enabled: bool,
+) -> list[str]:
+    """Render the assistant's in-process counters as Prometheus families.
+
+    Cost, not content: request outcomes, provider wall time and provider-reported tokens.
+    Nothing here carries a question, a report or a user, so the scrape stays as safe to
+    expose as the rest of the endpoint.
+    """
+    lines: list[str] = [
+        "# HELP airflow_pytest_assistant_enabled 1 when report chat is configured.",
+        "# TYPE airflow_pytest_assistant_enabled gauge",
+        f"airflow_pytest_assistant_enabled {1 if enabled else 0}",
+        "# HELP airflow_pytest_assistant_in_flight Assistant requests holding a model slot.",
+        "# TYPE airflow_pytest_assistant_in_flight gauge",
+        f"airflow_pytest_assistant_in_flight {snapshot.in_flight}",
+    ]
+    samples = [
+        f'airflow_pytest_assistant_requests_total{{mode="{_esc_label(mode)}",'
+        f'outcome="{_esc_label(outcome)}"}} {count}'
+        for (mode, outcome), count in sorted(snapshot.requests.items())
+    ]
+    lines.append(
+        "# HELP airflow_pytest_assistant_requests_total Assistant requests by mode and outcome."
+    )
+    lines.append("# TYPE airflow_pytest_assistant_requests_total counter")
+    lines.extend(samples)
+
+    lines.append(
+        "# HELP airflow_pytest_assistant_provider_tokens_total "
+        "Provider-reported tokens for final answer calls."
+    )
+    lines.append("# TYPE airflow_pytest_assistant_provider_tokens_total counter")
+    for kind, value in (
+        ("input", snapshot.input_tokens),
+        ("output", snapshot.output_tokens),
+        ("cached_input", snapshot.cached_input_tokens),
+    ):
+        lines.append(
+            f'airflow_pytest_assistant_provider_tokens_total{{kind="{kind}"}} {_fmt(value)}'
+        )
+    for name, help_, value in (
+        (
+            "airflow_pytest_assistant_provider_seconds_total",
+            "Wall time spent waiting for the final provider.",
+            snapshot.provider_seconds,
+        ),
+        (
+            "airflow_pytest_assistant_local_reduce_calls_total",
+            "Local reducer invocations across all requests.",
+            snapshot.local_reduce_calls,
+        ),
+        (
+            "airflow_pytest_assistant_reports_considered_total",
+            "Readable reports admitted into assistant scopes.",
+            snapshot.reports_considered,
+        ),
+        (
+            "airflow_pytest_assistant_context_limited_total",
+            "Answers whose evidence was cut by a budget.",
+            snapshot.context_limited,
+        ),
+        (
+            "airflow_pytest_assistant_output_limited_total",
+            "Answers cut short by the provider's output-token limit.",
+            snapshot.output_limited,
+        ),
+    ):
+        lines.append(f"# HELP {name} {help_}")
+        lines.append(f"# TYPE {name} counter")
+        lines.append(f"{name} {_fmt(value)}")
+    return lines
+
+
 def render_metrics(
     summaries: Iterable[Any],
     *,
     version: str = __version__,
     scrape_seconds: float | None = None,
     max_groups: int = _METRICS_MAX_GROUPS,
+    assistant: Any = None,
 ) -> str:
     """Build a Prometheus text exposition from run summaries (pure, no I/O).
 
@@ -232,10 +309,17 @@ def render_metrics(
             ts_samples,
         )
 
+    if assistant is not None:
+        lines.extend(
+            render_assistant_metrics(
+                assistant.metrics.snapshot(), enabled=assistant.enabled
+            )
+        )
+
     return "\n".join(lines) + "\n"
 
 
-def build_router(deps: RouteDeps) -> APIRouter:
+def build_router(deps: RouteDeps, *, assistant: Any = None) -> APIRouter:
     """Routes tagged ``monitoring``."""
     router = APIRouter(tags=[TAG])
     src = deps.src
@@ -333,6 +417,7 @@ def build_router(deps: RouteDeps) -> APIRouter:
             summaries,
             scrape_seconds=time.perf_counter() - started,
             max_groups=_METRICS_MAX_GROUPS,
+            assistant=assistant,
         )
         return PlainTextResponse(text, media_type=_METRICS_CONTENT_TYPE)
 

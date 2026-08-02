@@ -24,6 +24,41 @@ from playwright.sync_api import expect
 pytestmark = pytest.mark.ui
 
 
+def _stream_body(reply: dict) -> str:
+    """Render a reply dict as the Server-Sent Events the assistant now consumes.
+
+    Route mocks describe one answer; the transport is an implementation detail, so tests
+    keep stating the reply and this turns it into `meta` + one `delta` + `done`.
+    """
+    meta = {
+        key: reply.get(key)
+        for key in (
+            "provider",
+            "model",
+            "context_model",
+            "reports_considered",
+            "scope",
+            "prompt_bytes",
+            "provider_input_bytes",
+            "report_context",
+        )
+    }
+    frames = ["event: meta\ndata: " + json.dumps(meta) + "\n\n"]
+    if reply.get("answer"):
+        frames.append(
+            "event: delta\ndata: " + json.dumps({"text": reply["answer"]}) + "\n\n"
+        )
+    frames.append("event: done\ndata: " + json.dumps(reply) + "\n\n")
+    return "".join(frames)
+
+
+def _fulfil_stream(route, reply: dict) -> None:
+    """Answer one mocked assistant request with a complete stream."""
+    route.fulfill(
+        status=200, content_type="text/event-stream", body=_stream_body(reply)
+    )
+
+
 def test_assistant_asks_real_offline_api_and_opens_evidence(assistant_dash):
     page = assistant_dash.page
     button = page.locator("#assistant-btn")
@@ -32,7 +67,10 @@ def test_assistant_asks_real_offline_api_and_opens_evidence(assistant_dash):
 
     button.click()
     expect(page.locator("#assistant-dialog")).to_be_visible()
-    expect(page.locator("#ast-context")).to_be_hidden()
+    # The unfiltered default is a scope like any other and has to name itself.
+    expect(page.locator("#ast-context")).to_be_visible()
+    expect(page.locator("#ast-scope")).to_have_text("All readable reports")
+    expect(page.locator("#ast-scope-list")).to_be_hidden()
     expect(page.locator("#ast-title-text")).to_have_text("Report assistant")
     expect(page.locator("#ast-title .ast-beta")).to_have_text("BETA")
     expect(page.locator("#ast-provider")).to_contain_text("fake")
@@ -119,45 +157,82 @@ def test_assistant_prompt_breakdown_uses_readable_theme_colors(assistant_dash, t
         "Offline assistant", timeout=15_000
     )
 
+    # Every part of the breakdown sits on the filled question bubble, so each one needs
+    # its own contrast against that fill: text at 4.5, and the separators, value outlines
+    # and the context button at the 3.0 required of non-text UI boundaries.
     appearance = page.locator(".ast-msg.user .ast-msg-meta").last.evaluate(
         r"""el => {
           const parse = value => {
-            const channels = (value.match(/-?(?:\d+\.?\d*|\.\d+)/g) || [])
-              .slice(0, 3).map(Number);
-            return value.startsWith('color(srgb')
-              ? channels.map(channel => channel * 255) : channels;
+            const channels = (value.match(/-?(?:\d+\.?\d*|\.\d+)/g) || []).map(Number);
+            const rgb = value.startsWith('color(srgb')
+              ? channels.slice(0, 3).map(channel => channel * 255)
+              : channels.slice(0, 3);
+            return { rgb, alpha: channels.length > 3 ? channels[3] : 1 };
           };
-          const luminance = value => {
-            const rgb = parse(value).map(channel => {
+          const over = (front, back) => {
+            const f = parse(front), b = parse(back);
+            return f.rgb.map((channel, i) => channel * f.alpha + b.rgb[i] * (1 - f.alpha));
+          };
+          const luminance = rgb => {
+            const linear = rgb.map(channel => {
               channel /= 255;
               return channel <= .04045 ? channel / 12.92
                 : Math.pow((channel + .055) / 1.055, 2.4);
             });
-            return .2126 * rgb[0] + .7152 * rgb[1] + .0722 * rgb[2];
+            return .2126 * linear[0] + .7152 * linear[1] + .0722 * linear[2];
           };
+          const ratio = (a, b) => {
+            const first = luminance(a), second = luminance(b);
+            return (Math.max(first, second) + .05) / (Math.min(first, second) + .05);
+          };
+          const box = el.closest('.ast-msg.user');
+          const bubble = getComputedStyle(box);
           const style = getComputedStyle(el);
-          const bubble = getComputedStyle(el.closest('.ast-msg.user'));
-          const review = getComputedStyle(el.querySelector('.ast-context-review'));
-          const foreground = luminance(bubble.color);
-          const background = luminance(bubble.backgroundColor);
+          const chip = el.querySelector('.ast-prompt-row dd code');
+          const chipStyle = getComputedStyle(chip);
+          const button = el.querySelector('.ast-context-review');
+          const buttonStyle = getComputedStyle(button);
+          const fill = parse(bubble.backgroundColor).rgb;
           return {
-            ratio: (Math.max(foreground, background) + .05)
-              / (Math.min(foreground, background) + .05),
+            ratio: ratio(parse(bubble.color).rgb, fill),
+            chipTextRatio: ratio(parse(chipStyle.color).rgb, fill),
+            chipOutlineRatio:
+              ratio(over(chipStyle.borderTopColor, bubble.backgroundColor), fill),
+            dividerRatio:
+              ratio(over(style.borderTopColor, bubble.backgroundColor), fill),
+            buttonOutlineRatio:
+              ratio(over(buttonStyle.borderTopColor, bubble.backgroundColor), fill),
+            buttonLabelRatio: ratio(
+              parse(buttonStyle.color).rgb,
+              over(buttonStyle.backgroundColor, bubble.backgroundColor)
+            ),
             metaBackground: style.backgroundColor,
-            metaBorder: [style.borderTopWidth, style.borderRightWidth,
-              style.borderBottomWidth, style.borderLeftWidth],
-            reviewBorder: [review.borderTopWidth, review.borderRightWidth,
-              review.borderBottomWidth, review.borderLeftWidth],
+            dividerWidth: style.borderTopWidth,
+            chipBackground: chipStyle.backgroundColor,
+            buttonBorder: [buttonStyle.borderTopWidth, buttonStyle.borderRightWidth,
+              buttonStyle.borderBottomWidth, buttonStyle.borderLeftWidth],
+            buttonHeight: button.getBoundingClientRect().height,
+            buttonHasIcon: Boolean(button.querySelector('svg')),
             opacity: style.opacity,
             bubbleBackground: bubble.backgroundColor,
-            bubbleRgb: parse(bubble.backgroundColor)
+            bubbleRgb: fill
           };
         }"""
     )
     assert appearance["ratio"] >= 4.5
+    assert appearance["chipTextRatio"] >= 4.5
+    assert appearance["chipOutlineRatio"] >= 3
+    assert appearance["dividerRatio"] >= 3
+    assert appearance["buttonOutlineRatio"] >= 3
+    assert appearance["buttonLabelRatio"] >= 4.5
+    # The breakdown is separated from the question by a rule, not by a nested card.
     assert appearance["metaBackground"] == "rgba(0, 0, 0, 0)"
-    assert appearance["metaBorder"] == ["0px"] * 4
-    assert appearance["reviewBorder"] == ["0px"] * 4
+    assert appearance["dividerWidth"] == "1px"
+    # An outlined value pill keeps the number at the bubble's own text contrast.
+    assert appearance["chipBackground"] == "rgba(0, 0, 0, 0)"
+    assert appearance["buttonBorder"] == ["1px"] * 4
+    assert appearance["buttonHeight"] >= 36
+    assert appearance["buttonHasIcon"] is True
     assert appearance["opacity"] == "1"
     assert appearance["bubbleBackground"] != "rgba(0, 0, 0, 0)"
     assert appearance["bubbleRgb"][2] > appearance["bubbleRgb"][1]
@@ -304,7 +379,7 @@ def test_assistant_thinking_message_is_a_compact_bubble(assistant_dash):
     def hold_reply(route):
         held_routes.append(route)
 
-    page.route("**/api/assistant/query", hold_reply)
+    page.route("**/api/assistant/stream", hold_reply)
     page.locator("#assistant-btn").click()
     page.locator("#ast-question").fill("Wait for this answer")
     page.locator("#ast-send").click()
@@ -317,21 +392,18 @@ def test_assistant_thinking_message_is_a_compact_bubble(assistant_dash):
     assert box is not None and box["width"] < 80
 
     assert held_routes
-    held_routes[0].fulfill(
-        status=200,
-        content_type="application/json",
-        body=json.dumps(
-            {
-                "answer": "Done [R1].",
-                "evidence": [],
-                "provider": "fake",
-                "model": "offline-fake",
-                "context_model": None,
-                "reports_considered": 1,
-                "truncated": False,
-                "scope": "all readable reports",
-            }
-        ),
+    _fulfil_stream(
+        held_routes[0],
+        {
+            "answer": "Done [R1].",
+            "evidence": [],
+            "provider": "fake",
+            "model": "offline-fake",
+            "context_model": None,
+            "reports_considered": 1,
+            "truncated": False,
+            "scope": "all readable reports",
+        },
     )
     expect(waiting).to_have_count(0)
     expect(page.locator(".ast-msg.assistant .ast-copy")).to_have_count(1)
@@ -345,42 +417,39 @@ def test_assistant_copies_raw_answer_with_fallback_and_failure_feedback(
     raw_answer = "## Result\n\nUse **bold** and `node_id` [R1]."
 
     def answer_reply(route):
-        route.fulfill(
-            status=200,
-            content_type="application/json",
-            body=json.dumps(
-                {
-                    "answer": raw_answer,
-                    "evidence": [],
-                    "provider": "fake",
-                    "model": "offline-fake",
-                    "context_model": None,
-                    "reports_considered": 1,
-                    # A long traceback was clipped, but no report/case was lost to the
-                    # shared evidence budget. This must not show the scary warning.
-                    "truncated": True,
-                    "context_limited": False,
-                    "scope": "all readable reports",
-                    "provider_input_bytes": 1_024,
-                    "prompt_bytes": {
-                        "system": 1,
-                        "user": 1_021,
-                        "context": 1,
-                        "history": 0,
-                        "structure": 1,
-                        "total": 1_024,
-                    },
-                    "token_usage": {
-                        "input_tokens": 1_234,
-                        "output_tokens": 56,
-                        "total_tokens": 1_290,
-                        "cached_input_tokens": 0,
-                    },
-                }
-            ),
+        _fulfil_stream(
+            route,
+            {
+                "answer": raw_answer,
+                "evidence": [],
+                "provider": "fake",
+                "model": "offline-fake",
+                "context_model": None,
+                "reports_considered": 1,
+                # A long traceback was clipped, but no report/case was lost to the
+                # shared evidence budget. This must not show the scary warning.
+                "truncated": True,
+                "context_limited": False,
+                "scope": "all readable reports",
+                "provider_input_bytes": 1_024,
+                "prompt_bytes": {
+                    "system": 1,
+                    "user": 1_021,
+                    "context": 1,
+                    "history": 0,
+                    "structure": 1,
+                    "total": 1_024,
+                },
+                "token_usage": {
+                    "input_tokens": 1_234,
+                    "output_tokens": 56,
+                    "total_tokens": 1_290,
+                    "cached_input_tokens": 0,
+                },
+            },
         )
 
-    page.route("**/api/assistant/query", answer_reply)
+    page.route("**/api/assistant/stream", answer_reply)
     page.locator("#assistant-btn").click()
     page.locator("#ast-question").fill("Copy this")
     page.locator("#ast-send").click()
@@ -454,26 +523,23 @@ def test_assistant_marks_actual_shared_budget_loss_as_context_limited(
     page = assistant_dash.page
 
     def limited_reply(route):
-        route.fulfill(
-            status=200,
-            content_type="application/json",
-            body=json.dumps(
-                {
-                    "answer": "Only the fitting evidence was inspected [R1].",
-                    "evidence": [],
-                    "provider": "fake",
-                    "model": "offline-fake",
-                    "context_model": None,
-                    "reports_considered": 100,
-                    "truncated": True,
-                    "context_limited": True,
-                    "scope": "all readable reports",
-                    "token_usage": None,
-                }
-            ),
+        _fulfil_stream(
+            route,
+            {
+                "answer": "Only the fitting evidence was inspected [R1].",
+                "evidence": [],
+                "provider": "fake",
+                "model": "offline-fake",
+                "context_model": None,
+                "reports_considered": 100,
+                "truncated": True,
+                "context_limited": True,
+                "scope": "all readable reports",
+                "token_usage": None,
+            },
         )
 
-    page.route("**/api/assistant/query", limited_reply)
+    page.route("**/api/assistant/stream", limited_reply)
     page.locator("#assistant-btn").click()
     page.locator("#ast-question").fill("Inspect the full scope")
     page.locator("#ast-send").click()
@@ -493,40 +559,37 @@ def test_assistant_warns_when_provider_truncates_the_answer(assistant_dash):
     )
 
     def output_limited_reply(route):
-        route.fulfill(
-            status=200,
-            content_type="application/json",
-            body=json.dumps(
-                {
-                    "answer": partial_answer,
-                    "evidence": [],
-                    "provider": "anthropic",
-                    "model": "claude-sonnet-5",
-                    "context_model": None,
-                    "reports_considered": 2,
-                    "truncated": False,
-                    "context_limited": False,
-                    "output_limited": True,
-                    "scope": "two selected reports",
-                    "prompt_bytes": {
-                        "system": 2_000,
-                        "user": 30,
-                        "context": 3_000,
-                        "history": 1_200,
-                        "structure": 202,
-                    },
-                    "report_context": None,
-                    "token_usage": {
-                        "input_tokens": 6_432,
-                        "output_tokens": 1_536,
-                        "total_tokens": 7_968,
-                        "cached_input_tokens": 0,
-                    },
-                }
-            ),
+        _fulfil_stream(
+            route,
+            {
+                "answer": partial_answer,
+                "evidence": [],
+                "provider": "anthropic",
+                "model": "claude-sonnet-5",
+                "context_model": None,
+                "reports_considered": 2,
+                "truncated": False,
+                "context_limited": False,
+                "output_limited": True,
+                "scope": "two selected reports",
+                "prompt_bytes": {
+                    "system": 2_000,
+                    "user": 30,
+                    "context": 3_000,
+                    "history": 1_200,
+                    "structure": 202,
+                },
+                "report_context": None,
+                "token_usage": {
+                    "input_tokens": 6_432,
+                    "output_tokens": 1_536,
+                    "total_tokens": 7_968,
+                    "cached_input_tokens": 0,
+                },
+            },
         )
 
-    page.route("**/api/assistant/query", output_limited_reply)
+    page.route("**/api/assistant/stream", output_limited_reply)
     page.locator("#assistant-btn").click()
     page.locator("#ast-question").fill("Compare these two runs")
     page.locator("#ast-send").click()
@@ -560,38 +623,35 @@ def test_assistant_context_overview_is_exact_safe_and_copyable(assistant_dash):
     context_bytes = len(report_context.encode())
 
     def context_reply(route):
-        route.fulfill(
-            status=200,
-            content_type="application/json",
-            body=json.dumps(
-                {
-                    "answer": "The readable report was inspected [R1].",
-                    "evidence": [],
-                    "provider": "fake",
-                    "model": "offline-fake",
-                    "context_model": None,
-                    "reports_considered": 1,
-                    "truncated": False,
-                    "context_limited": False,
-                    "output_limited": False,
-                    "scope": "all readable reports",
-                    "prompt_bytes": {
-                        "system": 1,
-                        "user": 1,
-                        "context": context_bytes,
-                        "history": 0,
-                        "structure": 1,
-                    },
-                    "report_context": {
-                        "content": report_context,
-                        "format": "direct-snapshot-jsonl",
-                        "bytes": context_bytes,
-                    },
-                }
-            ),
+        _fulfil_stream(
+            route,
+            {
+                "answer": "The readable report was inspected [R1].",
+                "evidence": [],
+                "provider": "fake",
+                "model": "offline-fake",
+                "context_model": None,
+                "reports_considered": 1,
+                "truncated": False,
+                "context_limited": False,
+                "output_limited": False,
+                "scope": "all readable reports",
+                "prompt_bytes": {
+                    "system": 1,
+                    "user": 1,
+                    "context": context_bytes,
+                    "history": 0,
+                    "structure": 1,
+                },
+                "report_context": {
+                    "content": report_context,
+                    "format": "direct-snapshot-jsonl",
+                    "bytes": context_bytes,
+                },
+            },
         )
 
-    page.route("**/api/assistant/query", context_reply)
+    page.route("**/api/assistant/stream", context_reply)
     page.locator("#assistant-btn").click()
     page.locator("#ast-question").fill("What was sent?")
     page.locator("#ast-send").click()
@@ -675,28 +735,25 @@ def test_assistant_sums_provider_tokens_for_the_whole_chat_session(assistant_das
             if total is not None
             else None
         )
-        route.fulfill(
-            status=200,
-            content_type="application/json",
-            body=json.dumps(
-                {
-                    "answer": f"Answer {calls}",
-                    "evidence": [],
-                    "provider": "fake",
-                    "model": "offline-fake",
-                    "context_model": None,
-                    "reports_considered": 1,
-                    "truncated": False,
-                    "context_limited": False,
-                    "output_limited": False,
-                    "scope": "all readable reports",
-                    "token_usage": usage,
-                    "report_context": None,
-                }
-            ),
+        _fulfil_stream(
+            route,
+            {
+                "answer": f"Answer {calls}",
+                "evidence": [],
+                "provider": "fake",
+                "model": "offline-fake",
+                "context_model": None,
+                "reports_considered": 1,
+                "truncated": False,
+                "context_limited": False,
+                "output_limited": False,
+                "scope": "all readable reports",
+                "token_usage": usage,
+                "report_context": None,
+            },
         )
 
-    page.route("**/api/assistant/query", token_reply)
+    page.route("**/api/assistant/stream", token_reply)
     page.locator("#assistant-btn").click()
     for index in range(len(totals)):
         page.locator("#ast-question").fill(f"Question {index + 1}")
@@ -895,24 +952,21 @@ def test_assistant_renders_safe_markdown_without_executing_model_html(assistant_
     )
 
     def markdown_reply(route):
-        route.fulfill(
-            status=200,
-            content_type="application/json",
-            body=json.dumps(
-                {
-                    "answer": answer,
-                    "evidence": [],
-                    "provider": "fake",
-                    "model": "offline-fake",
-                    "context_model": None,
-                    "reports_considered": 2,
-                    "truncated": False,
-                    "scope": "all readable reports",
-                }
-            ),
+        _fulfil_stream(
+            route,
+            {
+                "answer": answer,
+                "evidence": [],
+                "provider": "fake",
+                "model": "offline-fake",
+                "context_model": None,
+                "reports_considered": 2,
+                "truncated": False,
+                "scope": "all readable reports",
+            },
         )
 
-    page.route("**/api/assistant/query", markdown_reply)
+    page.route("**/api/assistant/stream", markdown_reply)
     page.locator("#assistant-btn").click()
     page.locator("#ast-question").fill("Show markdown")
     page.locator("#ast-send").click()
@@ -950,24 +1004,21 @@ def test_assistant_renders_code_after_underscore_labels_and_nested_emphasis(
     )
 
     def markdown_reply(route):
-        route.fulfill(
-            status=200,
-            content_type="application/json",
-            body=json.dumps(
-                {
-                    "answer": answer,
-                    "evidence": [],
-                    "provider": "fake",
-                    "model": "offline-fake",
-                    "context_model": None,
-                    "reports_considered": 1,
-                    "truncated": False,
-                    "scope": "all readable reports",
-                }
-            ),
+        _fulfil_stream(
+            route,
+            {
+                "answer": answer,
+                "evidence": [],
+                "provider": "fake",
+                "model": "offline-fake",
+                "context_model": None,
+                "reports_considered": 1,
+                "truncated": False,
+                "scope": "all readable reports",
+            },
         )
 
-    page.route("**/api/assistant/query", markdown_reply)
+    page.route("**/api/assistant/stream", markdown_reply)
     page.locator("#assistant-btn").click()
     page.locator("#ast-question").fill("Show identifiers")
     page.locator("#ast-send").click()
@@ -1030,4 +1081,361 @@ def test_assistant_explains_local_full_tree_mode_before_submit(assistant_dash):
     expect(limits.nth(1)).to_have_text("test cases: all in scope")
     expect(limits.nth(4)).to_have_text("external evidence ≤ 48 KiB")
     expect(limits.nth(5)).to_have_text("answer output ≤ 3072 tokens")
+    assert assistant_dash.errors == []
+
+
+def test_assistant_follow_up_survives_a_very_long_previous_answer(assistant_dash):
+    """A long answer used to poison the next question.
+
+    The browser replays the transcript, and the wire contract capped a turn at the prompt
+    clip, so one long answer made every follow-up fail validation until the chat was
+    cleared. The reply is now trimmed on the way out and accepted on the way in.
+    """
+    page = assistant_dash.page
+    page.evaluate(
+        """async () => {
+          const status = await fetch("api/assistant/status").then(r => r.json());
+          const key = "airflow-pytest-plugin:assistant:v2:" + location.pathname + ":"
+            + status.storage_namespace;
+          sessionStorage.setItem(key, JSON.stringify({version: 1, messages: [
+            {role: "user", text: "First question", evidence: [], reports: null,
+              truncated: false},
+            {role: "assistant", text: "Подробный разбор падений. ".repeat(900),
+              evidence: [], reports: 3, truncated: false}
+          ]}));
+        }"""
+    )
+    page.reload()
+    page.wait_for_selector("#assistant-btn:not([hidden])", timeout=20_000)
+    page.locator("#assistant-btn").click()
+    expect(page.locator(".ast-msg")).to_have_count(2)
+
+    page.locator("#ast-question").fill("And now?")
+    page.locator("#ast-send").click()
+
+    expect(page.locator(".ast-msg.assistant .ast-answer").last).to_contain_text(
+        "Offline assistant", timeout=15_000
+    )
+    expect(page.locator(".ast-answer.ast-error")).to_have_count(0)
+    history = page.locator(".ast-msg.user .ast-msg-meta").last
+    expect(history).to_contain_text("History")
+    assert assistant_dash.errors == []
+
+
+def test_assistant_does_not_show_a_zero_byte_breakdown_when_nothing_was_sent(
+    assistant_dash,
+):
+    """An empty scope never reaches a model, so a six-row 0 B table is a lie.
+
+    The API still reports zeros for auditability; the bubble says plainly that no request
+    left the server instead of rendering a breakdown of nothing.
+    """
+    page = assistant_dash.page
+    page.fill("#f-dag", "no-such-dag")
+    page.locator("#assistant-btn").click()
+    page.locator("#ast-question").fill("What failed?")
+    page.locator("#ast-send").click()
+
+    answer = page.locator(".ast-msg.assistant .ast-answer").last
+    expect(answer).to_contain_text("No readable reports", timeout=15_000)
+    meta = page.locator(".ast-msg.user .ast-msg-meta").last
+    expect(meta).to_be_visible()
+    expect(meta.locator(".ast-prompt-row")).to_have_count(0)
+    expect(meta).not_to_contain_text("0 B")
+    expect(meta.locator(".ast-context-review")).to_have_count(0)
+    assert assistant_dash.errors == []
+
+
+def test_empty_scope_reply_follows_the_dashboard_locale(assistant_dash):
+    """The server guesses the reply language from the question; the browser knows it.
+
+    A short or English question in a Russian dashboard used to answer in English.
+    """
+    page = assistant_dash.page
+    page.evaluate("localStorage.setItem('i18nextLng', 'ru')")
+    page.fill("#f-dag", "no-such-dag")
+    page.locator("#assistant-btn").click()
+    expect(page.locator("#ast-send-label")).to_have_text("Отправить", timeout=5_000)
+    page.locator("#ast-question").fill("wq")
+    page.locator("#ast-send").click()
+
+    answer = page.locator(".ast-msg.assistant .ast-answer").last
+    expect(answer).to_contain_text("нет доступных отчётов", timeout=15_000)
+    page.evaluate("localStorage.removeItem('i18nextLng')")
+    assert assistant_dash.errors == []
+
+
+def test_assistant_shows_the_answer_while_it_is_still_arriving(assistant_dash):
+    page = assistant_dash.page
+    held = []
+    page.route("**/api/assistant/stream", lambda route: held.append(route))
+    page.locator("#assistant-btn").click()
+    page.locator("#ast-question").fill("Stream it")
+    page.locator("#ast-send").click()
+
+    # Nothing yet: the compact three-dot bubble, and Send has become Stop.
+    expect(page.locator(".ast-msg.ast-waiting")).to_be_visible()
+    expect(page.locator("#ast-stop")).to_be_visible()
+    expect(page.locator("#ast-send")).to_be_hidden()
+
+    assert held
+    held[0].fulfill(
+        status=200,
+        content_type="text/event-stream",
+        body=(
+            "event: meta\ndata: "
+            + json.dumps(
+                {
+                    "provider": "fake",
+                    "model": "offline-fake",
+                    "context_model": None,
+                    "reports_considered": 2,
+                    "scope": "all readable reports",
+                    "prompt_bytes": {
+                        "system": 10,
+                        "user": 5,
+                        "context": 20,
+                        "history": 0,
+                        "structure": 5,
+                        "total": 40,
+                    },
+                    "provider_input_bytes": 40,
+                    "report_context": None,
+                }
+            )
+            + "\n\n"
+            + "event: delta\ndata: "
+            + json.dumps({"text": "Partial "})
+            + "\n\n"
+            + "event: delta\ndata: "
+            + json.dumps({"text": "answer."})
+            + "\n\n"
+            + "event: done\ndata: "
+            + json.dumps(
+                {
+                    "answer": "Partial answer.",
+                    "evidence": [],
+                    "provider": "fake",
+                    "model": "offline-fake",
+                    "context_model": None,
+                    "reports_considered": 2,
+                    "truncated": False,
+                    "context_limited": False,
+                    "output_limited": False,
+                    "scope": "all readable reports",
+                    "provider_input_bytes": 40,
+                    "prompt_bytes": {
+                        "system": 10,
+                        "user": 5,
+                        "context": 20,
+                        "history": 0,
+                        "structure": 5,
+                        "total": 40,
+                    },
+                    "token_usage": None,
+                    "report_context": None,
+                }
+            )
+            + "\n\n"
+        ),
+    )
+
+    answer = page.locator(".ast-msg.assistant .ast-answer").last
+    expect(answer).to_have_text("Partial answer.")
+    # The byte breakdown comes from `meta`, so it is on screen before the answer ends.
+    expect(page.locator(".ast-msg.user .ast-msg-meta")).to_contain_text("Sent to LLM")
+    expect(page.locator("#ast-send")).to_be_visible()
+    expect(page.locator("#ast-stop")).to_be_hidden()
+    expect(page.locator(".ast-caret")).to_have_count(0)
+    assert assistant_dash.errors == []
+
+
+def test_assistant_keeps_a_streaming_answer_when_the_window_is_reopened(assistant_dash):
+    """Closing the window used to drop the in-flight answer and leave a bare question."""
+    page = assistant_dash.page
+    held = []
+    page.route("**/api/assistant/stream", lambda route: held.append(route))
+    page.locator("#assistant-btn").click()
+    page.locator("#ast-question").fill("Close me while thinking")
+    page.locator("#ast-send").click()
+    expect(page.locator(".ast-msg.ast-waiting")).to_be_visible()
+
+    page.locator("#ast-close").click()
+    expect(page.locator("#assistant-dialog")).to_be_hidden()
+    page.locator("#assistant-btn").click()
+
+    # The pending answer belongs to the transcript, so re-rendering restores it.
+    expect(page.locator(".ast-msg")).to_have_count(2)
+    expect(page.locator(".ast-msg.ast-waiting")).to_be_visible()
+    expect(page.locator("#ast-stop")).to_be_visible()
+
+    assert held
+    _fulfil_stream(
+        held[0],
+        {
+            "answer": "Finished after reopening [R1].",
+            "evidence": [],
+            "provider": "fake",
+            "model": "offline-fake",
+            "context_model": None,
+            "reports_considered": 1,
+            "truncated": False,
+            "context_limited": False,
+            "output_limited": False,
+            "scope": "all readable reports",
+            "provider_input_bytes": 40,
+            "prompt_bytes": {
+                "system": 10,
+                "user": 5,
+                "context": 20,
+                "history": 0,
+                "structure": 5,
+                "total": 40,
+            },
+            "token_usage": None,
+            "report_context": None,
+        },
+    )
+
+    expect(page.locator(".ast-msg.assistant .ast-answer").last).to_contain_text(
+        "Finished after reopening"
+    )
+    # The breakdown lands on the question that is actually on screen, not a detached node.
+    expect(page.locator(".ast-msg.user .ast-msg-meta")).to_contain_text("Sent to LLM")
+    expect(page.locator(".ast-msg.assistant .ast-copy")).to_be_visible()
+    assert assistant_dash.errors == []
+
+
+def test_assistant_stop_keeps_the_partial_answer_and_frees_the_input(assistant_dash):
+    page = assistant_dash.page
+    page.route(
+        "**/api/assistant/stream",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="text/event-stream",
+            # No `done`: the connection is what the browser aborts.
+            body=(
+                "event: meta\ndata: "
+                + json.dumps(
+                    {
+                        "provider": "fake",
+                        "model": "offline-fake",
+                        "context_model": None,
+                        "reports_considered": 1,
+                        "scope": "all readable reports",
+                        "prompt_bytes": {
+                            "system": 10,
+                            "user": 5,
+                            "context": 20,
+                            "history": 0,
+                            "structure": 5,
+                            "total": 40,
+                        },
+                        "provider_input_bytes": 40,
+                        "report_context": None,
+                    }
+                )
+                + "\n\n"
+                + "event: delta\ndata: "
+                + json.dumps({"text": "Half an answer"})
+                + "\n\n"
+            ),
+        ),
+    )
+    page.locator("#assistant-btn").click()
+    page.locator("#ast-question").fill("Stop me")
+    page.locator("#ast-send").click()
+
+    answer = page.locator(".ast-msg.assistant .ast-answer").last
+    expect(answer).to_contain_text("Half an answer")
+    expect(page.locator(".ast-stopped-note")).to_be_visible()
+    expect(page.locator("#ast-send")).to_be_visible()
+    expect(page.locator("#ast-question")).to_be_enabled()
+    expect(page.locator(".ast-msg.assistant .ast-copy")).to_be_visible()
+    assert assistant_dash.errors == []
+
+
+def test_assistant_keeps_a_partial_answer_when_the_provider_fails_midway(
+    assistant_dash,
+):
+    """A provider that dies half-way through must not erase what it already wrote."""
+    page = assistant_dash.page
+    page.route(
+        "**/api/assistant/stream",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="text/event-stream",
+            body=(
+                "event: meta\ndata: "
+                + json.dumps(
+                    {
+                        "provider": "fake",
+                        "model": "offline-fake",
+                        "context_model": None,
+                        "reports_considered": 1,
+                        "scope": "all readable reports",
+                        "prompt_bytes": {
+                            "system": 10,
+                            "user": 5,
+                            "context": 20,
+                            "history": 0,
+                            "structure": 5,
+                            "total": 40,
+                        },
+                        "provider_input_bytes": 40,
+                        "report_context": None,
+                    }
+                )
+                + "\n\n"
+                + "event: delta\ndata: "
+                + json.dumps({"text": "The first finding is"})
+                + "\n\n"
+                + "event: error\ndata: "
+                + json.dumps({"detail": "upstream refused", "status": 502})
+                + "\n\n"
+            ),
+        ),
+    )
+    page.locator("#assistant-btn").click()
+    page.locator("#ast-question").fill("Break midway")
+    page.locator("#ast-send").click()
+
+    expect(page.locator(".ast-msg.assistant .ast-answer").last).to_contain_text(
+        "The first finding is"
+    )
+    expect(page.locator(".ast-stopped-note")).to_contain_text("upstream refused")
+    expect(page.locator(".ast-answer.ast-error")).to_have_count(0)
+    assert assistant_dash.errors == []
+
+
+def test_context_overview_returns_focus_after_the_answer_re_renders(assistant_dash):
+    """Closing the overview must land on its own button, not fall back to the input.
+
+    The answer arrives in pieces, so the bubble holding the button is rebuilt while the
+    overview is open. Holding a node reference alone left focus pointing at a detached
+    element and silently dropped the user back into the textarea.
+    """
+    page = assistant_dash.page
+    page.locator("#assistant-btn").click()
+    page.locator("#ast-question").fill("Rebuild under me")
+    page.locator("#ast-send").click()
+    expect(page.locator(".ast-msg.assistant .ast-answer").last).to_contain_text(
+        "Offline assistant", timeout=15_000
+    )
+    review = page.locator(".ast-msg.user .ast-context-review").last
+    review.click()
+    expect(page.locator("#ast-report-context-dialog")).to_be_visible()
+
+    # Rebuild every bubble while the overview is open, exactly as a late `done` event or
+    # a locale change does.
+    page.evaluate("() => localStorage.setItem('i18nextLng', 'ru')")
+    expect(page.locator("#ast-send-label")).to_have_text("Отправить", timeout=5_000)
+    expect(page.locator(".ast-msg.user .ast-context-review").last).to_have_text(
+        "Обзор контекста"
+    )
+
+    page.locator("#ast-report-context-close").click()
+    expect(page.locator("#ast-report-context-dialog")).to_be_hidden()
+    expect(page.locator(".ast-msg.user .ast-context-review").last).to_be_focused()
+    page.evaluate("localStorage.removeItem('i18nextLng')")
     assert assistant_dash.errors == []

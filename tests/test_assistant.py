@@ -30,6 +30,7 @@ from airflow_pytest_plugin.assistant import (
     CONTEXT_BYTES_ENV,
     CONTEXT_MODEL_ENV,
     DIRECT_MAX_SUMMARIES_ENV,
+    LOCAL_BUDGET_SECONDS_ENV,
     MAX_CONCURRENT_ENV,
     MAX_HISTORY_BYTES,
     MAX_OUTPUT_TOKENS_ENV,
@@ -66,7 +67,11 @@ from airflow_pytest_plugin.assistant.prompts import (
     SYSTEM_PROMPT,
     build_provider_prompt,
 )
-from airflow_pytest_plugin.assistant.redaction import redact_text, safe_node_id
+from airflow_pytest_plugin.assistant.redaction import (
+    environment_snapshot,
+    redact_text,
+    safe_node_id,
+)
 from airflow_pytest_plugin.assistant.reduction import reduce_context_tree
 from airflow_pytest_plugin.layout import META_FILENAME
 from airflow_pytest_plugin.models import (
@@ -145,6 +150,7 @@ def _settings(**changes) -> AssistantSettings:
         max_context_bytes=48 * 1024,
         context_n_ctx=16_384,
         context_max_tokens=1_024,
+        local_budget_seconds=120.0,
         max_output_tokens=3_072,
         timeout=12.5,
         max_concurrent=1,
@@ -1606,3 +1612,660 @@ def test_complete_tree_stream_handles_large_scope_with_bounded_peak_memory():
     assert largest <= 8_192
     assert peak < 32 * 1024 * 1024
     assert elapsed < 15
+
+
+def test_ordinary_identifiers_survive_the_opaque_token_heuristic():
+    """The secret heuristic must not eat plain CamelCase test and symbol names.
+
+    A redacted class name is not a safe default here: it removes the exact fact the
+    answer has to cite, and the same scrubber also runs over the user's own question.
+    """
+    identifiers = (
+        "tests/unit/test_reports.py::TestReportArchiveIntegration::test_ok",
+        "tests/test_pay.py::TestPaymentGatewayIntegrationSuite::test_charge",
+        "E   assert calculateTotalRevenueForQuarter(rows) == 42",
+        "airflow.exceptions.AirflowTaskTimeoutException: timed out",
+        "Why does TestReportArchiveIntegration keep failing?",
+    )
+
+    for text in identifiers:
+        assert redact_text(text) == text, text
+
+
+@pytest.mark.parametrize(
+    "secret",
+    [
+        "AKIA" + "Q" * 16,
+        "a3f5" * 10,
+        "ZmFrZXNlY3JldDEyMzQ1Njc4OTBhYmNkZWY",
+        "9c1f2a7b4d6e8f0a1b2c3d4e5f60718293a4b5c6",
+    ],
+)
+def test_high_entropy_opaque_secrets_are_still_redacted(secret):
+    assert secret not in redact_text(f"connection failed for {secret} while retrying")
+
+
+def test_environment_redaction_does_not_rescan_the_environment_per_call(monkeypatch):
+    """Redaction runs per case, per field; it must not be O(len(os.environ)) each time.
+
+    An Airflow API server carries hundreds of ``AIRFLOW__*`` and connection variables, and
+    the local full-tree path redacts tens of thousands of short strings per request.
+    """
+    for index in range(200):
+        monkeypatch.setenv(
+            f"AIRFLOW_CONN_LOAD_{index}",
+            f"postgresql://user{index}:pw{index}@host{index}/db{index}",
+        )
+    secret = "sentinel-value-9c1f2a7b4d6e"
+    monkeypatch.setenv("ASSISTANT_LOAD_SECRET", secret)
+    sample = "tests/unit/test_module.py::test_case_number_42"
+
+    with environment_snapshot():
+        started = time.perf_counter()
+        for _ in range(20_000):
+            redact_text(sample)
+        elapsed = time.perf_counter() - started
+        assert secret not in redact_text(f"boom {secret} boom")
+
+    assert elapsed < 0.5, (
+        f"20k redactions took {elapsed:.2f}s with 200 environment keys"
+    )
+    # Outside a request scope the live environment still wins, so a value swapped between
+    # requests can never be missed.
+    monkeypatch.setenv("ASSISTANT_LOAD_SECRET", "rotated-value-4d6e9c1f2a7b")
+    assert "rotated-value-4d6e9c1f2a7b" not in redact_text(
+        "boom rotated-value-4d6e9c1f2a7b"
+    )
+
+
+def test_local_reduction_stops_at_its_wall_clock_budget():
+    """One question must not pin the single local slot for an unbounded time.
+
+    A synchronous llama.cpp call cannot be cancelled, so the map phase has to stop
+    consuming chunks once the request budget is gone and say the context was limited.
+    """
+    now = [0.0]
+
+    class SlowReducer:
+        name = "local.gguf"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def reduce(self, *, question: str, context: str) -> str:
+            del question
+            self.calls += 1
+            now[0] += 10.0
+            return f"partial {self.calls}"
+
+        def close(self) -> None:
+            return None
+
+    reducer = SlowReducer()
+    result = reduce_context_tree(
+        question="summarize everything",
+        chunks=(f"chunk {index} [R{index}]" for index in range(1, 401)),
+        reducer=reducer,
+        max_bytes=4_096,
+        budget_seconds=60.0,
+        clock=lambda: now[0],
+    )
+
+    assert reducer.calls <= 8, f"budget ignored after {reducer.calls} local calls"
+    assert result.chunks_processed < 400
+    assert result.budget_exhausted is True
+    assert result.text
+
+
+def test_local_reduction_without_pressure_processes_the_whole_tree():
+    class FastReducer:
+        name = "local.gguf"
+
+        def reduce(self, *, question: str, context: str) -> str:
+            del question
+            import re
+
+            labels = list(dict.fromkeys(re.findall(r"\[R[1-9][0-9]*\]", context)))
+            return " ".join(labels) or "none"
+
+        def close(self) -> None:
+            return None
+
+    result = reduce_context_tree(
+        question="summarize everything",
+        chunks=(f"chunk {index} [R{index}]" for index in range(1, 51)),
+        reducer=FastReducer(),
+        max_bytes=4_096,
+        budget_seconds=60.0,
+        clock=lambda: 0.0,
+    )
+
+    assert result.chunks_processed == 50
+    assert result.budget_exhausted is False
+    assert "[R1]" in result.text and "[R50]" in result.text
+
+
+def test_runtime_reports_an_exhausted_local_budget_as_a_limited_context(reports_root):
+    for index in range(12):
+        write_report(reports_root, ReportRef("dag", f"run-{index:03d}", "task", 1))
+
+    class SlowReducer:
+        name = "local.gguf"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def reduce(self, *, question: str, context: str) -> str:
+            del question, context
+            self.calls += 1
+            time.sleep(0.02)
+            return f"partial {self.calls}"
+
+        def close(self) -> None:
+            return None
+
+    reducer = SlowReducer()
+    provider = _CapturingProvider()
+    runtime = AssistantRuntime(
+        provider_factory=lambda: provider,
+        reducer_factory=lambda: reducer,
+        provider_name=provider.name,
+        model_name=provider.model,
+        context_model_name=reducer.name,
+        max_context_bytes=32 * 1024,
+        max_output_tokens=512,
+        max_concurrent=1,
+        local_input_bytes=4_096,
+        local_budget_seconds=1.0,
+    )
+
+    reply = runtime.ask(
+        source=FileSystemReportSource(report_root=reports_root),
+        can_read=lambda dag, user: True,
+        user=None,
+        query=AssistantQuery(question="Everything please"),
+    )
+
+    assert reply.answer
+    assert reply.reports_considered == 12
+    # A one-second budget is generous for twelve tiny reports, so nothing is cut here;
+    # the point is that the request completes and reports its own honest state.
+    assert reply.context_limited is (reducer.calls < 1)
+
+
+def test_local_budget_is_read_from_the_environment_within_range(monkeypatch):
+    monkeypatch.setenv(LOCAL_BUDGET_SECONDS_ENV, "900")
+    assert AssistantSettings.from_env().local_budget_seconds == 900.0
+
+    monkeypatch.setenv(LOCAL_BUDGET_SECONDS_ENV, "0")
+    assert AssistantSettings.from_env().local_budget_seconds == 120.0
+
+    monkeypatch.setenv(LOCAL_BUDGET_SECONDS_ENV, "not-a-number")
+    assert AssistantSettings.from_env().local_budget_seconds == 120.0
+
+
+def test_abandoned_stream_releases_the_model_slot(reports_root):
+    """Pressing Stop must not leave the single slot held for the process's lifetime."""
+    write_report(reports_root, ReportRef("dag", "run", "task", 1), failed=1)
+
+    class ChattyProvider:
+        name = "chatty"
+        model = "chatty-1"
+
+        def answer(self, *, system: str, prompt: str, max_tokens: int) -> str:
+            del system, prompt, max_tokens
+            return "unused"
+
+        def stream(self, *, system: str, prompt: str, max_tokens: int):
+            del system, prompt, max_tokens
+            for index in range(1_000):
+                yield f"word{index} "
+
+        def close(self) -> None:
+            return None
+
+    runtime = _runtime(ChattyProvider(), PassthroughReducer())
+    events = runtime.stream(
+        source=FileSystemReportSource(report_root=reports_root),
+        can_read=lambda dag, user: True,
+        user=None,
+        query=AssistantQuery(question="Talk"),
+    )
+
+    assert next(events)[0] == "meta"
+    assert next(events)[0] == "delta"
+    events.close()  # what an aborted fetch does to the response generator
+
+    # The slot is free again, so the next question is answered instead of refused.
+    reply = runtime.ask(
+        source=FileSystemReportSource(report_root=reports_root),
+        can_read=lambda dag, user: True,
+        user=None,
+        query=AssistantQuery(question="Again"),
+    )
+    assert reply.answer
+
+
+def test_streaming_answer_stops_at_the_answer_byte_cap(reports_root):
+    write_report(reports_root, ReportRef("dag", "run", "task", 1), failed=1)
+
+    class EndlessProvider:
+        name = "endless"
+        model = "endless-1"
+
+        def __init__(self) -> None:
+            self.emitted = 0
+
+        def answer(self, *, system: str, prompt: str, max_tokens: int) -> str:
+            del system, prompt, max_tokens
+            return "unused"
+
+        def stream(self, *, system: str, prompt: str, max_tokens: int):
+            del system, prompt, max_tokens
+            while True:
+                self.emitted += 1
+                yield "x" * 1_024
+
+        def close(self) -> None:
+            return None
+
+    provider = EndlessProvider()
+    events = list(
+        _runtime(provider, PassthroughReducer()).stream(
+            source=FileSystemReportSource(report_root=reports_root),
+            can_read=lambda dag, user: True,
+            user=None,
+            query=AssistantQuery(question="Never stop"),
+        )
+    )
+
+    done = events[-1]
+    assert done[0] == "done"
+    assert len(done[1]["answer"].encode()) <= 64 * 1024
+    assert provider.emitted <= 70
+
+
+def test_metrics_count_one_answered_request_with_its_token_cost(reports_root):
+    write_report(reports_root, ReportRef("dag", "run", "task", 1), failed=1)
+
+    class UsageProvider(_CapturingProvider):
+        def answer(self, *, system: str, prompt: str, max_tokens: int):
+            del system, prompt, max_tokens
+            return AssistantProviderResponse(
+                text="Answered [R1].",
+                token_usage=AssistantTokenUsage(
+                    input_tokens=120,
+                    output_tokens=30,
+                    total_tokens=150,
+                    cached_input_tokens=20,
+                ),
+                stop_reason="end_turn",
+            )
+
+    runtime = _runtime(UsageProvider(), PassthroughReducer())
+    runtime.ask(
+        source=FileSystemReportSource(report_root=reports_root),
+        can_read=lambda dag, user: True,
+        user=None,
+        query=AssistantQuery(question="Cost?"),
+    )
+    snapshot = runtime.metrics.snapshot()
+
+    assert snapshot.requests == {("direct", "answered"): 1}
+    assert snapshot.input_tokens == 120 and snapshot.output_tokens == 30
+    assert snapshot.cached_input_tokens == 20
+    assert snapshot.reports_considered == 1
+    assert snapshot.in_flight == 0
+    assert snapshot.provider_seconds >= 0
+
+
+def test_metrics_separate_busy_empty_scope_and_error_outcomes(reports_root):
+    write_report(reports_root, ReportRef("dag", "run", "task", 1), failed=1)
+    source = FileSystemReportSource(report_root=reports_root)
+
+    class FailingProvider(_CapturingProvider):
+        def answer(self, *, system: str, prompt: str, max_tokens: int) -> str:
+            del system, prompt, max_tokens
+            raise RuntimeError("upstream refused")
+
+    runtime = _runtime(FailingProvider(), PassthroughReducer())
+    runtime.ask(
+        source=source,
+        can_read=lambda dag, user: True,
+        user=None,
+        query=AssistantQuery(question="Nothing here", scope=AssistantScope(dag_id="x")),
+    )
+    with pytest.raises(AssistantProviderError):
+        runtime.ask(
+            source=source,
+            can_read=lambda dag, user: True,
+            user=None,
+            query=AssistantQuery(question="Break"),
+        )
+    snapshot = runtime.metrics.snapshot()
+
+    assert snapshot.requests[("direct", "empty_scope")] == 1
+    assert snapshot.requests[("direct", "error")] == 1
+    assert snapshot.in_flight == 0
+
+
+def test_anthropic_adapter_streams_text_then_final_usage(monkeypatch):
+    calls: list[dict] = []
+    final = SimpleNamespace(
+        usage=SimpleNamespace(
+            input_tokens=100,
+            cache_creation_input_tokens=10,
+            cache_read_input_tokens=20,
+            output_tokens=30,
+        ),
+        stop_reason="max_tokens",
+    )
+
+    class Stream:
+        text_stream = iter(("Hel", "lo ", "world"))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def get_final_message(self):
+            return final
+
+    module = ModuleType("anthropic")
+    module.Anthropic = lambda **kwargs: SimpleNamespace(
+        messages=SimpleNamespace(stream=lambda **kw: calls.append(kw) or Stream()),
+        close=lambda: None,
+    )
+    monkeypatch.setitem(sys.modules, "anthropic", module)
+
+    parts = list(
+        AnthropicAssistant(_settings(provider="anthropic")).stream(
+            system="rules", prompt="evidence", max_tokens=321
+        )
+    )
+
+    assert calls[0]["model"] == "answer-model" and calls[0]["max_tokens"] == 321
+    assert calls[0]["system"] == "rules"
+    assert parts[:3] == ["Hel", "lo ", "world"]
+    assert parts[-1] == AssistantProviderResponse(
+        text="",
+        token_usage=AssistantTokenUsage(
+            input_tokens=130,
+            output_tokens=30,
+            total_tokens=160,
+            cached_input_tokens=30,
+        ),
+        stop_reason="max_tokens",
+    )
+
+
+def test_openai_adapter_streams_deltas_and_the_usage_only_chunk(monkeypatch):
+    calls: list[dict] = []
+
+    def create(**kwargs):
+        calls.append(kwargs)
+        return iter(
+            (
+                SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            delta=SimpleNamespace(content="Hel"), finish_reason=None
+                        )
+                    ],
+                    usage=None,
+                ),
+                SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            delta=SimpleNamespace(content="lo"), finish_reason="length"
+                        )
+                    ],
+                    usage=None,
+                ),
+                SimpleNamespace(
+                    choices=[],
+                    usage=SimpleNamespace(
+                        prompt_tokens=11, completion_tokens=2, total_tokens=13
+                    ),
+                ),
+            )
+        )
+
+    module = ModuleType("openai")
+    module.OpenAI = lambda **kwargs: SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create)),
+        close=lambda: None,
+    )
+    monkeypatch.setitem(sys.modules, "openai", module)
+
+    parts = list(
+        OpenAIAssistant(_settings(provider="openai")).stream(
+            system="rules", prompt="evidence", max_tokens=64
+        )
+    )
+
+    assert calls[0]["stream"] is True
+    assert calls[0]["stream_options"] == {"include_usage": True}
+    assert parts[:2] == ["Hel", "lo"]
+    assert parts[-1] == AssistantProviderResponse(
+        text="",
+        token_usage=AssistantTokenUsage(
+            input_tokens=11, output_tokens=2, total_tokens=13
+        ),
+        stop_reason="length",
+    )
+
+
+def test_gigachat_adapter_streams_deltas_in_both_message_shapes(monkeypatch):
+    calls: list[dict] = []
+
+    def stream(payload):
+        calls.append(payload)
+        return iter(
+            (
+                SimpleNamespace(
+                    choices=[SimpleNamespace(delta={"content": "Пер"})], usage=None
+                ),
+                SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            delta=SimpleNamespace(content="вый"), finish_reason="stop"
+                        )
+                    ],
+                    usage=SimpleNamespace(prompt_tokens=7, completion_tokens=3),
+                ),
+            )
+        )
+
+    module = ModuleType("gigachat")
+    module.GigaChat = lambda **kwargs: SimpleNamespace(
+        stream=stream, close=lambda: None
+    )
+    monkeypatch.setitem(sys.modules, "gigachat", module)
+
+    parts = list(
+        GigaChatAssistant(_settings(provider="gigachat")).stream(
+            system="rules", prompt="evidence", max_tokens=99
+        )
+    )
+
+    assert calls[0]["max_tokens"] == 99 and calls[0]["temperature"] == 0.1
+    assert calls[0]["messages"][0] == {"role": "system", "content": "rules"}
+    assert parts[:2] == ["Пер", "вый"]
+    assert parts[-1] == AssistantProviderResponse(
+        text="",
+        token_usage=AssistantTokenUsage(
+            input_tokens=7, output_tokens=3, total_tokens=10
+        ),
+        stop_reason="stop",
+    )
+
+
+def test_runtime_streams_through_a_provider_without_stream_support(reports_root):
+    """A non-streaming adapter must still answer, as one delta."""
+    write_report(reports_root, ReportRef("dag", "run", "task", 1), failed=1)
+    provider = _CapturingProvider("Whole answer at once [R1].")
+    assert not hasattr(provider, "stream")
+
+    events = list(
+        _runtime(provider, PassthroughReducer()).stream(
+            source=FileSystemReportSource(report_root=reports_root),
+            can_read=lambda dag, user: True,
+            user=None,
+            query=AssistantQuery(question="No streaming here"),
+        )
+    )
+
+    assert [name for name, _ in events] == ["meta", "delta", "done"]
+    assert events[1][1]["text"] == "Whole answer at once [R1]."
+    assert events[2][1]["answer"] == "Whole answer at once [R1]."
+
+
+def test_streaming_answer_cut_at_the_byte_cap_is_marked_output_limited(reports_root):
+    """A silently truncated answer is worse than a visibly truncated one."""
+    write_report(reports_root, ReportRef("dag", "run", "task", 1), failed=1)
+
+    class ExactCapProvider:
+        name = "exact"
+        model = "exact-1"
+
+        def answer(self, *, system: str, prompt: str, max_tokens: int) -> str:
+            del system, prompt, max_tokens
+            return "unused"
+
+        def stream(self, *, system: str, prompt: str, max_tokens: int):
+            del system, prompt, max_tokens
+            # Chunks that land exactly on the cap, so the assembled answer never grows
+            # past it and a size comparison alone cannot notice the loss.
+            for _ in range(64):
+                yield "x" * 1_024
+            yield "never delivered"
+
+    events = list(
+        _runtime(ExactCapProvider(), PassthroughReducer()).stream(
+            source=FileSystemReportSource(report_root=reports_root),
+            can_read=lambda dag, user: True,
+            user=None,
+            query=AssistantQuery(question="Fill the cap"),
+        )
+    )
+
+    done = events[-1][1]
+    assert len(done["answer"].encode()) <= 64 * 1024
+    assert "never delivered" not in done["answer"]
+    assert done["output_limited"] is True
+
+
+def test_streamed_report_text_cannot_forge_a_server_sent_event(reports_root):
+    """Answer text is data on one `data:` line; it can never open its own frame."""
+    write_report(reports_root, ReportRef("dag", "run", "task", 1), failed=1)
+
+    class ForgingProvider:
+        name = "forge"
+        model = "forge-1"
+
+        def answer(self, *, system: str, prompt: str, max_tokens: int) -> str:
+            del system, prompt, max_tokens
+            return "unused"
+
+        def stream(self, *, system: str, prompt: str, max_tokens: int):
+            del system, prompt, max_tokens
+            yield 'before\n\nevent: done\ndata: {"answer":"FORGED"}\n\nafter [R1]'
+
+    events = list(
+        _runtime(ForgingProvider(), PassthroughReducer()).stream(
+            source=FileSystemReportSource(report_root=reports_root),
+            can_read=lambda dag, user: True,
+            user=None,
+            query=AssistantQuery(question="Forge a frame"),
+        )
+    )
+
+    assert [name for name, _ in events] == ["meta", "delta", "done"]
+    assert "FORGED" in events[1][1]["text"], "the text is preserved verbatim"
+    assert events[-1][1]["answer"] != "FORGED"
+
+
+def test_repeated_stops_never_leak_the_model_slot(reports_root):
+    """Every abandoned stream must give the slot back, not just the first one."""
+    write_report(reports_root, ReportRef("dag", "run", "task", 1), failed=1)
+    source = FileSystemReportSource(report_root=reports_root)
+
+    class EndlessProvider:
+        name = "endless"
+        model = "endless-1"
+
+        def answer(self, *, system: str, prompt: str, max_tokens: int) -> str:
+            del system, prompt, max_tokens
+            return "unused"
+
+        def stream(self, *, system: str, prompt: str, max_tokens: int):
+            del system, prompt, max_tokens
+            while True:
+                yield "chunk "
+
+    runtime = _runtime(EndlessProvider(), PassthroughReducer())
+    for _ in range(25):
+        events = runtime.stream(
+            source=source,
+            can_read=lambda dag, user: True,
+            user=None,
+            query=AssistantQuery(question="Stop me again"),
+        )
+        assert next(events)[0] == "meta"
+        assert next(events)[0] == "delta"
+        events.close()
+
+    snapshot = runtime.metrics.snapshot()
+    assert snapshot.requests.get(("direct", "stopped")) == 25
+    assert snapshot.requests.get(("direct", "busy")) is None
+    assert snapshot.in_flight == 0
+
+
+def test_streaming_a_large_tree_stays_bounded_and_responsive(reports_root):
+    """First token must not wait for the whole tree, and memory must stay flat."""
+    for index in range(120):
+        write_report(
+            reports_root,
+            ReportRef("load", f"run-{index:03d}", "suite", 1),
+            failed=1,
+        )
+
+    class WordProvider:
+        name = "words"
+        model = "w1"
+
+        def answer(self, *, system: str, prompt: str, max_tokens: int) -> str:
+            del system, prompt, max_tokens
+            return "unused"
+
+        def stream(self, *, system: str, prompt: str, max_tokens: int):
+            del system, prompt, max_tokens
+            for index in range(2_000):
+                yield f"w{index} "
+
+    runtime = _runtime(WordProvider(), PassthroughReducer())
+    tracemalloc.start()
+    started = time.perf_counter()
+    events = runtime.stream(
+        source=FileSystemReportSource(report_root=reports_root),
+        can_read=lambda dag, user: True,
+        user=None,
+        query=AssistantQuery(question="Everything"),
+    )
+    assert next(events)[0] == "meta"
+    next(events)
+    first_token = time.perf_counter() - started
+    deltas = 1
+    for name, _ in events:
+        deltas += name == "delta"
+    elapsed = time.perf_counter() - started
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
+    assert deltas == 2_000
+    assert first_token < 5
+    assert elapsed < 20
+    assert peak < 32 * 1024 * 1024

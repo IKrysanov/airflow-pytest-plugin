@@ -64,6 +64,7 @@ def configured_assistant_runtime() -> AssistantRuntime:
             if settings.context_model_path
             else None
         ),
+        local_budget_seconds=settings.local_budget_seconds,
         direct_max_summaries=settings.direct_max_summaries,
         max_failure_bytes=settings.traceback_bytes,
         max_capture_bytes=settings.capture_bytes,

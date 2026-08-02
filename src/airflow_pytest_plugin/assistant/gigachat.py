@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import contextlib
+from collections.abc import Iterator
 from typing import Any
 
 from .common import (
@@ -62,33 +63,67 @@ class GigaChatAssistant:
         choices = getattr(completion, "choices", None) or []
         choice = choices[0] if choices else None
         message = getattr(choice, "message", None) if choice is not None else None
-        usage = getattr(completion, "usage", None)
+        return AssistantProviderResponse(
+            text=self._content(message),
+            token_usage=self._usage(getattr(completion, "usage", None)),
+            stop_reason=response_text(choice, "finish_reason"),
+        )
+
+    def stream(
+        self, *, system: str, prompt: str, max_tokens: int
+    ) -> Iterator[str | AssistantProviderResponse]:
+        """Yield each delta from GigaChat's streaming chat, then the final usage."""
+        chunks = self._client.stream(
+            {
+                "model": self._model,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": prompt},
+                ],
+                "temperature": 0.1,
+                "max_tokens": max_tokens,
+            }
+        )
+        usage: Any = None
+        stop_reason: str | None = None
+        for chunk in chunks:
+            usage = getattr(chunk, "usage", None) or usage
+            choices = getattr(chunk, "choices", None) or []
+            if not choices:
+                continue
+            choice = choices[0]
+            stop_reason = response_text(choice, "finish_reason") or stop_reason
+            text = self._content(getattr(choice, "delta", None))
+            if text:
+                yield text
+        yield AssistantProviderResponse(
+            text="", token_usage=self._usage(usage), stop_reason=stop_reason
+        )
+
+    @staticmethod
+    def _content(message: Any) -> str:
+        if isinstance(message, dict):
+            return str(message.get("content") or "")
+        return str(getattr(message, "content", "") or "")
+
+    @staticmethod
+    def _usage(usage: Any) -> AssistantTokenUsage | None:
         prompt_tokens = usage_count(usage, "prompt_tokens")
         output_tokens = usage_count(usage, "completion_tokens")
-        cached = usage_count(usage, "precached_prompt_tokens") or 0
+        if prompt_tokens is None or output_tokens is None:
+            return None
         total_tokens = usage_count(usage, "total_tokens")
-        token_usage = None
-        if prompt_tokens is not None and output_tokens is not None:
-            token_usage = AssistantTokenUsage(
-                # GigaChat documents prompt_tokens and total_tokens as billable
-                # counts after cached tokens have been deducted.
-                input_tokens=prompt_tokens,
-                output_tokens=output_tokens,
-                total_tokens=(
-                    total_tokens
-                    if total_tokens is not None
-                    else prompt_tokens + output_tokens
-                ),
-                cached_input_tokens=cached,
-            )
-        if isinstance(message, dict):
-            text = str(message.get("content") or "")
-        else:
-            text = str(getattr(message, "content", "") or "")
-        return AssistantProviderResponse(
-            text=text,
-            token_usage=token_usage,
-            stop_reason=response_text(choice, "finish_reason"),
+        return AssistantTokenUsage(
+            # GigaChat documents prompt_tokens and total_tokens as billable counts after
+            # cached tokens have been deducted.
+            input_tokens=prompt_tokens,
+            output_tokens=output_tokens,
+            total_tokens=(
+                total_tokens
+                if total_tokens is not None
+                else prompt_tokens + output_tokens
+            ),
+            cached_input_tokens=usage_count(usage, "precached_prompt_tokens") or 0,
         )
 
     def close(self) -> None:

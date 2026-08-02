@@ -25,7 +25,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Chunk summaries are merged hierarchically before the final provider call. It is lazy,
   concurrency-bounded and optional; without it the deterministic bounded context is sent
   directly.
-- New API methods: `GET /api/assistant/status` and `POST /api/assistant/query`.
+- New API methods: `GET /api/assistant/status`, `POST /api/assistant/query` and
+  `POST /api/assistant/stream`.
+- **Streamed answers and a Stop button.** The chat consumes `POST /api/assistant/stream` as
+  Server-Sent Events: one `meta` event with the exact provider input, `delta` events as the
+  answer is written, and one `done` event with evidence, token usage and truncation flags.
+  The Anthropic, OpenAI-compatible and GigaChat adapters stream natively; a provider without
+  incremental output still works and delivers its answer as a single delta. While an answer
+  is arriving, **Send** becomes **Stop**: it aborts the request, keeps the partial text,
+  marks it incomplete and releases the model slot immediately. A provider that fails midway
+  keeps its partial answer with the reason beside it instead of replacing it with an error.
+- **Assistant cost metrics.** When the assistant is configured, `GET /api/metrics` also
+  exposes `airflow_pytest_assistant_requests_total{mode,outcome}`,
+  `airflow_pytest_assistant_provider_tokens_total{kind}`,
+  `airflow_pytest_assistant_provider_seconds_total`, the
+  `local_reduce_calls`/`reports_considered`/`context_limited`/`output_limited` counters and
+  the `enabled`/`in_flight` gauges. They are per process and carry no question, report or
+  user — only cost and health.
+- `AIRFLOW_PYTEST_ASSISTANT_LOCAL_BUDGET_SECONDS` (default `120`, range 5–3600) bounds the wall
+  clock one request may spend in the local reducer. A synchronous llama.cpp call cannot be
+  interrupted and the request holds the process's only assistant slot, so a large tree could
+  previously monopolize the assistant for as long as it took to map every chunk. Past the
+  budget the remaining chunks are skipped, the already-reduced facts still reach the provider,
+  and the answer is marked as context-limited.
 
 ### Changed
 
@@ -49,9 +71,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no longer raises that warning.
 - The guide now includes a complete API-server installation example for the local reducer,
   including downloading a small GGUF file and mounting it in Docker or Kubernetes.
+- A long assistant answer no longer breaks the next question. The browser replays the
+  transcript, so one reply longer than the per-turn prompt clip used to fail schema
+  validation and leave the chat unusable until it was cleared. The browser now trims each
+  replayed turn to the advertised limit, the wire contract accepts a full replayed answer,
+  and `GET /api/assistant/status` publishes `max_history_chars` and `max_history_bytes`.
+- The question bubble's byte breakdown is readable on its own fill: a rule separates it from
+  the question, every value sits in an outlined pill at full text contrast, and **Context
+  overview** is a real bordered button with an icon instead of plain bold text. When a scope
+  has no readable reports, the bubble says that nothing was sent instead of rendering six
+  rows of `0 B`, and the empty-scope reply follows the dashboard language rather than being
+  guessed from the question.
+- The assistant window always names its scope, including the unfiltered default.
+- Secret redaction no longer removes ordinary identifiers. A long alphanumeric run is treated
+  as an opaque credential only when it does not read as concatenated words, so class names
+  such as `TestReportArchiveIntegration` survive in evidence and in the user's own question.
+  Environment-derived secrets are compiled once per request instead of being re-derived for
+  every redacted field, which was ~97% of redaction cost on a full-tree request.
+
+### Fixed
+
+- The request body-limit middleware answered every `receive()` after the buffered body with
+  a synthetic `http.disconnect`. Starlette read that as a client that had already gone and
+  cancelled any streaming response on a guarded path before its first byte. It now defers to
+  the real transport, so genuine disconnects are still detected.
 
 ### Security
 
+- Assistant answer text can never forge a Server-Sent Event: each payload is JSON on one
+  `data:` line, so newlines from a model or a traceback stay inside the string.
 - Assistant requests never bypass report RBAC; they cap request, history, explicit scope,
   traceback, captured-output and response sizes, redact known secrets, and treat report text
   as untrusted prompt data. Tracebacks and bounded captured output from failed/errored tests

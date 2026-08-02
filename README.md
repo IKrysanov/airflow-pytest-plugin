@@ -512,6 +512,23 @@ direct bounded mode, and the effective limits. The values come from
 `GET /api/assistant/status`, so the UI reflects the API-server configuration instead of
 maintaining a separate set of numbers.
 
+Answers stream. `POST /api/assistant/stream` returns Server-Sent Events: one `meta` event
+carrying the exact provider input (scope, byte breakdown, report context) before the model
+is called, then `delta` events as the answer is written, then one `done` event with
+evidence, token usage and the truncation flags. `POST /api/assistant/query` still returns
+the same answer as a single JSON body for API clients. Everything expensive — RBAC
+filtering, redaction, local reduction — happens before the first byte, so a rejected request
+is an ordinary HTTP error rather than a half-written stream, and both endpoints enforce the
+same limits. A provider without incremental output works unchanged; its answer simply
+arrives as one `delta`.
+
+While an answer is streaming, **Send** becomes **Stop**. Stop aborts the request, keeps the
+text that already arrived, marks it as incomplete, and frees the assistant's model slot
+straight away. Closing and reopening the window mid-answer is safe: the partial answer
+belongs to the chat transcript, so it keeps streaming into the reopened window. If the
+provider fails half-way, the partial text is kept and the reason is shown beside it rather
+than being replaced by an error.
+
 Each user question produces one final remote-provider call. The assistant sends its rules as
 the provider's system message and one user message containing `USER QUESTION`, bounded
 `RECENT CHAT`, and `REPORT EVIDENCE` sections. In direct mode the evidence is compact JSON
@@ -568,6 +585,15 @@ model summarizes every chunk and then hierarchically merges those partial summar
 one final-provider context fits. The 100-summary direct-mode cut-off is not applied on this
 path. Per-field caps still prevent one pathological traceback or captured stream from taking
 over a chunk.
+
+One local pass runs per chunk, so a large tree means many in-process inferences: roughly 350
+chunks for 1,000 runs × 20 cases at the default settings. A synchronous llama.cpp call cannot
+be interrupted and the request holds the process's only assistant slot, so the map phase is
+bounded by `AIRFLOW_PYTEST_ASSISTANT_LOCAL_BUDGET_SECONDS` (120 s by default). When the budget
+runs out, the remaining chunks are skipped, the already-reduced facts still go to the
+provider, and the answer is marked as context-limited — a partial answer instead of a request
+that pins the assistant for an hour. Narrow the scope with a filter or raise the budget after
+measuring your own tree.
 
 The local model does **not** answer the user. It costs API-server RAM, CPU and latency in
 proportion to the selected tree, and semantic compression can still discard a useful fact.
@@ -629,6 +655,7 @@ cap remain fixed abuse-safety contracts rather than deployment tuning knobs.
 | `AIRFLOW_PYTEST_ASSISTANT_CAPTURE_BYTES` | `2048` | captured stdout/stderr/log bytes retained per failed or errored test (0–65536; `0` disables captured output) |
 | `AIRFLOW_PYTEST_ASSISTANT_CONTEXT_N_CTX` | `16384` | local model context window; must fit fixed prompts, the question, local output and at least a 4 KiB evidence chunk |
 | `AIRFLOW_PYTEST_ASSISTANT_CONTEXT_MAX_TOKENS` | `1024` | most tokens produced by the local reducer |
+| `AIRFLOW_PYTEST_ASSISTANT_LOCAL_BUDGET_SECONDS` | `120` | wall clock one request may spend in the local reducer (5–3600); past it the remaining chunks are skipped and the answer is marked context-limited |
 | `AIRFLOW_PYTEST_ASSISTANT_MAX_OUTPUT_TOKENS` | `3072` | most tokens requested for the final answer (128–8192) |
 | `AIRFLOW_PYTEST_ASSISTANT_TIMEOUT` | `45` | provider timeout in seconds |
 | `AIRFLOW_PYTEST_ASSISTANT_MAX_CONCURRENT` | `1` | simultaneous assistant calls in one API-server process |
@@ -690,6 +717,17 @@ in the Prometheus text format — `airflow_pytest_latest_{passed,failed,errors,s
 tests,pass_ratio,duration_seconds,success,run_timestamp_seconds}{dag_id,task_id}` and
 `airflow_pytest_dagtask_runs{dag_id,task_id}`, plus globals
 `airflow_pytest_{up,runs,dagtasks,latest_failures,series_truncated,build_info}` (all gauges).
+
+When the report assistant is configured, the same scrape also carries what it costs:
+`airflow_pytest_assistant_requests_total{mode,outcome}` (mode `direct`/`local`; outcome
+`answered`, `empty_scope`, `busy`, `error`, `stopped`),
+`airflow_pytest_assistant_provider_tokens_total{kind}` for `input`, `output` and
+`cached_input`, `airflow_pytest_assistant_provider_seconds_total`,
+`airflow_pytest_assistant_{local_reduce_calls,reports_considered,context_limited,output_limited}_total`,
+and the `airflow_pytest_assistant_{enabled,in_flight}` gauges. They are per API-server
+process, reset on restart, and carry no question, report or user — only cost and health.
+Multiply the token counters by your provider's rates to get spend; `busy` and `stopped`
+tell you whether one worker is enough.
 
 It's **disabled by default** and turns on only when you set a scrape token; requests must
 then present it as a bearer token (constant-time compared). The scrape is cheap and

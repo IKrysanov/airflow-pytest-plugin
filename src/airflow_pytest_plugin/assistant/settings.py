@@ -25,6 +25,7 @@ CONTEXT_MODEL_ENV = "AIRFLOW_PYTEST_ASSISTANT_CONTEXT_MODEL"
 CONTEXT_BYTES_ENV = "AIRFLOW_PYTEST_ASSISTANT_CONTEXT_BYTES"
 CONTEXT_N_CTX_ENV = "AIRFLOW_PYTEST_ASSISTANT_CONTEXT_N_CTX"
 CONTEXT_MAX_TOKENS_ENV = "AIRFLOW_PYTEST_ASSISTANT_CONTEXT_MAX_TOKENS"
+LOCAL_BUDGET_SECONDS_ENV = "AIRFLOW_PYTEST_ASSISTANT_LOCAL_BUDGET_SECONDS"
 MAX_OUTPUT_TOKENS_ENV = "AIRFLOW_PYTEST_ASSISTANT_MAX_OUTPUT_TOKENS"
 TIMEOUT_ENV = "AIRFLOW_PYTEST_ASSISTANT_TIMEOUT"
 MAX_CONCURRENT_ENV = "AIRFLOW_PYTEST_ASSISTANT_MAX_CONCURRENT"
@@ -85,6 +86,7 @@ class AssistantSettings:
     max_context_bytes: int
     context_n_ctx: int
     context_max_tokens: int
+    local_budget_seconds: float
     max_output_tokens: int
     timeout: float
     max_concurrent: int
@@ -117,6 +119,9 @@ class AssistantSettings:
             context_max_tokens=_bounded_int(
                 CONTEXT_MAX_TOKENS_ENV, 1_024, minimum=128, maximum=8_192
             ),
+            local_budget_seconds=_bounded_float(
+                LOCAL_BUDGET_SECONDS_ENV, 120.0, minimum=5.0, maximum=3_600.0
+            ),
             max_output_tokens=_bounded_int(
                 MAX_OUTPUT_TOKENS_ENV, 3_072, minimum=128, maximum=8_192
             ),
@@ -147,6 +152,7 @@ __all__ = [
     "CONTEXT_N_CTX_ENV",
     "CAPTURE_BYTES_ENV",
     "DIRECT_MAX_SUMMARIES_ENV",
+    "LOCAL_BUDGET_SECONDS_ENV",
     "MAX_CONCURRENT_ENV",
     "MAX_OUTPUT_TOKENS_ENV",
     "MODEL_ENV",

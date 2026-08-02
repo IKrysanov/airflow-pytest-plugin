@@ -17,16 +17,18 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import secrets
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Iterator, Mapping
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from ...assistant import (
-    MAX_HISTORY_CHARS,
+    MAX_HISTORY_INPUT_CHARS,
     MAX_HISTORY_MESSAGES,
     MAX_QUESTION_CHARS,
     MAX_SCOPE_CHARS,
@@ -46,7 +48,10 @@ class AssistantTurnInput(BaseModel):
     """One previous browser-local chat turn."""
 
     role: Literal["user", "assistant"]
-    content: Annotated[str, Field(min_length=1, max_length=MAX_HISTORY_CHARS)]
+    # Wider than the prompt clip on purpose: the browser replays the model's own previous
+    # answer, which is capped at 64 KiB. The prompt builder trims each turn to
+    # MAX_HISTORY_CHARS, so a long replay costs nothing but must not fail the request.
+    content: Annotated[str, Field(min_length=1, max_length=MAX_HISTORY_INPUT_CHARS)]
 
 
 class AssistantScopeInput(BaseModel):
@@ -80,6 +85,8 @@ _EX_STATUS = {
     "reason": None,
     "max_question_chars": MAX_QUESTION_CHARS,
     "max_history_messages": MAX_HISTORY_MESSAGES,
+    "max_history_chars": 4_000,
+    "max_history_bytes": 16_000,
     "max_scope_reports": MAX_SCOPE_REPORTS,
     "direct_max_summaries": 100,
     "direct_max_detail_reports": None,
@@ -137,6 +144,23 @@ _EX_REPLY = {
 }
 
 
+def _next_event(
+    events: Iterator[tuple[str, dict[str, Any]]],
+) -> tuple[str, dict[str, Any]] | None:
+    """Pull one event, or ``None`` when the runtime generator is done."""
+    return next(events, None)
+
+
+def _sse(event: str, payload: dict[str, Any]) -> bytes:
+    """Render one Server-Sent Event.
+
+    ``json.dumps`` cannot emit a raw newline inside a string, so a single ``data:`` line is
+    always enough and no answer text can forge an event boundary.
+    """
+    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    return f"event: {event}\ndata: {body}\n\n".encode()
+
+
 def build_router(deps: RouteDeps, runtime: AssistantRuntime) -> APIRouter:
     """Routes tagged ``assistant`` over the app's injected collaborators."""
     router = APIRouter(tags=[TAG])
@@ -177,32 +201,105 @@ def build_router(deps: RouteDeps, runtime: AssistantRuntime) -> APIRouter:
         complete scope is processed in chunks; direct mode uses a bounded snapshot. Chat
         history is supplied by the browser and is never persisted by the plugin.
         """
-        scope = body.scope
-        request = AssistantQuery(
-            question=body.question,
-            scope=AssistantScope(
-                dag_id=_clean(scope.dag_id),
-                task_id=_clean(scope.task_id),
-                run_id=_clean(scope.run_id),
-                report_ids=tuple(scope.report_ids),
-            ),
-            history=tuple(
-                AssistantTurn(role=turn.role, content=turn.content)
-                for turn in body.history
-            ),
-        )
         try:
             reply = runtime.ask(
                 source=deps.src,
                 can_read=deps.read_auth,
                 user=user,
-                query=request,
+                query=_query(body),
             )
         except AssistantError as exc:
             raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
         return JSONResponse(reply.to_dict())
 
+    @router.post(
+        "/api/assistant/stream",
+        summary="Ask about readable reports, streamed",
+        responses={
+            200: {
+                "description": (
+                    "Server-Sent Events: one `meta` event with the exact provider input, "
+                    "then `delta` events carrying answer fragments, then one `done` event "
+                    "with evidence and token usage. A failure after the stream has started "
+                    "arrives as an `error` event."
+                ),
+                "content": {"text/event-stream": {}},
+            },
+            400: {"description": "Malformed report scope."},
+            403: {"description": "A selected report belongs to a forbidden DAG."},
+            429: {"description": "The bounded assistant worker is busy."},
+            502: {"description": "A local or remote model failed."},
+            503: {"description": "The assistant is disabled or incomplete."},
+        },
+    )
+    async def stream(
+        body: AssistantQueryInput,
+        user: Any = Depends(deps.user_dep),  # noqa: B008 - FastAPI dependency idiom
+    ) -> StreamingResponse:
+        """Answer as the model writes, over the same RBAC and limits as ``/query``.
+
+        Everything expensive -- RBAC filtering, redaction, local reduction -- happens before
+        the first byte is sent, so a rejected request is still an ordinary HTTP error rather
+        than a half-written stream.
+        """
+        events = runtime.stream(
+            source=deps.src,
+            can_read=deps.read_auth,
+            user=user,
+            query=_query(body),
+        )
+        try:
+            first = await run_in_threadpool(_next_event, events)
+        except AssistantError as exc:
+            await run_in_threadpool(events.close)
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+        async def body_iterator() -> AsyncIterator[bytes]:
+            # Deliberately an async generator. A sync one would be pulled through a
+            # worker thread, and cancelling that await cannot interrupt the thread -- the
+            # generator would simply be dropped and its cleanup deferred to garbage
+            # collection, leaving the single model slot held long after the browser
+            # pressed Stop. Cancellation lands inside an async generator, so ``finally``
+            # runs at once and the slot is freed.
+            try:
+                yield _sse(*(first or ("done", {})))
+                while True:
+                    item = await run_in_threadpool(_next_event, events)
+                    if item is None:
+                        return
+                    yield _sse(*item)
+            except AssistantError as exc:
+                yield _sse("error", {"detail": str(exc), "status": exc.status_code})
+            finally:
+                events.close()
+
+        return StreamingResponse(
+            body_iterator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-store",
+                # Proxies that buffer would defeat the point of streaming.
+                "X-Accel-Buffering": "no",
+            },
+        )
+
     return router
+
+
+def _query(body: AssistantQueryInput) -> AssistantQuery:
+    scope = body.scope
+    return AssistantQuery(
+        question=body.question,
+        scope=AssistantScope(
+            dag_id=_clean(scope.dag_id),
+            task_id=_clean(scope.task_id),
+            run_id=_clean(scope.run_id),
+            report_ids=tuple(scope.report_ids),
+        ),
+        history=tuple(
+            AssistantTurn(role=turn.role, content=turn.content) for turn in body.history
+        ),
+    )
 
 
 def _clean(value: str | None) -> str | None:

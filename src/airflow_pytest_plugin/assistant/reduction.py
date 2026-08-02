@@ -16,7 +16,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+import time
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
 from .common import ContextReducer, clip_utf8
@@ -38,6 +39,8 @@ class ReducedEvidence:
     source_truncated: bool
     passes: int
     chunks_processed: int
+    budget_exhausted: bool = False
+    reducer_calls: int = 0
 
 
 def reduce_context_tree(
@@ -47,45 +50,78 @@ def reduce_context_tree(
     reducer: ContextReducer,
     max_bytes: int,
     input_bytes: int | None = None,
+    budget_seconds: float | None = None,
+    clock: Callable[[], float] = time.monotonic,
 ) -> ReducedEvidence:
-    """Map every raw chunk, then reduce summaries until one provider prompt fits."""
+    """Map every raw chunk, then reduce summaries until one provider prompt fits.
+
+    ``budget_seconds`` bounds the wall clock spent in the local model. A synchronous
+    llama.cpp call cannot be cancelled and the runtime holds its only slot for the whole
+    request, so an unbounded tree would otherwise let one question monopolize the
+    assistant for as long as it takes to map every chunk. When the budget runs out the
+    map phase stops consuming chunks and the caller reports a limited context instead of
+    hanging: a partial, honestly-labelled answer beats an unavailable assistant.
+    """
+    deadline = None if budget_seconds is None else clock() + budget_seconds
     partials: list[str] = []
     chunks_processed = 0
+    calls = 0
+    budget_exhausted = False
     for chunk in chunks:
+        if deadline is not None and clock() >= deadline:
+            budget_exhausted = True
+            break
         partials.append(_reduce(reducer, question, chunk))
+        calls += 1
         chunks_processed += 1
     source_truncated = bool(getattr(chunks, "truncated", False))
+
+    def result(text: str, *, hard: bool, passes: int, spent: bool) -> ReducedEvidence:
+        return ReducedEvidence(
+            text=text,
+            hard_truncated=hard,
+            source_truncated=source_truncated,
+            passes=passes,
+            chunks_processed=chunks_processed,
+            budget_exhausted=spent,
+            reducer_calls=calls,
+        )
+
     if not partials:
-        return ReducedEvidence("", False, source_truncated, 0, 0)
+        return result("", hard=False, passes=0, spent=budget_exhausted)
 
     passes = 1
     for _ in range(_MAX_REDUCTION_PASSES - 1):
         joined = "\n\n".join(partials)
         if len(joined.encode("utf-8", "replace")) <= max_bytes:
-            return ReducedEvidence(
-                joined, False, source_truncated, passes, chunks_processed
+            return result(joined, hard=False, passes=passes, spent=budget_exhausted)
+        if deadline is not None and clock() >= deadline:
+            return result(
+                clip_utf8(joined, max_bytes), hard=True, passes=passes, spent=True
             )
 
         before = sum(len(item.encode("utf-8", "replace")) for item in partials)
         groups, packing_truncated = _pack_partials(partials, input_bytes or max_bytes)
         next_partials = [_reduce(reducer, question, group) for group in groups]
+        calls += len(groups)
         passes += 1
         after = sum(len(item.encode("utf-8", "replace")) for item in next_partials)
         if packing_truncated or (
             len(next_partials) >= len(partials) and after >= before
         ):
-            fallback = clip_utf8("\n\n".join(next_partials), max_bytes)
-            return ReducedEvidence(
-                fallback, True, source_truncated, passes, chunks_processed
+            return result(
+                clip_utf8("\n\n".join(next_partials), max_bytes),
+                hard=True,
+                passes=passes,
+                spent=budget_exhausted,
             )
         partials = next_partials
 
-    return ReducedEvidence(
+    return result(
         clip_utf8("\n\n".join(partials), max_bytes),
-        True,
-        source_truncated,
-        passes,
-        chunks_processed,
+        hard=True,
+        passes=passes,
+        spent=budget_exhausted,
     )
 
 

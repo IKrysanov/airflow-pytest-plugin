@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -313,10 +314,15 @@ def test_viewer_contains_a_lazy_accessible_assistant_dialog(reports_root):
     )
     assert 'sessionTokens: "Session total: {total} tokens"' in html
     assert 'sessionTokens: "За сессию: {total} токенов"' in html
-    assert "astAddSessionTokens(assistantItem.tokenUsage)" in html
+    assert "astAddSessionTokens(pendingItem.tokenUsage)" in html
     assert "sessionTotalTokens: astSessionTotalTokens" in html
     assert "astCleanPromptParts(body.prompt_bytes)" in html
     assert "astCleanTokenUsage(body.token_usage)" in html
+    # Streaming, Stop, and the pending answer that lives in the transcript.
+    assert 'API + "assistant/stream"' in html
+    assert "AbortController" in html and 'id="ast-stop"' in html
+    assert 'stop: "Остановить"' in html
+    assert "pending: true, stopped: false" in html
     assert "astCleanReportContext(body.report_context)" in html
     assert "if (item.contextLimited)" in html
     assert "body.provider_input_bytes" in html
@@ -335,7 +341,7 @@ def test_viewer_contains_a_lazy_accessible_assistant_dialog(reports_root):
     assert 'id="ast-clear"' in html
     assert "@media (max-width: 700px)" in html
     assert 'fetch(API + "assistant/status")' in html
-    assert 'fetch(API + "assistant/query"' in html
+    assert 'fetch(API + "assistant/stream"' in html
     assert "sessionStorage.setItem(AST_STORAGE_KEY" in html
     assert "sessionStorage.getItem(AST_STORAGE_KEY)" in html
     assert "localStorage.setItem(AST_WINDOW_PREFS_KEY" in html
@@ -379,3 +385,148 @@ def test_assistant_renders_model_text_without_inner_html(reports_root):
 
     assert "body.textContent = text" in script
     assert ".innerHTML" not in script
+
+
+def test_long_prior_answer_does_not_break_the_next_question(reports_root):
+    """A follow-up must survive the model's own previous long answer.
+
+    The browser replays the transcript verbatim, and an answer is capped at 64 KiB, not
+    at the per-turn prompt clip. Rejecting the replay makes the chat unusable until the
+    user clears it, so the wire contract has to accept it and the prompt clip trims it.
+    """
+    write_report(reports_root, ReportRef("dag", "run", "task", 1), failed=1)
+    long_answer = "Подробный разбор падений. " * 800
+
+    response = _client(reports_root).post(
+        "/api/assistant/query",
+        json={
+            "question": "Продолжи анализ",
+            "history": [
+                {"role": "user", "content": "Что упало?"},
+                {"role": "assistant", "content": long_answer},
+            ],
+        },
+    )
+
+    assert response.status_code == 200, response.json()
+    body = response.json()
+    assert 0 < body["prompt_bytes"]["history"] <= 16_000
+
+
+def test_status_publishes_the_history_character_limit(reports_root):
+    body = _client(reports_root).get("/api/assistant/status").json()
+
+    assert body["max_history_chars"] >= 4_000
+    assert body["max_history_bytes"] == 16_000
+
+
+def _events(response) -> list[tuple[str, dict]]:
+    """Parse a Server-Sent Event body into ``(event, payload)`` pairs."""
+    parsed: list[tuple[str, dict]] = []
+    for block in response.text.split("\n\n"):
+        name, data = None, None
+        for line in block.splitlines():
+            if line.startswith("event: "):
+                name = line[len("event: ") :]
+            elif line.startswith("data: "):
+                data = json.loads(line[len("data: ") :])
+        if name is not None and data is not None:
+            parsed.append((name, data))
+    return parsed
+
+
+def test_stream_sends_meta_then_deltas_then_done(reports_root):
+    ref = ReportRef("dag", "run", "task", 1)
+    write_report(reports_root, ref, failed=1)
+
+    response = _client(reports_root).post(
+        "/api/assistant/stream", json={"question": "What failed?"}
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    events = _events(response)
+    assert [name for name, _ in events][0] == "meta"
+    assert [name for name, _ in events][-1] == "done"
+    names = [name for name, _ in events]
+    assert names.count("delta") > 1, "the offline provider streams word by word"
+
+    meta = events[0][1]
+    assert meta["provider"] == "fake" and meta["reports_considered"] == 1
+    assert meta["prompt_bytes"]["total"] == meta["provider_input_bytes"] > 0
+    assert meta["report_context"]["bytes"] == meta["prompt_bytes"]["context"]
+    assert "RUN SUMMARIES" in meta["report_context"]["content"]
+
+    streamed = "".join(
+        payload["text"] for name, payload in events if name == "delta"
+    ).strip()
+    done = events[-1][1]
+    assert done["answer"] == streamed
+    assert done["evidence"][0]["report_id"] == ref.token
+    assert done["output_limited"] is False
+
+
+def test_stream_matches_the_blocking_answer_exactly(reports_root):
+    write_report(reports_root, ReportRef("dag", "run", "task", 1), failed=1)
+    client = _client(reports_root)
+
+    blocking = client.post("/api/assistant/query", json={"question": "Same?"}).json()
+    streamed = _events(
+        client.post("/api/assistant/stream", json={"question": "Same?"})
+    )[-1][1]
+
+    for field in ("answer", "prompt_bytes", "report_context", "scope", "evidence"):
+        assert streamed[field] == blocking[field], field
+
+
+def test_stream_rejects_a_forbidden_report_before_any_event(reports_root):
+    secret = ReportRef("secret", "run", "task", 1)
+    write_report(reports_root, secret, failed=1)
+    client = _client(reports_root, can_read=lambda dag, user: dag != "secret")
+
+    response = client.post(
+        "/api/assistant/stream",
+        json={"question": "leak", "scope": {"report_ids": [secret.token]}},
+    )
+
+    assert response.status_code == 403
+    assert "event:" not in response.text
+
+
+def test_stream_reports_an_empty_scope_without_calling_a_model(reports_root):
+    events = _events(
+        _client(reports_root).post(
+            "/api/assistant/stream", json={"question": "Anything?"}
+        )
+    )
+
+    assert [name for name, _ in events] == ["done"]
+    assert events[0][1]["reports_considered"] == 0
+    assert events[0][1]["prompt_bytes"]["total"] == 0
+
+
+def test_stream_body_is_capped_before_json_decode(reports_root):
+    response = _client(reports_root).post(
+        "/api/assistant/stream",
+        content=b'{"question":"' + b"x" * (70 * 1024) + b'"}',
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 413
+
+
+def test_body_limit_middleware_does_not_fake_a_disconnect(reports_root):
+    """Guarded endpoints must still be able to stream.
+
+    The limit middleware buffers the request body and replays it. Answering every later
+    ``receive()`` with ``http.disconnect`` told Starlette the client had gone, so it
+    cancelled the streaming task and the response body came back empty.
+    """
+    write_report(reports_root, ReportRef("dag", "run", "task", 1), failed=1)
+
+    response = _client(reports_root).post(
+        "/api/assistant/stream", json={"question": "Still connected?"}
+    )
+
+    assert response.status_code == 200
+    assert response.text.strip(), "streaming body was cancelled before the first event"

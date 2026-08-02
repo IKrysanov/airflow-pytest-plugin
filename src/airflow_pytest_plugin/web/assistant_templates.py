@@ -207,22 +207,46 @@ _CSS = r"""
   .ast-answer th:last-child, .ast-answer td:last-child { border-right: 0; }
   .ast-error { color: var(--fail); }
   .ast-msg-meta { color: var(--muted); font-size: 11px; margin-top: 8px; }
-  .ast-msg.user .ast-msg-meta { color: inherit; opacity: 1; }
-  .ast-msg.user .ast-msg-meta code { border: 0;
-    background: color-mix(in srgb, var(--on-primary) 14%, transparent); color: inherit; }
-  .ast-prompt-title { display: block; margin-bottom: 5px; font-weight: 650; }
-  .ast-prompt-parts { display: grid; gap: 3px; margin: 0; }
+  /* The breakdown lives inside the filled question bubble, so every part of it needs its
+     own contrast against that fill: a rule that separates it from the question, pills the
+     numbers sit in, and a real button for the context. Nothing may read as flat text. */
+  .ast-msg.user .ast-msg-meta { color: inherit; opacity: 1; margin-top: 11px;
+    padding-top: 10px;
+    border-top: 1px solid color-mix(in srgb, var(--on-primary) 65%, transparent); }
+  /* An outlined pill, not a filled one: the bubble's text colour is what a fill would be
+     mixed from, so filling drags the number towards its own background. The outline keeps
+     each value at the bubble's full text contrast and still separates it from the row. */
+  .ast-msg.user .ast-msg-meta code {
+    border: 1px solid color-mix(in srgb, var(--on-primary) 65%, transparent);
+    background: transparent; color: inherit; }
+  .ast-prompt-title { display: block; margin-bottom: 7px; font-weight: 650;
+    letter-spacing: .01em; }
+  .ast-prompt-parts { display: grid; gap: 4px; margin: 0; }
   .ast-prompt-row { display: grid; grid-template-columns: minmax(94px, 1fr) auto;
     align-items: baseline; gap: 10px; }
   .ast-prompt-row dt, .ast-prompt-row dd { margin: 0; }
   .ast-prompt-row dt { min-width: 0; overflow-wrap: anywhere; }
   .ast-prompt-row dd { font-variant-numeric: tabular-nums; }
-  .ast-prompt-total { margin-top: 5px; font-weight: 650; }
-  .ast-context-review { min-height: 44px; margin-top: 4px; padding: 0; border: 0;
-    background: transparent; color: var(--primary); cursor: pointer; font: inherit;
-    font-size: 12px; font-weight: 650; text-align: left; }
-  .ast-msg.user .ast-context-review { color: inherit; }
-  .ast-context-review:hover { text-decoration: underline; text-underline-offset: 3px; }
+  .ast-prompt-total { margin-top: 7px; padding-top: 7px; font-weight: 650;
+    border-top: 1px solid color-mix(in srgb, var(--on-primary) 65%, transparent); }
+  .ast-msg.assistant .ast-prompt-total { border-top-color: var(--border); }
+  .ast-context-review { display: inline-flex; align-items: center; gap: 7px;
+    min-height: 36px; margin-top: 11px; padding: 0 12px; border-radius: 9px;
+    border: 1px solid var(--border); background: var(--surface); color: var(--primary);
+    cursor: pointer; font: inherit; font-size: 12px; font-weight: 650; text-align: left;
+    transition: background .15s, border-color .15s; }
+  .ast-context-review svg { width: 14px; height: 14px; flex: 0 0 auto; }
+  /* No resting fill on the bubble: any fill here is mixed from the label's own colour, so
+     it would pull the label towards its background. The outline, icon and hit area carry
+     the affordance; the fill appears on hover, where the dip is transient. */
+  .ast-msg.user .ast-context-review { color: var(--on-primary); background: transparent;
+    border-color: color-mix(in srgb, var(--on-primary) 70%, transparent); }
+  .ast-context-review:hover { background: var(--surface-2); }
+  .ast-msg.user .ast-context-review:hover {
+    background: color-mix(in srgb, var(--on-primary) 28%, transparent);
+    border-color: color-mix(in srgb, var(--on-primary) 65%, transparent); }
+  .ast-context-review:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+  .ast-msg.user .ast-context-review:focus-visible { outline-color: var(--on-primary); }
   .ast-output-warning { margin: 10px 0 2px; padding: 9px 11px; border-radius: 8px;
     background: var(--warn-bg); color: var(--warn); font-size: 12px; line-height: 1.5; }
   .ast-msg-footer { display: flex; align-items: center; justify-content: space-between;
@@ -249,6 +273,20 @@ _CSS = r"""
   .ast-thinking i:nth-child(3) { animation-delay: .28s; }
   .ast-msg.assistant.ast-waiting { width: auto; max-width: none; padding: 9px 11px;
     flex: 0 0 auto; }
+  /* A blinking block after the last streamed character, so a slow model still looks alive. */
+  .ast-caret { display: inline-block; width: 7px; height: 14px; margin-left: 1px;
+    vertical-align: -2px; border-radius: 1px; background: var(--primary);
+    animation: ast-blink 1s steps(2, start) infinite; }
+  .ast-stopped-note { margin: 10px 0 2px; padding: 8px 11px; border-radius: 8px;
+    border: 1px solid var(--border); background: var(--surface); color: var(--muted);
+    font-size: 12px; line-height: 1.5; }
+  .ast-stop { min-height: 44px; padding: 0 15px; }
+  .ast-stop svg { width: 15px; height: 15px; }
+  .ast-stop[disabled] { opacity: .5; cursor: not-allowed; }
+  @keyframes ast-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+  @media (prefers-reduced-motion: reduce) {
+    .ast-caret { animation: none; }
+  }
   @keyframes ast-pulse { 0%, 70%, 100% { opacity: .25; } 35% { opacity: 1; } }
   .ast-form { flex: 0 0 auto; border-top: 1px solid var(--border); padding: 14px 24px 20px;
     background: var(--surface); }
@@ -345,6 +383,13 @@ _PANEL = r"""
       <span id="ast-hint" class="ast-hint">Ctrl/⌘ + Enter to send</span>
       <div class="ast-form-actions">
         <div id="ast-processing" class="ast-processing" aria-live="polite"></div>
+        <button id="ast-stop" class="btn ast-stop" type="button" hidden>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="6" y="6" width="12" height="12" rx="2"/>
+          </svg>
+          <span id="ast-stop-label">Stop</span>
+        </button>
         <button id="ast-send" class="btn primary ast-send" type="submit">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
                stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -428,11 +473,17 @@ _JS = r"""
       localLimitReports: "reports processed: {value}",
       localLimitCases: "test cases: all in scope",
       localOutboundLimit: "external evidence ≤ {value}",
+      localBudgetLimit: "local processing ≤ {value} s",
       placeholder: "What changed in the latest runs?", hint: "Ctrl/⌘ + Enter to send",
-      send: "Send", clear: "Clear chat", introTitle: "Ask the report history",
+      send: "Send", stop: "Stop", stopHint: "Stop generating this answer",
+      stoppedNote: "Stopped. This answer is incomplete.",
+      stoppedEmpty: "Stopped before the model produced anything.",
+      clear: "Clear chat", introTitle: "Ask the report history",
       promptSize: "Sent to LLM", promptSystem: "System", promptUser: "User",
       promptContext: "Context data", promptHistory: "History",
       promptStructure: "Prompt structure", promptTotal: "Total",
+      promptNothingSent: "Nothing was sent to the LLM: no readable reports in this scope.",
+      noReportsInScope: "No readable reports match the current scope. Clear or widen the dashboard filters and try again.",
       contextReview: "Context overview", contextDialogTitle: "Report context sent to LLM",
       contextDialogClose: "Close report context", copyContext: "Copy context",
       contextWrap: "Wrap lines", contextWrapTitle: "Toggle wrapping of long context lines",
@@ -444,6 +495,7 @@ _JS = r"""
       sessionTokens: "Session total: {total} tokens",
       intro: "Answers use only reports you may read. This tab keeps the chat after refresh.",
       thinking: "Reviewing reports…", retry: "Try again", noDetail: "The request failed.",
+      invalidRequest: "The request was rejected: {reason}",
       outputLimited: "The model reached its output-token limit, so this answer may be incomplete. Ask a narrower question or increase AIRFLOW_PYTEST_ASSISTANT_MAX_OUTPUT_TOKENS.",
       truncated: "Context was limited", reports: "{n} reports", direct: "direct context",
       starters: ["What broke in the latest runs?", "Which failures look flaky?", "What became slower?"]
@@ -467,11 +519,17 @@ _JS = r"""
       localLimitReports: "обработано отчётов: {value}",
       localLimitCases: "test cases: все в области",
       localOutboundLimit: "факты наружу ≤ {value}",
+      localBudgetLimit: "локальная обработка ≤ {value} с",
       placeholder: "Что изменилось в последних прогонах?", hint: "Ctrl/⌘ + Enter — отправить",
-      send: "Отправить", clear: "Очистить чат", introTitle: "Спросите историю прогонов",
+      send: "Отправить", stop: "Остановить", stopHint: "Прервать генерацию ответа",
+      stoppedNote: "Остановлено. Ответ неполный.",
+      stoppedEmpty: "Остановлено до того, как модель что-то ответила.",
+      clear: "Очистить чат", introTitle: "Спросите историю прогонов",
       promptSize: "Отправлено в LLM", promptSystem: "System", promptUser: "User",
       promptContext: "Данные отчётов", promptHistory: "История",
       promptStructure: "Структура промпта", promptTotal: "Всего",
+      promptNothingSent: "В LLM ничего не отправлялось: в этой области нет доступных отчётов.",
+      noReportsInScope: "В текущей области нет доступных отчётов. Сбросьте или расширьте фильтры и попробуйте снова.",
       contextReview: "Обзор контекста", contextDialogTitle: "Контекст отчётов, отправленный в LLM",
       contextDialogClose: "Закрыть контекст отчётов", copyContext: "Копировать контекст",
       contextWrap: "Перенос строк", contextWrapTitle: "Включить или выключить перенос длинных строк контекста",
@@ -483,6 +541,7 @@ _JS = r"""
       sessionTokens: "За сессию: {total} токенов",
       intro: "Ответ строится только по доступным вам отчётам. Эта вкладка сохранит чат после обновления.",
       thinking: "Изучаю отчёты…", retry: "Повторить", noDetail: "Запрос не выполнен.",
+      invalidRequest: "Запрос отклонён: {reason}",
       outputLimited: "Модель достигла лимита токенов ответа, поэтому текст может быть неполным. Сузьте вопрос или увеличьте AIRFLOW_PYTEST_ASSISTANT_MAX_OUTPUT_TOKENS.",
       truncated: "Контекст был ограничен", reports: "Отчётов: {n}", direct: "контекст без сжатия",
       starters: ["Что сломалось в последних прогонах?", "Какие падения похожи на flaky?", "Какие тесты замедлились?"]
@@ -500,6 +559,7 @@ _JS = r"""
   var astSessionTokens = document.getElementById("ast-session-tokens");
   var astQuestion = document.getElementById("ast-question");
   var astSend = document.getElementById("ast-send");
+  var astStop = document.getElementById("ast-stop");
   var astClear = document.getElementById("ast-clear");
   var astContext = document.getElementById("ast-context");
   var astScopeList = document.getElementById("ast-scope-list");
@@ -512,10 +572,13 @@ _JS = r"""
   var AST_STORAGE_KEY = null;
   var AST_WINDOW_PREFS_KEY = null, AST_WINDOW_OPEN_KEY = null, AST_CONTEXT_WRAP_KEY = null;
   var AST_MAX_MESSAGES = 12;
+  var AST_MAX_HISTORY_CHARS = 4000;
   var AST_MAX_SESSION_TOKENS = 1_000_000_000_000_000;
   var astLastFocus = null, astPending = false, astLastQuestion = "", astStatus = null;
+  var astController = null;
   var astResizeTimer = null, astWindowWidth = null, astWindowHeight = null;
   var astWindowDirty = false, astActiveReportContext = null, astReportContextTrigger = null;
+  var astReportContextIndex = null;
   var astContextWrapped = true, astSessionTotalTokens = 0;
   var astTranscript = [];
 
@@ -528,6 +591,8 @@ _JS = r"""
     astQuestion.placeholder = astT("placeholder");
     document.getElementById("ast-hint").textContent = astT("hint");
     document.getElementById("ast-send-label").textContent = astT("send");
+    document.getElementById("ast-stop-label").textContent = astT("stop");
+    astStop.setAttribute("aria-label", astT("stopHint"));
     astScopeList.textContent = astT("scopeList");
     document.getElementById("ast-scope-dialog-title").textContent = astT("scopeListTitle");
     document.getElementById("ast-scope-dialog-close").setAttribute("aria-label", astT("scopeListClose"));
@@ -610,17 +675,23 @@ _JS = r"""
       ? astStatus.max_output_tokens : 3072;
     if (astStatus && astStatus.context_mode === "local-full-tree") {
       var processed = Math.min(visible, selectedCap);
+      var localLimits = [
+        astLimitText("localLimitReports", processed),
+        astT("localLimitCases"),
+        astLimitText("tracebackLimit", astByteLabel(failureBytes)),
+        astLimitText("captureLimit", astByteLabel(captureBytes)),
+        astLimitText("localOutboundLimit", astByteLabel(contextBytes))
+      ];
+      if (Number.isFinite(astStatus.local_budget_seconds)
+          && astStatus.local_budget_seconds > 0) {
+        localLimits.push(astLimitText("localBudgetLimit",
+          Math.round(astStatus.local_budget_seconds)));
+      }
+      localLimits.push(astLimitText("outputTokenLimit", outputTokens));
       return {
         copy: astFmt(astT("localProcessing"), "processed", processed),
         visible: visible,
-        limits: [
-          astLimitText("localLimitReports", processed),
-          astT("localLimitCases"),
-          astLimitText("tracebackLimit", astByteLabel(failureBytes)),
-          astLimitText("captureLimit", astByteLabel(captureBytes)),
-          astLimitText("localOutboundLimit", astByteLabel(contextBytes)),
-          astLimitText("outputTokenLimit", outputTokens)
-        ]
+        limits: localLimits
       };
     }
     var summaryLimit = astStatus && Number.isFinite(astStatus.direct_max_summaries)
@@ -728,7 +799,10 @@ _JS = r"""
     document.getElementById("ast-scope").textContent = scope.label;
     astRenderProcessing(scope);
     astScopeList.hidden = !scope.selected.length;
-    astContext.hidden = !scope.selected.length && !Object.keys(scope.payload).length;
+    // Always state the scope, including the unfiltered default. Hiding the banner until a
+    // filter exists left the most common case -- "everything you may read" -- as the only
+    // one the user had to go looking for.
+    astContext.hidden = false;
     if (astScopeDialog.open) astRenderScopeList(scope);
   }
 
@@ -855,8 +929,16 @@ _JS = r"""
             ? Math.min(Math.floor(item.promptBytes), 100 * 1024 * 1024) : null,
           contextLimited: item.contextLimited === true,
           outputLimited: item.outputLimited === true,
+          // A reload kills the connection, so a restored answer can never still be
+          // streaming: it is exactly as finished as the text that reached storage.
+          pending: false,
+          stopped: item.pending === true || item.stopped === true,
+          stoppedNote: typeof item.stoppedNote === "string"
+            ? item.stoppedNote.slice(0, 400) : null,
           truncated: item.truncated === true
         };
+      }).filter(function (item) {
+        return item.text || item.role === "user";
       });
       var visibleTotal = messages.reduce(function (total, item) {
         return total + (item.tokenUsage ? item.tokenUsage.total_tokens : 0);
@@ -878,14 +960,26 @@ _JS = r"""
   }
 
   function astHistoryPayload() {
+    // A stored answer may be far longer than one prompt turn, and the server clips each
+    // turn to the same limit anyway. Sending the whole transcript verbatim would only
+    // push the request towards the 64 KiB body cap.
     return astTranscript.filter(function (item) {
-      return item.role === "user" || item.role === "assistant";
+      return (item.role === "user" || item.role === "assistant") && item.text;
     }).slice(-AST_MAX_MESSAGES).map(function (item) {
-      return { role: item.role, content: item.text };
+      return { role: item.role, content: item.text.slice(0, AST_MAX_HISTORY_CHARS) };
     });
   }
 
   function astMessageMeta(item) {
+    // An empty scope never reaches a model, so the API reports a zero-byte prompt. Six
+    // rows of "0 B" read as a broken request; say what actually happened instead.
+    if (item.role === "user" && item.promptParts && !item.promptParts.total) {
+      return astT("promptNothingSent");
+    }
+    if (item.role === "user" && Number.isFinite(item.promptBytes)
+        && item.promptBytes === 0 && !item.promptParts) {
+      return astT("promptNothingSent");
+    }
     if (item.role === "user" && item.promptParts) {
       return { title: astT("promptSize"), items: [
         { label: astT("promptSystem"), value: astByteLabel(item.promptParts.system) },
@@ -927,9 +1021,17 @@ _JS = r"""
     document.getElementById("ast-report-context-code").textContent = context.content;
   }
 
+  function astContextTrigger(index) {
+    if (index == null) return null;
+    var box = astMessages.querySelector('[data-ast-index="' + index + '"]');
+    return box ? box.querySelector(".ast-context-review") : null;
+  }
+
   function astOpenReportContext(context, trigger) {
     if (!context) return;
     astActiveReportContext = context; astReportContextTrigger = trigger;
+    var owner = trigger && trigger.closest ? trigger.closest("[data-ast-index]") : null;
+    astReportContextIndex = owner ? owner.getAttribute("data-ast-index") : null;
     astRenderReportContext(context);
     if (typeof astReportContextDialog.showModal === "function") {
       if (!astReportContextDialog.open) astReportContextDialog.showModal();
@@ -946,11 +1048,44 @@ _JS = r"""
 
   function astRenderTranscript() {
     astMessages.textContent = "";
-    astTranscript.forEach(function (item) {
-      astAddMessage(item.role, item.text, item.evidence || [], astMessageMeta(item),
-        false, item.outputLimited === true);
+    astTranscript.forEach(function (item, index) {
+      var box = astAddMessage(item.role, item.text, item.evidence || [], astMessageMeta(item),
+        false, item.outputLimited === true, astMessageState(item), item.stoppedNote);
+      // A stable position, so anything holding on to a bubble (focus return, in particular)
+      // can find the replacement after a re-render instead of pointing at a detached node.
+      box.setAttribute("data-ast-index", String(index));
     });
     astClear.hidden = !astTranscript.length;
+  }
+
+  function astMessageState(item) {
+    if (item.role !== "assistant") return "";
+    if (item.pending) return "pending";
+    return item.stopped ? "stopped" : "";
+  }
+
+  function astStreamingBox() {
+    return astMessages.querySelector('.ast-msg.assistant[data-ast-state="pending"]');
+  }
+
+  function astUpdateStreamingAnswer(item) {
+    // Patch the live bubble in place so a delta never rebuilds the whole transcript. Any
+    // full re-render in between recreates the same node from the same transcript item.
+    var box = astStreamingBox();
+    var body = box ? box.querySelector(".ast-answer") : null;
+    if (!body) {
+      // The very first delta upgrades the three-dot bubble into a text bubble; after that
+      // the answer element exists and every later delta is a cheap in-place patch.
+      astRenderTranscript();
+      box = astStreamingBox();
+      body = box ? box.querySelector(".ast-answer") : null;
+      if (!body) return;
+    }
+    body.textContent = "";
+    astRenderMarkdown(body, item.text);
+    var atBottom = astMessages.scrollHeight - astMessages.scrollTop
+      - astMessages.clientHeight < 80;
+    if (atBottom) astMessages.scrollTop = astMessages.scrollHeight;
   }
 
   function astClearTranscript() {
@@ -1102,6 +1237,25 @@ _JS = r"""
     flushParagraph();
   }
 
+  function astContextIcon() {
+    var icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    icon.setAttribute("viewBox", "0 0 24 24"); icon.setAttribute("fill", "none");
+    icon.setAttribute("stroke", "currentColor"); icon.setAttribute("stroke-width", "2");
+    icon.setAttribute("stroke-linecap", "round");
+    icon.setAttribute("stroke-linejoin", "round");
+    icon.setAttribute("aria-hidden", "true");
+    var page = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    page.setAttribute("d", "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z");
+    var fold = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    fold.setAttribute("d", "M14 2v6h6");
+    icon.appendChild(page); icon.appendChild(fold);
+    ["M9 13h6", "M9 17h4"].forEach(function (d) {
+      var line = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      line.setAttribute("d", d); icon.appendChild(line);
+    });
+    return icon;
+  }
+
   function astAppendMessageMeta(box, meta) {
     if (!meta) return;
     if (typeof meta !== "string" && box.classList && box.classList.contains("ast-msg")) {
@@ -1124,7 +1278,11 @@ _JS = r"""
       note.appendChild(parts);
       if (meta.reportContext) {
         var review = document.createElement("button"); review.type = "button";
-        review.className = "ast-context-review"; review.textContent = astT("contextReview");
+        review.className = "ast-context-review";
+        review.appendChild(astContextIcon());
+        var reviewLabel = document.createElement("span");
+        reviewLabel.textContent = astT("contextReview");
+        review.appendChild(reviewLabel);
         review.setAttribute("aria-haspopup", "dialog");
         review.setAttribute("aria-controls", "ast-report-context-dialog");
         review.addEventListener("click", function () {
@@ -1189,13 +1347,36 @@ _JS = r"""
     return button;
   }
 
-  function astAddMessage(role, text, evidence, meta, isError, outputLimited) {
+  function astAddMessage(role, text, evidence, meta, isError, outputLimited, state,
+                         stoppedNote) {
     var empty = astMessages.querySelector(".ast-empty"); if (empty) empty.remove();
     var box = document.createElement("div"); box.className = "ast-msg " + role;
+    if (state) box.setAttribute("data-ast-state", state);
+    if (state === "pending" && !text) {
+      // Nothing has arrived yet: the same compact three-dot bubble as before.
+      box.className = "ast-msg assistant ast-waiting";
+      box.setAttribute("role", "status"); box.setAttribute("aria-label", astT("thinking"));
+      var dots = document.createElement("span"); dots.className = "ast-thinking";
+      for (var d = 0; d < 3; d++) dots.appendChild(document.createElement("i"));
+      box.appendChild(dots);
+      astMessages.appendChild(box); astMessages.scrollTop = astMessages.scrollHeight;
+      return box;
+    }
     var body = document.createElement("div"); body.className = "ast-answer" + (isError ? " ast-error" : "");
     if (role === "assistant" && !isError) astRenderMarkdown(body, text);
     else body.textContent = text;
     box.appendChild(body);
+    if (state === "pending") {
+      var caret = document.createElement("span"); caret.className = "ast-caret";
+      caret.setAttribute("aria-hidden", "true"); box.appendChild(caret);
+      box.setAttribute("aria-busy", "true");
+    }
+    if (state === "stopped") {
+      var stopped = document.createElement("div"); stopped.className = "ast-stopped-note";
+      stopped.setAttribute("role", "status");
+      stopped.textContent = stoppedNote || astT("stoppedNote");
+      box.appendChild(stopped);
+    }
     if (role === "assistant" && outputLimited) {
       var warning = document.createElement("div"); warning.className = "ast-output-warning";
       warning.setAttribute("role", "status"); warning.textContent = astT("outputLimited");
@@ -1211,11 +1392,12 @@ _JS = r"""
       });
       box.appendChild(sources);
     }
-    if (role === "assistant" && !isError) {
+    if (role === "assistant" && !isError && state !== "pending") {
+      // A half-written answer has nothing worth copying yet, so the footer waits.
       var footer = document.createElement("div"); footer.className = "ast-msg-footer";
       astAppendMessageMeta(footer, meta); footer.appendChild(astCopyButton(text));
       box.appendChild(footer);
-    } else astAppendMessageMeta(box, meta);
+    } else if (state !== "pending") astAppendMessageMeta(box, meta);
     if (isError) {
       var retry = document.createElement("button"); retry.type = "button"; retry.className = "btn ast-retry";
       retry.textContent = astT("retry"); retry.addEventListener("click", function () { astSendQuestion(astLastQuestion); });
@@ -1225,18 +1407,81 @@ _JS = r"""
     return box;
   }
 
-  function astThinking() {
-    var box = document.createElement("div"); box.className = "ast-msg assistant ast-waiting";
-    box.setAttribute("role", "status"); box.setAttribute("aria-label", astT("thinking"));
-    var dots = document.createElement("span"); dots.className = "ast-thinking";
-    for (var i = 0; i < 3; i++) dots.appendChild(document.createElement("i"));
-    box.appendChild(dots); astMessages.appendChild(box); astMessages.scrollTop = astMessages.scrollHeight;
-    return box;
-  }
-
   function astSetPending(on) {
     astPending = on; astSend.disabled = on; astQuestion.disabled = on;
+    // Stop replaces Send while an answer is streaming: the request is abortable, and
+    // leaving a disabled Send as the only control gave the user nothing to do but wait.
+    astSend.hidden = on; astStop.hidden = !on;
     astMessages.setAttribute("aria-busy", String(on));
+    if (on) astStop.disabled = false;
+  }
+
+  function astErrorDetail(body, status) {
+    // FastAPI answers a schema violation with a list of error objects, not a string.
+    // Stringifying that list produced "[object Object]" in the bubble.
+    var detail = body && body.detail;
+    if (typeof detail === "string" && detail.trim()) return detail;
+    if (Array.isArray(detail) && detail.length) {
+      var first = detail[0];
+      if (first && typeof first.msg === "string" && first.msg) {
+        return astFmt(astT("invalidRequest"), "reason", first.msg);
+      }
+    }
+    return "HTTP " + status;
+  }
+
+  function astApplyMeta(userItem, body) {
+    userItem.promptParts = astCleanPromptParts(body.prompt_bytes);
+    userItem.reportContext = astCleanReportContext(body.report_context);
+    if (userItem.promptParts && userItem.reportContext
+        && userItem.promptParts.context !== userItem.reportContext.bytes) {
+      userItem.reportContext = null;
+    }
+    if (userItem.promptParts) userItem.promptBytes = userItem.promptParts.total;
+    else if (Number.isFinite(body.provider_input_bytes) && body.provider_input_bytes >= 0) {
+      userItem.promptBytes = Math.floor(body.provider_input_bytes);
+    }
+  }
+
+  function astApplyDone(item, body) {
+    // The server guesses the reply language from the question, which is wrong for a short
+    // or English question typed into a Russian dashboard. The browser knows the locale for
+    // certain, so it owns this one fixed sentence.
+    var answer = body.reports_considered === 0 && !body.report_context
+      ? astT("noReportsInScope") : (body.answer || item.text || "");
+    item.text = answer;
+    item.pending = false;
+    item.stopped = false;
+    item.evidence = body.evidence || [];
+    item.reports = body.reports_considered || 0;
+    item.tokenUsage = astCleanTokenUsage(body.token_usage);
+    item.contextLimited = body.context_limited === true
+      || (body.context_limited == null && body.truncated === true);
+    item.outputLimited = body.output_limited === true;
+    item.truncated = body.truncated === true;
+  }
+
+  function astParseEvents(buffer, onEvent) {
+    // SSE frames are separated by a blank line; JSON payloads never contain a raw newline,
+    // so one `data:` line always holds a whole event.
+    var blocks = buffer.split("\n\n");
+    var rest = blocks.pop();
+    blocks.forEach(function (block) {
+      var name = "", data = "";
+      block.split("\n").forEach(function (line) {
+        if (line.indexOf("event: ") === 0) name = line.slice(7);
+        else if (line.indexOf("data: ") === 0) data = line.slice(6);
+      });
+      if (!name || !data) return;
+      var payload;
+      try { payload = JSON.parse(data); } catch (error) { return; /* Partial frame. */ }
+      onEvent(name, payload);
+    });
+    return rest;
+  }
+
+  function astStopStream() {
+    if (astController) { try { astController.abort(); } catch (error) {} }
   }
 
   function astSendQuestion(raw) {
@@ -1245,47 +1490,93 @@ _JS = r"""
     astLastQuestion = question;
     var userItem = { role: "user", text: question, evidence: [], reports: null,
       promptParts: null, promptBytes: null, reportContext: null, truncated: false };
-    astTranscript.push(userItem);
-    astPersistTranscript(); var userBox = astAddMessage("user", question); astQuestion.value = "";
-    var waiting = astThinking(), scope = astScope(); astUpdateScope(); astSetPending(true);
-    fetch(API + "assistant/query", {
+    // The pending answer lives in the transcript, not only in the DOM: closing and
+    // reopening the window re-renders from the transcript, and an answer that existed only
+    // as a detached node used to vanish mid-flight.
+    var pendingItem = { role: "assistant", text: "", evidence: [], reports: null,
+      tokenUsage: null, contextLimited: false, outputLimited: false, truncated: false,
+      pending: true, stopped: false };
+    astTranscript.push(userItem); astTranscript.push(pendingItem);
+    astPersistTranscript(); astRenderTranscript(); astQuestion.value = "";
+    var scope = astScope(); astUpdateScope(); astSetPending(true);
+    astController = typeof AbortController === "function" ? new AbortController() : null;
+    var settled = false, sawDone = false, lastPersist = 0;
+
+    function onEvent(name, payload) {
+      if (name === "meta") {
+        astApplyMeta(userItem, payload);
+        astRenderTranscript();
+      } else if (name === "delta" && typeof payload.text === "string") {
+        pendingItem.text += payload.text;
+        astUpdateStreamingAnswer(pendingItem);
+        var now = Date.now();
+        if (now - lastPersist > 600) { lastPersist = now; astPersistTranscript(); }
+      } else if (name === "done") {
+        sawDone = true;
+        astApplyMeta(userItem, payload);
+        astApplyDone(pendingItem, payload);
+        astAddSessionTokens(pendingItem.tokenUsage);
+        astRenderTranscript(); astPersistTranscript();
+      } else if (name === "error") {
+        settled = true;
+        astFailPending(pendingItem, payload && payload.detail);
+      }
+    }
+
+    fetch(API + "assistant/stream", {
       method: "POST", headers: { "Content-Type": "application/json" },
+      signal: astController ? astController.signal : undefined,
       body: JSON.stringify({ question: question, scope: scope.payload, history: history })
     }).then(function (response) {
-      return response.json().catch(function () { return {}; }).then(function (body) {
-        if (!response.ok) throw new Error(body.detail || ("HTTP " + response.status));
-        return body;
-      });
-    }).then(function (body) {
-      waiting.remove();
-      userItem.promptParts = astCleanPromptParts(body.prompt_bytes);
-      userItem.reportContext = astCleanReportContext(body.report_context);
-      if (userItem.promptParts && userItem.reportContext
-          && userItem.promptParts.context !== userItem.reportContext.bytes) {
-        userItem.reportContext = null;
+      if (!response.ok) {
+        return response.json().catch(function () { return {}; }).then(function (body) {
+          throw new Error(astErrorDetail(body, response.status));
+        });
       }
-      if (userItem.promptParts) {
-        userItem.promptBytes = userItem.promptParts.total;
-        astAppendMessageMeta(userBox, astMessageMeta(userItem));
-      } else if (Number.isFinite(body.provider_input_bytes) && body.provider_input_bytes >= 0) {
-        userItem.promptBytes = Math.floor(body.provider_input_bytes);
-        astAppendMessageMeta(userBox, astMessageMeta(userItem));
+      if (!response.body || typeof response.body.getReader !== "function") {
+        // No streaming reader available: take the whole body and replay its events.
+        return response.text().then(function (text) { astParseEvents(text + "\n\n", onEvent); });
       }
-      var contextLimited = body.context_limited === true
-        || (body.context_limited == null && body.truncated === true);
-      var assistantItem = { role: "assistant", text: body.answer || "",
-        evidence: body.evidence || [], reports: body.reports_considered || 0,
-        tokenUsage: astCleanTokenUsage(body.token_usage),
-        contextLimited: contextLimited, outputLimited: body.output_limited === true,
-        truncated: body.truncated === true };
-      astAddSessionTokens(assistantItem.tokenUsage);
-      astAddMessage("assistant", assistantItem.text, assistantItem.evidence,
-        astMessageMeta(assistantItem), false, assistantItem.outputLimited);
-      astTranscript.push(assistantItem);
-      astPersistTranscript();
+      var reader = response.body.getReader(), decoder = new TextDecoder(), buffer = "";
+      return (function pump() {
+        return reader.read().then(function (chunk) {
+          if (chunk.done) { buffer = astParseEvents(buffer + "\n\n", onEvent); return; }
+          buffer = astParseEvents(buffer + decoder.decode(chunk.value, { stream: true }), onEvent);
+          return pump();
+        });
+      })();
+    }).then(function () {
+      if (settled) return;
+      if (!sawDone) astStopPending(pendingItem);
     }).catch(function (error) {
-      waiting.remove(); astAddMessage("assistant", error.message || astT("noDetail"), [], "", true);
-    }).then(function () { astSetPending(false); astQuestion.focus(); });
+      if (settled) return;
+      if (error && error.name === "AbortError") { astStopPending(pendingItem); return; }
+      astFailPending(pendingItem, error && error.message);
+    }).then(function () {
+      astController = null; astSetPending(false); astQuestion.focus();
+    });
+  }
+
+  function astStopPending(item) {
+    item.pending = false;
+    item.stopped = true;
+    if (!item.text) item.text = astT("stoppedEmpty");
+    astRenderTranscript(); astPersistTranscript();
+  }
+
+  function astFailPending(item, message) {
+    if (item.text) {
+      // The provider died part-way through. Throwing the text away would lose real work,
+      // so keep it and say why it stopped, the same as an interrupted answer.
+      item.pending = false; item.stopped = true;
+      item.stoppedNote = message || astT("noDetail");
+      astRenderTranscript(); astPersistTranscript();
+      return;
+    }
+    var index = astTranscript.indexOf(item);
+    if (index >= 0) astTranscript.splice(index, 1);
+    astPersistTranscript(); astRenderTranscript();
+    astAddMessage("assistant", message || astT("noDetail"), [], "", true);
   }
 
   function astWindowIsCompact() { return window.innerWidth <= 700; }
@@ -1380,6 +1671,9 @@ _JS = r"""
         if (Number.isFinite(status.max_history_messages)) {
           AST_MAX_MESSAGES = status.max_history_messages;
         }
+        if (Number.isFinite(status.max_history_chars) && status.max_history_chars > 0) {
+          AST_MAX_HISTORY_CHARS = status.max_history_chars;
+        }
         astUseStorageNamespace(status.storage_namespace);
         astButton.hidden = false;
         astQuestion.maxLength = status.max_question_chars || 4000;
@@ -1391,6 +1685,7 @@ _JS = r"""
   astButton.addEventListener("click", function () { astDialog.open ? astClose() : astOpen(); });
   document.getElementById("ast-close").addEventListener("click", astClose);
   astClear.addEventListener("click", astClearTranscript);
+  astStop.addEventListener("click", function () { astStop.disabled = true; astStopStream(); });
   astScopeList.addEventListener("click", astOpenScopeList);
   document.addEventListener("click", function (event) {
     var disclosure = document.getElementById("ast-limit-disclosure");
@@ -1432,7 +1727,9 @@ _JS = r"""
   });
   astReportContextDialog.addEventListener("close", function () {
     var trigger = astReportContextTrigger;
+    if (!trigger || !trigger.isConnected) trigger = astContextTrigger(astReportContextIndex);
     astActiveReportContext = null; astReportContextTrigger = null;
+    astReportContextIndex = null;
     document.getElementById("ast-report-context-code").textContent = "";
     if (typeof updateParentDim === "function") updateParentDim();
     if (trigger && trigger.isConnected && trigger.focus) trigger.focus();
