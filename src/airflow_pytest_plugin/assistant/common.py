@@ -157,6 +157,12 @@ class AssistantQuery:
     question: str
     scope: AssistantScope = AssistantScope()
     history: tuple[AssistantTurn, ...] = ()
+    #: Which stored chat this question belongs to. Ignored entirely when no database is
+    #: configured -- the browser keeps its own transcript then, as it always did.
+    conversation: str = ""
+    #: The dashboard's language tag, when the request came from the viewer. A two-word
+    #: question does not say what language its asker reads; the browser knows for certain.
+    locale: str = ""
 
 
 @dataclass(frozen=True)
@@ -208,12 +214,21 @@ class AssistantPromptBytes:
     user: int = 0
     context: int = 0
     history: int = 0
+    #: Product documentation selected for this question, when a deployment supplied any.
+    docs: int = 0
     structure: int = 0
 
     @property
     def total(self) -> int:
         """Return the sum handed to the provider as system and user-role strings."""
-        return self.system + self.user + self.context + self.history + self.structure
+        return (
+            self.system
+            + self.user
+            + self.context
+            + self.history
+            + self.docs
+            + self.structure
+        )
 
     def to_dict(self) -> dict[str, int]:
         """Return browser-safe component sizes plus their total."""
@@ -222,6 +237,7 @@ class AssistantPromptBytes:
             "user": self.user,
             "context": self.context,
             "history": self.history,
+            "docs": self.docs,
             "structure": self.structure,
             "total": self.total,
         }
@@ -287,11 +303,23 @@ class AssistantReply:
         }
 
 
+def encodable(text: str) -> str:
+    """Return ``text`` with anything UTF-8 cannot encode replaced.
+
+    A ``str`` is not automatically encodable: a model that emits a broken surrogate pair,
+    or captured test output carrying one, produces a string that ``encode()`` refuses.
+    Left alone it does not fail where it was created -- it fails later, in the middle of
+    writing an SSE frame or a JSON body, as an unhandled ``UnicodeEncodeError`` with the
+    connection already open. Everything leaving the runtime passes through here first.
+    """
+    return text.encode("utf-8", "replace").decode("utf-8")
+
+
 def clip_utf8(text: str, limit: int) -> str:
     """Clip text to at most ``limit`` encoded bytes and mark the truncation."""
     raw = text.encode("utf-8", "replace")
     if len(raw) <= limit:
-        return text
+        return encodable(text)
     marker = b"\n...[truncated]..."
     if limit <= len(marker):
         return raw[:limit].decode("utf-8", "ignore")
@@ -321,6 +349,8 @@ __all__ = [
     "AssistantTokenUsage",
     "ContextReducer",
     "StreamingAnswerProvider",
+    "clip_utf8",
+    "encodable",
     "response_text",
     "usage_count",
 ]

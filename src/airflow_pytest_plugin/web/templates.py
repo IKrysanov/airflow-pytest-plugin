@@ -4630,6 +4630,8 @@ __ASSISTANT_PANEL__
     var settingsDlg = document.getElementById("settings");
     var assistantDlg = document.getElementById("assistant-dialog");
     var assistantScopeDlg = document.getElementById("ast-scope-dialog");
+    var assistantChatsDlg = document.getElementById("ast-chats-dialog");
+    var assistantCtxDlg = document.getElementById("ast-report-context-dialog");
     var anyOpen = (dlg && dlg.open) || (confirmDlg && confirmDlg.open)
       || (failuresDlg && failuresDlg.open) || (compareDlg && compareDlg.open)
       || (flakyDlg && flakyDlg.open) || (historyDlg && historyDlg.open)
@@ -4638,7 +4640,9 @@ __ASSISTANT_PANEL__
       || (panelInfoDlg && panelInfoDlg.open) || (emailDlg && emailDlg.open)
       || (alertsDlg && alertsDlg.open) || (settingsDlg && settingsDlg.open)
       || (assistantDlg && assistantDlg.open)
-      || (assistantScopeDlg && assistantScopeDlg.open);
+      || (assistantScopeDlg && assistantScopeDlg.open)
+      || (assistantChatsDlg && assistantChatsDlg.open)
+      || (assistantCtxDlg && assistantCtxDlg.open);
     setLocalDim(anyOpen);   // dim our own page/iframe once
     setParentDim(anyOpen);  // and, embedded, the Airflow chrome around the iframe
   }
@@ -5781,8 +5785,22 @@ __ASSISTANT_JS__
 """
 
 
-def index_html() -> str:
-    """Return the single-page viewer HTML."""
+def index_html(*, assistant: bool = True) -> str:
+    """Return the single-page viewer HTML.
+
+    With ``assistant=False`` the chat is left out of the page entirely -- no styles, no
+    dialog, no client. A deployment that never configured a provider has no assistant
+    endpoints either, so a client that shipped anyway would only fetch a 404 on every load
+    and put an error in everyone's console. Every reference to it from the main script is
+    already guarded, because the panel has always been optional.
+    """
+    if not assistant:
+        return (
+            _INDEX_HTML.replace("__ASSISTANT_CSS__", "")
+            .replace("__ASSISTANT_BUTTON__", "")
+            .replace("__ASSISTANT_PANEL__", "")
+            .replace("__ASSISTANT_JS__", "")
+        )
     return (
         _INDEX_HTML.replace("__ASSISTANT_CSS__", assistant_css())
         .replace("__ASSISTANT_BUTTON__", assistant_button_html())

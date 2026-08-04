@@ -22,7 +22,7 @@ import secrets
 from collections.abc import AsyncIterator, Iterator, Mapping
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
@@ -38,6 +38,7 @@ from ...assistant import (
     AssistantRuntime,
     AssistantScope,
     AssistantTurn,
+    healthcheck_enabled,
 )
 from .common import RouteDeps, ok
 
@@ -65,6 +66,14 @@ class AssistantScopeInput(BaseModel):
     )
 
 
+class AssistantRenameInput(BaseModel):
+    """A name the user chose for one of their chats."""
+
+    #: Bounded here and trimmed again in the store. An empty value clears the name, which
+    #: puts the chat back to being labelled by its opening question.
+    title: Annotated[str, Field(max_length=1_000)] = ""
+
+
 class AssistantQueryInput(BaseModel):
     """One bounded, non-persistent question."""
 
@@ -73,6 +82,12 @@ class AssistantQueryInput(BaseModel):
     history: list[AssistantTurnInput] = Field(
         default_factory=list, max_length=MAX_HISTORY_MESSAGES
     )
+    #: Which stored chat to file this exchange under. Sanitised server-side; ignored
+    #: entirely when no database is configured.
+    conversation: Annotated[str, Field(max_length=64)] = ""
+    #: The dashboard's language tag. Matched against a strict pattern before it reaches
+    #: the prompt, so anything else is simply dropped.
+    locale: Annotated[str, Field(max_length=16)] = ""
 
 
 _EX_STATUS = {
@@ -97,6 +112,43 @@ _EX_STATUS = {
     "max_capture_bytes": 2_048,
     "local_complete_tree": True,
     "local_input_bytes": 9_000,
+}
+_EX_HEALTH = {
+    "ok": True,
+    "provider": "anthropic",
+    "model": "claude-sonnet-5",
+    "context_model": "qwen2.5-0.5b-instruct-q4_k_m.gguf",
+    "context_model_ok": True,
+    "detail": None,
+    "latency_ms": 412,
+    "checked_at": 1_785_000_000.0,
+    "cached": False,
+}
+_EX_HISTORY = {
+    "available": True,
+    "messages": [
+        {
+            "role": "user",
+            "content": "What failed overnight?",
+            "evidence": [],
+            "total_tokens": 0,
+        },
+        {
+            "role": "assistant",
+            "content": "Two assertion failures in `etl_daily` [R1].",
+            "evidence": [
+                {
+                    "key": "R1",
+                    "report_id": "opaque-report-token",
+                    "dag_id": "etl_daily",
+                    "run_id": "scheduled__2026-08-01",
+                    "task_id": "unit_tests",
+                    "created_at": None,
+                }
+            ],
+            "total_tokens": 8_552,
+        },
+    ],
 }
 _EX_REPLY = {
     "answer": "The latest run introduced two assertion failures [R1].",
@@ -144,6 +196,13 @@ _EX_REPLY = {
 }
 
 
+def _http_error(exc: AssistantError) -> HTTPException:
+    """Map an assistant error to HTTP, telling a throttled caller when to return."""
+    retry_after = getattr(exc, "retry_after", 0)
+    headers = {"Retry-After": str(retry_after)} if retry_after else None
+    return HTTPException(status_code=exc.status_code, detail=str(exc), headers=headers)
+
+
 def _next_event(
     events: Iterator[tuple[str, dict[str, Any]]],
 ) -> tuple[str, dict[str, Any]] | None:
@@ -156,9 +215,14 @@ def _sse(event: str, payload: dict[str, Any]) -> bytes:
 
     ``json.dumps`` cannot emit a raw newline inside a string, so a single ``data:`` line is
     always enough and no answer text can forge an event boundary.
+
+    The encode replaces rather than raises. Everything the runtime produces is already
+    encodable, but this frame is written with the response open: a ``UnicodeEncodeError``
+    here would tear the connection instead of returning an error, so the last step never
+    fails on content.
     """
     body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-    return f"event: {event}\ndata: {body}\n\n".encode()
+    return f"event: {event}\ndata: {body}\n\n".encode("utf-8", "replace")
 
 
 def build_router(deps: RouteDeps, runtime: AssistantRuntime) -> APIRouter:
@@ -174,9 +238,103 @@ def build_router(deps: RouteDeps, runtime: AssistantRuntime) -> APIRouter:
         user: Any = Depends(deps.user_dep),  # noqa: B008 - FastAPI dependency idiom
     ) -> JSONResponse:
         """Configuration readiness without loading or calling either model."""
-        body = runtime.status()
+        body = runtime.status(user)
         body["storage_namespace"] = _storage_namespace(user)
         return JSONResponse(body)
+
+    @router.post(
+        "/api/assistant/health",
+        summary="Check that the configured models actually answer",
+        responses={
+            **ok(_EX_HEALTH),
+            404: {"description": "The readiness check is not enabled on this server."},
+            429: {"description": "A question is holding the bounded assistant worker."},
+            502: {"description": "The provider or local model did not answer."},
+            503: {"description": "The assistant is disabled or incomplete."},
+        },
+    )
+    def health(
+        user: Any = Depends(deps.user_dep),  # noqa: B008 - FastAPI dependency idiom
+    ) -> JSONResponse:
+        """Send one fixed probe to the configured models. No report data is involved.
+
+        Off unless an operator sets ``AIRFLOW_PYTEST_ASSISTANT_HEALTHCHECK``: it costs a
+        real provider call. The result is cached briefly and the probe takes the same model
+        slot as a question, so polling cannot multiply provider cost or race a paying
+        request.
+        """
+        del user
+        if not healthcheck_enabled():
+            raise HTTPException(
+                status_code=404, detail="assistant health check is disabled"
+            )
+        try:
+            body = runtime.health()
+        except AssistantError as exc:
+            raise _http_error(exc) from exc
+        # A reachable endpoint reporting a broken dependency: 502 carries the diagnosis in
+        # the body rather than hiding it behind a bare error.
+        return JSONResponse(body, status_code=200 if body["ok"] else 502)
+
+    @router.get(
+        "/api/assistant/history",
+        summary="The caller's stored chat transcript",
+        responses=ok(_EX_HISTORY),
+    )
+    def history(
+        conversation: Annotated[str | None, Query(max_length=64)] = None,
+        user: Any = Depends(deps.user_dep),  # noqa: B008 - FastAPI dependency idiom
+    ) -> JSONResponse:
+        """Return one stored chat, oldest message first, plus the caller's chat list.
+
+        Scoped to the acting principal in the query itself -- one user can never read
+        another's chat, and a guessed ``conversation`` belonging to someone else simply
+        matches no rows. Without ``conversation`` the newest chat is returned, which is
+        what a browser opening the panel wants. ``available`` is ``false`` when server-side
+        history is switched off, the tables were never created, or the auth manager gives
+        no identity to own the rows, in which case the browser keeps its own copy instead.
+        """
+        return JSONResponse(
+            runtime.history(user, conversation=conversation, can_read=deps.read_auth)
+        )
+
+    @router.delete(
+        "/api/assistant/history",
+        summary="Delete the caller's stored chat transcript",
+        responses=ok({"removed": 12}),
+    )
+    def forget_history(
+        conversation: Annotated[str | None, Query(max_length=64)] = None,
+        user: Any = Depends(deps.user_dep),  # noqa: B008 - FastAPI dependency idiom
+    ) -> JSONResponse:
+        """Delete one stored chat, or every message the acting user owns."""
+        return JSONResponse(
+            {"removed": runtime.forget(user, conversation=conversation)}
+        )
+
+    @router.patch(
+        "/api/assistant/history",
+        summary="Rename one of the caller's chats",
+        responses=ok({"renamed": 1}),
+    )
+    def rename_history(
+        body: AssistantRenameInput,
+        conversation: Annotated[str, Query(max_length=64)],
+        user: Any = Depends(deps.user_dep),  # noqa: B008 - FastAPI dependency idiom
+    ) -> JSONResponse:
+        """Give one chat a name, or send an empty title to go back to the default.
+
+        Scoped to the acting principal in the statement itself: a guessed id belonging to
+        someone else matches no row, so ``renamed`` comes back as 0 rather than an error
+        that would confirm the chat exists.
+        """
+        return JSONResponse(
+            {
+                "renamed": runtime.rename(
+                    user, conversation=conversation, title=body.title
+                )
+            }
+        )
 
     @router.post(
         "/api/assistant/query",
@@ -185,7 +343,12 @@ def build_router(deps: RouteDeps, runtime: AssistantRuntime) -> APIRouter:
             **ok(_EX_REPLY),
             400: {"description": "Malformed report scope."},
             403: {"description": "A selected report belongs to a forbidden DAG."},
-            429: {"description": "The bounded assistant worker is busy."},
+            429: {
+                "description": (
+                    "The bounded assistant worker is busy, or the caller reached their "
+                    "request rate or daily token quota. `Retry-After` says when to return."
+                )
+            },
             502: {"description": "A local or remote model failed."},
             503: {"description": "The assistant is disabled or incomplete."},
         },
@@ -209,7 +372,7 @@ def build_router(deps: RouteDeps, runtime: AssistantRuntime) -> APIRouter:
                 query=_query(body),
             )
         except AssistantError as exc:
-            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+            raise _http_error(exc) from exc
         return JSONResponse(reply.to_dict())
 
     @router.post(
@@ -227,7 +390,12 @@ def build_router(deps: RouteDeps, runtime: AssistantRuntime) -> APIRouter:
             },
             400: {"description": "Malformed report scope."},
             403: {"description": "A selected report belongs to a forbidden DAG."},
-            429: {"description": "The bounded assistant worker is busy."},
+            429: {
+                "description": (
+                    "The bounded assistant worker is busy, or the caller reached their "
+                    "request rate or daily token quota. `Retry-After` says when to return."
+                )
+            },
             502: {"description": "A local or remote model failed."},
             503: {"description": "The assistant is disabled or incomplete."},
         },
@@ -252,7 +420,7 @@ def build_router(deps: RouteDeps, runtime: AssistantRuntime) -> APIRouter:
             first = await run_in_threadpool(_next_event, events)
         except AssistantError as exc:
             await run_in_threadpool(events.close)
-            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+            raise _http_error(exc) from exc
 
         async def body_iterator() -> AsyncIterator[bytes]:
             # Deliberately an async generator. A sync one would be pulled through a
@@ -299,6 +467,8 @@ def _query(body: AssistantQueryInput) -> AssistantQuery:
         history=tuple(
             AssistantTurn(role=turn.role, content=turn.content) for turn in body.history
         ),
+        conversation=body.conversation,
+        locale=body.locale,
     )
 
 
@@ -315,7 +485,10 @@ def _storage_namespace(user: Any) -> str:
         identity = "standalone"
     else:
         identity = None
-        for attr in ("id", "user_id", "username", "name"):
+        # Unique account keys only. A display name is skipped on purpose: two colleagues
+        # can share one, and this namespace is what keeps their transcripts apart on a
+        # shared browser.
+        for attr in ("id", "user_id", "username"):
             value = (
                 user.get(attr)
                 if isinstance(user, Mapping)

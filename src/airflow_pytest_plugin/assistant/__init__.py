@@ -14,6 +14,7 @@
 
 """Public surface for the read-only report-assistant package."""
 
+from .audit import AUDIT_LOG_ENV, audit_enabled
 from .common import (
     MAX_CAPTURE_BYTES,
     MAX_HISTORY_BYTES,
@@ -44,11 +45,12 @@ from .exceptions import (
     AssistantError,
     AssistantForbiddenError,
     AssistantProviderError,
+    AssistantQuotaError,
     AssistantRequestError,
 )
 from .factory import configured_assistant_runtime
-from .fake import FakeAnswerProvider, FakeAssistant
-from .passthrough import PassthroughReducer
+from .providers import FakeAnswerProvider, FakeAssistant
+from .reducers import PassthroughReducer
 from .runtime import AssistantRuntime
 from .settings import (
     CAPTURE_BYTES_ENV,
@@ -56,24 +58,38 @@ from .settings import (
     CONTEXT_MAX_TOKENS_ENV,
     CONTEXT_MODEL_ENV,
     CONTEXT_N_CTX_ENV,
+    DAILY_TOKEN_QUOTA_ENV,
     DIRECT_MAX_SUMMARIES_ENV,
+    DOCS_BYTES_ENV,
+    DOCS_ENV,
+    HEALTHCHECK_ENV,
+    HISTORY_DAYS_ENV,
     LOCAL_BUDGET_SECONDS_ENV,
     MAX_CONCURRENT_ENV,
     MAX_OUTPUT_TOKENS_ENV,
     MODEL_ENV,
     PROVIDER_ENV,
+    RATE_LIMIT_ENV,
+    RATE_WINDOW_ENV,
     TIMEOUT_ENV,
     TRACEBACK_BYTES_ENV,
     AssistantSettings,
+    healthcheck_enabled,
 )
 
 __all__ = [
+    "AUDIT_LOG_ENV",
     "CAPTURE_BYTES_ENV",
+    "DOCS_BYTES_ENV",
+    "DOCS_ENV",
     "CONTEXT_BYTES_ENV",
     "CONTEXT_MAX_TOKENS_ENV",
     "CONTEXT_MODEL_ENV",
     "CONTEXT_N_CTX_ENV",
+    "DAILY_TOKEN_QUOTA_ENV",
     "DIRECT_MAX_SUMMARIES_ENV",
+    "HEALTHCHECK_ENV",
+    "HISTORY_DAYS_ENV",
     "LOCAL_BUDGET_SECONDS_ENV",
     "MAX_CONCURRENT_ENV",
     "MAX_CAPTURE_BYTES",
@@ -87,6 +103,8 @@ __all__ = [
     "MAX_SCOPE_REPORTS",
     "MODEL_ENV",
     "PROVIDER_ENV",
+    "RATE_LIMIT_ENV",
+    "RATE_WINDOW_ENV",
     "TIMEOUT_ENV",
     "TRACEBACK_BYTES_ENV",
     "AnswerProvider",
@@ -100,6 +118,7 @@ __all__ = [
     "AssistantForbiddenError",
     "AssistantProviderError",
     "AssistantQuery",
+    "AssistantQuotaError",
     "AssistantReportContext",
     "AssistantReply",
     "AssistantRequestError",
@@ -114,5 +133,7 @@ __all__ = [
     "PassthroughReducer",
     "ReportContextBuilder",
     "StreamingAnswerProvider",
+    "audit_enabled",
     "configured_assistant_runtime",
+    "healthcheck_enabled",
 ]

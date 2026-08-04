@@ -20,13 +20,13 @@ import contextlib
 from collections.abc import Iterator
 from typing import Any
 
-from .common import (
+from ..common import (
     AssistantProviderResponse,
     AssistantTokenUsage,
     response_text,
     usage_count,
 )
-from .settings import DEFAULT_MODELS, AssistantSettings
+from ..settings import DEFAULT_MODELS, AssistantSettings
 
 
 class AnthropicAssistant:

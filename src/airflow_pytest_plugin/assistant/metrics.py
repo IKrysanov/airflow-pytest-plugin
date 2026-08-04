@@ -26,7 +26,15 @@ import threading
 from dataclasses import dataclass
 
 #: Terminal states of one assistant request, used as the ``outcome`` label.
-OUTCOMES = ("answered", "empty_scope", "busy", "error", "stopped")
+OUTCOMES = (
+    "answered",
+    "empty_scope",
+    "busy",
+    "forbidden",
+    "bad_request",
+    "error",
+    "stopped",
+)
 
 #: Where the report evidence came from, used as the ``mode`` label.
 MODES = ("direct", "local")

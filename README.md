@@ -49,7 +49,7 @@ Two halves sharing one on-disk layout:
 - [Captured output](#captured-output)
 - [Coverage](#coverage)
 - [AI triage](#ai-triage)
-- [Report assistant](#report-assistant)
+- [Report assistant](#report-assistant) — [full docs](src/airflow_pytest_plugin/assistant/README.md)
 - [Allure / TestOps export](#allure--testops-export)
 - [Configuration](#configuration)
 - [Prometheus metrics](#prometheus-metrics)
@@ -481,63 +481,14 @@ adds the per-test judgements.
 
 ## Report assistant
 
-The **AI assistant** button on the dashboard opens a centered, resizable chat window over the
-current report selection. Its size is remembered per Airflow user in `localStorage`, and an
-open window is restored after a refresh in the same tab. On a narrow screen the window
-becomes full-screen.
-If rows are selected, those runs become the scope; otherwise the current DAG, task and run
-filters are used. Every request repeats Airflow's DAG read checks on the server. Chat history
-lives in `sessionStorage`: it survives a refresh in the same tab, is separated by an opaque
-namespace for the current Airflow user, but is not written to the API server and disappears
-when the tab is closed or the user clicks **Clear chat**. Replies render headings, lists,
-tables, emphasis, code, quotes and safe HTTP(S) links from Markdown; wide tables scroll inside
-the answer, while model-provided HTML remains text. Each completed answer can be copied as its
-original Markdown. The sent user bubble shows system, user, report-context, history, prompt-
-structure and total UTF-8 sizes separately. Its **Context overview** button opens the exact
-`REPORT EVIDENCE` block delivered to the final provider: direct-mode header plus JSON Lines,
-or the locally reduced text. The preview is persisted with the tab's transcript, rendered as
-plain text, and contains neither the system prompt nor chat history. It has already passed the
-same server-side RBAC filter in both direct and local modes. After an answer, the assistant also shows the
-final provider's exact input, output and total token counts when its SDK returns usage data.
-The window header keeps a cumulative total of those provider-reported tokens for the whole
-chat session, including requests whose messages have already left the recent-history window.
-The total survives refresh in the same tab and resets with **Clear chat**.
-If the provider reports that it stopped at the output-token limit, the answer is preserved
-but visibly marked as potentially incomplete. The default answer budget is 3,072 tokens and
-can be changed on the API server.
-When runs are selected, the scope shows their count and a **View list** button instead of
-cramming run identifiers into the chat window. The compact **Limits** button beside **Send**
-opens a vertical list with the RBAC-readable report count, the current local full-tree or
-direct bounded mode, and the effective limits. The values come from
-`GET /api/assistant/status`, so the UI reflects the API-server configuration instead of
-maintaining a separate set of numbers.
+An **AI assistant** button on the dashboard answers questions about the reports you are
+looking at. Every request repeats Airflow's DAG read checks on the server, so an answer can
+only be built from reports you may already open. Answers stream, cite the runs they used, and
+show exactly what was sent and what it cost. It also knows what this product is, can quote
+documentation you mount for it, and will write pytest when you ask.
 
-Answers stream. `POST /api/assistant/stream` returns Server-Sent Events: one `meta` event
-carrying the exact provider input (scope, byte breakdown, report context) before the model
-is called, then `delta` events as the answer is written, then one `done` event with
-evidence, token usage and the truncation flags. `POST /api/assistant/query` still returns
-the same answer as a single JSON body for API clients. Everything expensive — RBAC
-filtering, redaction, local reduction — happens before the first byte, so a rejected request
-is an ordinary HTTP error rather than a half-written stream, and both endpoints enforce the
-same limits. A provider without incremental output works unchanged; its answer simply
-arrives as one `delta`.
-
-While an answer is streaming, **Send** becomes **Stop**. Stop aborts the request, keeps the
-text that already arrived, marks it as incomplete, and frees the assistant's model slot
-straight away. Closing and reopening the window mid-answer is safe: the partial answer
-belongs to the chat transcript, so it keeps streaming into the reopened window. If the
-provider fails half-way, the partial text is kept and the reason is shown beside it rather
-than being replaced by an error.
-
-Each user question produces one final remote-provider call. The assistant sends its rules as
-the provider's system message and one user message containing `USER QUESTION`, bounded
-`RECENT CHAT`, and `REPORT EVIDENCE` sections. In direct mode the evidence is compact JSON
-Lines: one labelled `[R1]` run-summary object per line followed by whole failed/error case
-objects that refer back to those labels. In local mode the raw report tree is consumed in
-bounded chunks by the in-process GGUF reducer; only its merged, labelled facts occupy the
-final `REPORT EVIDENCE` section. Local map/reduce invocations are not network requests.
-
-Install one final-answer provider in the **API-server** image and set it explicitly:
+It is **off until you configure a provider** — with none set there is no button, no client
+code in the page and no `/api/assistant/*` routes at all.
 
 ```bash
 pip install 'airflow-pytest-plugin[assistant-anthropic]'
@@ -545,134 +496,9 @@ export AIRFLOW_PYTEST_ASSISTANT_PROVIDER=anthropic
 export ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-The provider can be `anthropic`, `openai`, `gigachat`, or `fake`. The assistant adapters use
-those SDKs directly and do not import or install `pytest-triage`; they only share the same
-key, model and compatible-endpoint environment conventions (`ANTHROPIC_*`, `OPENAI_*`,
-`GIGACHAT_*`). `AIRFLOW_PYTEST_ASSISTANT_MODEL` overrides the provider's model variable for
-chat only. Until the provider is ready, the button remains hidden.
-
-### Optional local context model
-
-Without a local model, the API server deliberately builds a bounded direct snapshot: by
-default at most 100 of the newest readable run summaries in the current scope. Summaries are
-written first; every included summary keeps `total`, `passed`, `failed`, `errors`, `skipped`,
-`duration` and `success`. Failed/error details are then added newest-first for every
-problematic run and every failed/error case while the shared context byte budget has room.
-There is no separate eight-run or 12-failure cut-off. Each included failure still has at most
-3 KiB of traceback and 2 KiB of captured output. Older runs do not have to be deleted: use a
-narrower dashboard filter or explicit selection to bring them into scope.
-
-The default 48 KiB is one strict global report-evidence budget for all reports in that
-request, not 48 KiB per report. The 100-summary setting is therefore a ceiling, not a promise:
-if even the summary records exceed the byte budget, the oldest non-fitting summaries are
-omitted too. Failure detail records are appended whole; the collector never sends half a JSON
-record. When the next record does not fit, collection stops instead of failing the request and
-the response is marked as context-limited. A failure-heavy new run can therefore consume the
-detail remainder before older problematic runs, while every summary that did fit still keeps
-its aggregate success counters. This protects a remote provider from an unbounded request,
-but it is not a complete-tree mode.
-
-With a local model, the flow changes. The API server reads **every report in the authorized
-scope and every test case in those reports**. Each case contributes its node ID, outcome and
-duration; failed and errored cases additionally contribute the bounded traceback, captured
-stdout/stderr/log and saved triage verdict. The tree is streamed as independently bounded
-chunks, so raw chunks are reduced one at a time instead of accumulated in memory. A local
-chunk is automatically reduced below `CONTEXT_BYTES` when necessary to fit the configured
-`CONTEXT_N_CTX`, the question, the reducer system prompt and its output reservation. An
-impossible `n_ctx`/output combination disables the assistant with a configuration error
-instead of failing during inference. The GGUF
-model summarizes every chunk and then hierarchically merges those partial summaries until
-one final-provider context fits. The 100-summary direct-mode cut-off is not applied on this
-path. Per-field caps still prevent one pathological traceback or captured stream from taking
-over a chunk.
-
-One local pass runs per chunk, so a large tree means many in-process inferences: roughly 350
-chunks for 1,000 runs × 20 cases at the default settings. A synchronous llama.cpp call cannot
-be interrupted and the request holds the process's only assistant slot, so the map phase is
-bounded by `AIRFLOW_PYTEST_ASSISTANT_LOCAL_BUDGET_SECONDS` (120 s by default). When the budget
-runs out, the remaining chunks are skipped, the already-reduced facts still go to the
-provider, and the answer is marked as context-limited — a partial answer instead of a request
-that pins the assistant for an hour. Narrow the scope with a filter or raise the budget after
-measuring your own tree.
-
-The local model does **not** answer the user. It costs API-server RAM, CPU and latency in
-proportion to the selected tree, and semantic compression can still discard a useful fact.
-A small GGUF model can be configured as this optional map/reduce stage:
-
-```bash
-# Run in the SAME Python environment/image as the Airflow API server.
-pip install 'airflow-pytest-plugin[assistant-anthropic,assistant-local]'
-
-# The extra installs llama-cpp-python, not a model. Download one GGUF file separately.
-mkdir -p /models
-curl -fL \
-  'https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf?download=true' \
-  -o /models/qwen2.5-0.5b-instruct-q4_k_m.gguf
-
-export AIRFLOW_PYTEST_ASSISTANT_CONTEXT_MODEL=/models/qwen2.5-0.5b-instruct-q4_k_m.gguf
-```
-
-The variable is a **filesystem path to the `.gguf` file**, not a URL and not a directory.
-Restart every Airflow API-server process after installing the package or changing the path.
-For Docker or Kubernetes, put the file in the image or mount it read-only at `/models`, then
-set the same environment variable in the API-server container. Workers and schedulers do not
-need this model unless they also run the web/API server. The Qwen 0.5B Q4_K_M file above is a
-small starting point; replace it with another instruction-tuned GGUF after measuring quality,
-latency and memory in your own report tree.
-
-The GGUF model is loaded lazily **inside each API-server process**, so four API-server
-workers mean four copies in memory. Assistant concurrency remains bounded per process. It
-preserves useful report labels such as `[R1]`; the remote model still writes the answer.
-Without this variable, the bounded direct snapshot goes to the provider instead.
-
-The outbound context can contain run summaries, case IDs/outcomes/durations, failure
-tracebacks, saved triage verdicts and up to 2 KiB of captured stdout/stderr/log for each
-included failure. Known secrets and values from the server environment are redacted before
-either model sees them, but redaction is a guard rail rather than a proof: enable the
-assistant only where sending tracebacks and captured failure output to the chosen provider
-is allowed. Recent chat context is at most 12 messages (six complete exchanges), 4,000
-characters per message and 16,000 UTF-8 bytes in total. History has this separate cap and does
-not take space from the 48 KiB report-evidence budget; because it is still sent to the final
-provider, it is included in the displayed total prompt bytes and input-token usage. Explicit
-selection accepts at most 100 runs; filter-based scope has no run-count cut-off when local
-reduction is enabled.
-
-All byte limits are shown as binary units: `1 KiB = 1024 bytes`. The defaults therefore mean
-exactly 49,152 bytes of provider evidence, 3,072 bytes per traceback and 2,048 bytes of
-captured output. Set the variables below on the **API-server container/process** and restart
-it; they are resolved once when the web app starts. Values outside the documented safe range
-fall back to the default. The question/history/HTTP envelope and the 100-ID explicit-selection
-cap remain fixed abuse-safety contracts rather than deployment tuning knobs.
-
-| Environment variable | Default | Purpose |
-|:--|:--|:--|
-| `AIRFLOW_PYTEST_ASSISTANT_PROVIDER` | — | enables chat: `anthropic`, `openai`, `gigachat`, or `fake` |
-| `AIRFLOW_PYTEST_ASSISTANT_MODEL` | provider default | final-answer model; overrides the provider-native model variable |
-| `AIRFLOW_PYTEST_ASSISTANT_CONTEXT_MODEL` | — | absolute or expanded path to the local GGUF reducer; unset = direct bounded context |
-| `AIRFLOW_PYTEST_ASSISTANT_CONTEXT_BYTES` | `49152` | direct mode's total context and final remote-evidence budget (4 KiB–256 KiB); local chunks may be made smaller automatically to fit `n_ctx` |
-| `AIRFLOW_PYTEST_ASSISTANT_DIRECT_MAX_SUMMARIES` | `100` | newest summaries in direct mode (1–1000); does not limit filter-based local full-tree mode |
-| `AIRFLOW_PYTEST_ASSISTANT_TRACEBACK_BYTES` | `3072` | traceback/message bytes retained per failed or errored test (0–65536) |
-| `AIRFLOW_PYTEST_ASSISTANT_CAPTURE_BYTES` | `2048` | captured stdout/stderr/log bytes retained per failed or errored test (0–65536; `0` disables captured output) |
-| `AIRFLOW_PYTEST_ASSISTANT_CONTEXT_N_CTX` | `16384` | local model context window; must fit fixed prompts, the question, local output and at least a 4 KiB evidence chunk |
-| `AIRFLOW_PYTEST_ASSISTANT_CONTEXT_MAX_TOKENS` | `1024` | most tokens produced by the local reducer |
-| `AIRFLOW_PYTEST_ASSISTANT_LOCAL_BUDGET_SECONDS` | `120` | wall clock one request may spend in the local reducer (5–3600); past it the remaining chunks are skipped and the answer is marked context-limited |
-| `AIRFLOW_PYTEST_ASSISTANT_MAX_OUTPUT_TOKENS` | `3072` | most tokens requested for the final answer (128–8192) |
-| `AIRFLOW_PYTEST_ASSISTANT_TIMEOUT` | `45` | provider timeout in seconds |
-| `AIRFLOW_PYTEST_ASSISTANT_MAX_CONCURRENT` | `1` | simultaneous assistant calls in one API-server process |
-
-For Docker Compose, put the same values on the service that runs the Airflow API server;
-quoted strings avoid YAML coercion surprises:
-
-```yaml
-services:
-  airflow-api-server:
-    environment:
-      AIRFLOW_PYTEST_ASSISTANT_CONTEXT_BYTES: "49152"
-      AIRFLOW_PYTEST_ASSISTANT_DIRECT_MAX_SUMMARIES: "100"
-      AIRFLOW_PYTEST_ASSISTANT_TRACEBACK_BYTES: "3072"
-      AIRFLOW_PYTEST_ASSISTANT_CAPTURE_BYTES: "2048"
-      AIRFLOW_PYTEST_ASSISTANT_MAX_OUTPUT_TOKENS: "3072"
-```
+> **[Full assistant documentation →](src/airflow_pytest_plugin/assistant/README.md)**
+> Setup, the two context modes, per-user limits and cost, the database it can use for
+> shared chats, and every environment variable it reads.
 
 ## Configuration
 
@@ -693,6 +519,7 @@ services:
 | `AIRFLOW_PYTEST_SLOW_MIN_DELTA` (env/cfg) | `0.5` | minimum absolute slowdown in seconds for a regression to register (filters jittery fast tests) |
 | `AIRFLOW_PYTEST_SUCCESS_THRESHOLD` (env/cfg) | `0.85` | pass-rate (0–1) over executed tests at/above which a run counts as successful (*Passing runs*); `1.0` = strict, zero failures/errors |
 | `AIRFLOW_PYTEST_SUCCESS_COVERAGE` (env/cfg) | `0.85` | line-coverage fraction (0–1) at/above which a run's **coverage** card reads as passing; below it the card turns red. Presentational only — it never fails a run (see [Coverage](#coverage)) |
+| `AIRFLOW_PYTEST_ASSISTANT_DB_CONN_ID` / `_DB_URL` (env) | Airflow's metadata DB | where the assistant's own tables live — shared token quota and server-side chat history (see the [assistant docs](src/airflow_pytest_plugin/assistant/README.md#database)) |
 | `AIRFLOW_PYTEST_METRICS_TOKEN` (env/cfg) | — | bearer token that **enables** the Prometheus `/api/metrics` endpoint; unset = disabled (see [below](#prometheus-metrics)) |
 | `AIRFLOW_PYTEST_ALERTS_EMAIL_TO` (env/cfg) | — | comma-separated alert recipients (empty = alerting stays off; a per-task `email=True` *or* `email_only_fail=True` flag is the on-switch — see [below](#email-alerts)). Validated, case-insensitively deduped, capped at 50 (use a mailing-list address for bigger audiences) |
 | `AIRFLOW_PYTEST_MAX_REPORT_MIB` (env/cfg) | `64` | largest `junit.xml` the **viewer** will parse. Past it the run stays listed but opening it answers `413`; `0` = no limit. Parsing costs up to 5× the file inside the api-server, so this is a guard rail, not a quota — raise it if you really archive more |

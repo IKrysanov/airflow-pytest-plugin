@@ -371,7 +371,12 @@ def create_app(
     app.include_router(monitoring.build_router(deps, assistant=assistant_runtime))
     for module in (reports, failures, compare, flaky):
         app.include_router(module.build_router(deps))
-    app.include_router(assistant_routes.build_router(deps, assistant_runtime))
+    # Only when someone asked for the feature. A deployment that never set a provider gets
+    # no assistant surface at all -- not endpoints that refuse, not a schema entry, not a
+    # button -- while one that set a provider and got it wrong keeps the endpoints so the
+    # panel can say what went wrong.
+    if assistant_runtime.configured:
+        app.include_router(assistant_routes.build_router(deps, assistant_runtime))
 
     # Viewer and icons are UI assets, not part of the documented JSON API.
     @app.get("/icon.svg", include_in_schema=False)
@@ -388,7 +393,8 @@ def create_app(
         # served stale -- else a browser/Airflow cache runs old JS after an upgrade.
         # no-store guarantees every load fetches the current build.
         return HTMLResponse(
-            index_html(), headers={"Cache-Control": "no-store, must-revalidate"}
+            index_html(assistant=assistant_runtime.configured),
+            headers={"Cache-Control": "no-store, must-revalidate"},
         )
 
     # Both spellings are served directly. Left to Starlette's redirect_slashes, a

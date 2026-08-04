@@ -33,6 +33,16 @@ class AssistantBusyError(AssistantError):
     status_code = 429
 
 
+class AssistantQuotaError(AssistantError):
+    """The caller exhausted their request rate or daily token budget."""
+
+    status_code = 429
+
+    def __init__(self, message: str, *, retry_after: int = 0) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
 class AssistantRequestError(AssistantError):
     """The caller supplied an invalid question or scope."""
 
@@ -57,5 +67,6 @@ __all__ = [
     "AssistantError",
     "AssistantForbiddenError",
     "AssistantProviderError",
+    "AssistantQuotaError",
     "AssistantRequestError",
 ]

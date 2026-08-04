@@ -15,15 +15,19 @@
 from __future__ import annotations
 
 import json
+import pathlib
+import re
 from types import SimpleNamespace
 
 import pytest
 
 from airflow_pytest_plugin.assistant import (
+    AssistantProviderResponse,
     AssistantRuntime,
     FakeAnswerProvider,
     PassthroughReducer,
 )
+from airflow_pytest_plugin.assistant.providers.fake import FakeAssistant
 from airflow_pytest_plugin.models import ReportRef
 from airflow_pytest_plugin.sources import FileSystemReportSource
 from conftest import write_report
@@ -121,6 +125,18 @@ def test_status_supports_mapping_user_identities(reports_root):
     assert alice.json()["storage_namespace"] != bob.json()["storage_namespace"]
 
 
+def test_status_does_not_share_a_namespace_between_colleagues_of_one_name(reports_root):
+    """A display name is not an account: two people can hold the same one."""
+    first = _client(reports_root, user=SimpleNamespace(name="Ilya Krysanov")).get(
+        "/api/assistant/status"
+    )
+    second = _client(reports_root, user=SimpleNamespace(name="Ilya Krysanov")).get(
+        "/api/assistant/status"
+    )
+
+    assert first.json()["storage_namespace"] != second.json()["storage_namespace"]
+
+
 def test_status_does_not_share_namespace_between_unidentified_users(reports_root):
     first = _client(reports_root, user=object()).get("/api/assistant/status")
     second = _client(reports_root, user=object()).get("/api/assistant/status")
@@ -160,7 +176,12 @@ def test_query_returns_grounded_evidence(reports_root):
     assert body["evidence"][0]["report_id"] == ref.token
 
 
-def test_query_with_empty_scope_returns_zero_prompt_breakdown(reports_root):
+def test_query_with_an_empty_scope_still_reports_what_it_sent(reports_root):
+    """An empty scope is answered by the model now, so the breakdown is not all zeroes.
+
+    That is the honest number: a call really was made, with the system prompt, the
+    question and an evidence block saying there is nothing to describe.
+    """
     body = (
         _client(reports_root)
         .post("/api/assistant/query", json={"question": "Anything?"})
@@ -170,17 +191,14 @@ def test_query_with_empty_scope_returns_zero_prompt_breakdown(reports_root):
     assert body["reports_considered"] == 0
     assert body["context_limited"] is False
     assert body["output_limited"] is False
-    assert body["token_usage"] is None
-    assert body["report_context"] is None
-    assert body["provider_input_bytes"] == 0
-    assert body["prompt_bytes"] == {
-        "system": 0,
-        "user": 0,
-        "context": 0,
-        "history": 0,
-        "structure": 0,
-        "total": 0,
-    }
+    assert body["evidence"] == []
+    assert body["prompt_bytes"]["system"] > 0
+    assert body["prompt_bytes"]["user"] > 0
+    assert body["prompt_bytes"]["total"] == body["provider_input_bytes"]
+    assert body["prompt_bytes"]["total"] == sum(
+        body["prompt_bytes"][part]
+        for part in ("system", "user", "context", "history", "structure")
+    )
 
 
 def test_query_rechecks_selected_report_rbac(reports_root):
@@ -251,7 +269,12 @@ def test_query_body_is_capped_before_json_decode(reports_root):
 
 
 def test_disabled_query_returns_configuration_reason(reports_root):
-    runtime = AssistantRuntime.disabled("Configure the assistant provider.")
+    # Configured but not working: the endpoints stay so the panel can explain itself. A
+    # deployment that set no provider has no assistant endpoints at all -- see
+    # test_no_provider_means_no_assistant_endpoints_at_all.
+    runtime = AssistantRuntime.disabled(
+        "Configure the assistant provider.", configured=True
+    )
     response = _client(reports_root, runtime=runtime).post(
         "/api/assistant/query", json={"question": "Anything?"}
     )
@@ -367,8 +390,8 @@ def test_help_explains_how_to_install_the_local_gguf_model(reports_root):
     html = _client(reports_root).get("/help").text
 
     assert "assistant-anthropic,assistant-local" in html
-    assert "Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main" in html
-    assert "qwen2.5-0.5b-instruct-q4_k_m.gguf" in html
+    assert "Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main" in html
+    assert "qwen2.5-1.5b-instruct-q4_k_m.gguf" in html
     assert "installs the llama.cpp runtime only; it does not bundle a model" in html
     assert "указывать на доступный для чтения файл .gguf" in html
     assert "AIRFLOW_PYTEST_ASSISTANT_DIRECT_MAX_SUMMARIES=100" in html
@@ -493,16 +516,20 @@ def test_stream_rejects_a_forbidden_report_before_any_event(reports_root):
     assert "event:" not in response.text
 
 
-def test_stream_reports_an_empty_scope_without_calling_a_model(reports_root):
+def test_stream_answers_an_empty_scope_like_any_other_question(reports_root):
+    """Same event shape whether or not a report matched: meta, deltas, done."""
     events = _events(
         _client(reports_root).post(
             "/api/assistant/stream", json={"question": "Anything?"}
         )
     )
 
-    assert [name for name, _ in events] == ["done"]
-    assert events[0][1]["reports_considered"] == 0
-    assert events[0][1]["prompt_bytes"]["total"] == 0
+    names = [name for name, _ in events]
+    assert names[0] == "meta" and names[-1] == "done"
+    done = events[-1][1]
+    assert done["reports_considered"] == 0
+    assert done["prompt_bytes"]["total"] > 0
+    assert done["evidence"] == []
 
 
 def test_stream_body_is_capped_before_json_decode(reports_root):
@@ -530,3 +557,516 @@ def test_body_limit_middleware_does_not_fake_a_disconnect(reports_root):
 
     assert response.status_code == 200
     assert response.text.strip(), "streaming body was cancelled before the first event"
+
+
+def _health_client(reports_root, monkeypatch, *, enabled="1", runtime=None):
+    if enabled is None:
+        monkeypatch.delenv("AIRFLOW_PYTEST_ASSISTANT_HEALTHCHECK", raising=False)
+    else:
+        monkeypatch.setenv("AIRFLOW_PYTEST_ASSISTANT_HEALTHCHECK", enabled)
+    return _client(reports_root, runtime=runtime)
+
+
+def test_health_endpoint_is_off_unless_an_operator_opts_in(reports_root, monkeypatch):
+    """It costs provider money, so it must not exist by default."""
+    client = _health_client(reports_root, monkeypatch, enabled=None)
+
+    assert client.post("/api/assistant/health").status_code == 404
+
+
+def test_health_endpoint_reports_a_working_provider(reports_root, monkeypatch):
+    body = (
+        _health_client(reports_root, monkeypatch).post("/api/assistant/health").json()
+    )
+
+    assert body["ok"] is True
+    assert body["provider"] == "fake" and body["model"] == "offline-fake"
+    assert body["detail"] is None
+    assert body["cached"] is False
+    assert isinstance(body["latency_ms"], int)
+
+
+def test_health_endpoint_returns_502_when_the_provider_is_broken(
+    reports_root, monkeypatch
+):
+    class BrokenProvider:
+        name = "broken"
+        model = "broken-1"
+
+        def answer(self, *, system: str, prompt: str, max_tokens: int) -> str:
+            del system, prompt, max_tokens
+            raise RuntimeError("401 unauthorized")
+
+        def close(self) -> None:
+            return None
+
+    runtime = AssistantRuntime(
+        provider_factory=BrokenProvider,
+        reducer_factory=PassthroughReducer,
+        provider_name="broken",
+        model_name="broken-1",
+        context_model_name=None,
+        max_context_bytes=8_192,
+        max_output_tokens=256,
+        max_concurrent=1,
+    )
+    response = _health_client(reports_root, monkeypatch, runtime=runtime).post(
+        "/api/assistant/health"
+    )
+
+    # A reachable endpoint that reports a broken dependency: the body is the diagnosis.
+    assert response.status_code == 502
+    body = response.json()
+    assert body["ok"] is False and "401" in body["detail"]
+
+
+def test_health_endpoint_is_get_free_and_bounded(reports_root, monkeypatch):
+    client = _health_client(reports_root, monkeypatch)
+
+    # GET must not trigger a paid call; the check is an explicit action.
+    assert client.get("/api/assistant/health").status_code == 405
+    first = client.post("/api/assistant/health").json()
+    second = client.post("/api/assistant/health").json()
+    assert second["cached"] is True and second["checked_at"] == first["checked_at"]
+
+
+def test_health_endpoint_is_documented(reports_root, monkeypatch):
+    doc = _health_client(reports_root, monkeypatch).get("/api/openapi.json").json()
+
+    operation = doc["paths"]["/api/assistant/health"]["post"]
+    assert operation["tags"] == ["assistant"]
+    assert "404" in operation["responses"]
+
+
+def _rate_limited_client(reports_root, **limits):
+    runtime = AssistantRuntime(
+        provider_factory=FakeAnswerProvider,
+        reducer_factory=PassthroughReducer,
+        provider_name="fake",
+        model_name="offline-fake",
+        context_model_name=None,
+        max_context_bytes=16_384,
+        max_output_tokens=256,
+        max_concurrent=1,
+        **limits,
+    )
+    return _client(
+        reports_root, runtime=runtime, user=SimpleNamespace(username="alice")
+    )
+
+
+def test_rate_limited_query_answers_429_with_retry_after(reports_root):
+    write_report(reports_root, ReportRef("dag", "run", "task", 1), failed=1)
+    client = _rate_limited_client(reports_root, rate_limit=1, rate_window_seconds=60.0)
+
+    assert (
+        client.post("/api/assistant/query", json={"question": "a"}).status_code == 200
+    )
+    refused = client.post("/api/assistant/query", json={"question": "b"})
+
+    assert refused.status_code == 429
+    assert int(refused.headers["retry-after"]) > 0
+    assert "too quickly" in refused.json()["detail"]
+
+
+def test_rate_limited_stream_is_refused_before_any_event(reports_root):
+    write_report(reports_root, ReportRef("dag", "run", "task", 1), failed=1)
+    client = _rate_limited_client(reports_root, rate_limit=1, rate_window_seconds=60.0)
+
+    assert (
+        client.post("/api/assistant/stream", json={"question": "a"}).status_code == 200
+    )
+    refused = client.post("/api/assistant/stream", json={"question": "b"})
+
+    assert refused.status_code == 429
+    assert int(refused.headers["retry-after"]) > 0
+    assert "event:" not in refused.text
+
+
+def test_status_publishes_the_configured_limits(reports_root):
+    body = (
+        _rate_limited_client(reports_root, rate_limit=25, daily_token_quota=500_000)
+        .get("/api/assistant/status")
+        .json()
+    )
+
+    assert body["rate_limit"] == 25
+    assert body["daily_token_quota"] == 500_000
+    assert body["rate_window_seconds"] == 3_600.0
+
+
+def test_help_does_not_recommend_a_model_measured_as_unusable(reports_root):
+    """0.5B kept 24% of the required facts: worse than sending no local model at all."""
+    page = _client(reports_root).get("/help").text
+
+    lower = page.lower()
+    assert "qwen2.5-1.5b-instruct" in lower
+    # Naming it as a warning is fine; handing out its path or download URL is not.
+    assert "qwen2.5-0.5b-instruct" not in lower
+
+
+def test_stream_reports_local_progress_before_the_first_token(reports_root):
+    """Local mode is silent for up to two minutes; the wait needs a visible end."""
+    write_report(reports_root, ReportRef("dag", "run", "task", 1), failed=1)
+
+    class ChunkedReducer:
+        name = "local.gguf"
+
+        def reduce(self, *, question: str, context: str) -> str:
+            del question
+            return f"partial [R1] {len(context)}"
+
+        def close(self) -> None:
+            return None
+
+    runtime = AssistantRuntime(
+        provider_factory=FakeAssistant,
+        reducer_factory=ChunkedReducer,
+        provider_name="fake",
+        model_name="offline-fake",
+        context_model_name="local.gguf",
+        max_context_bytes=16_384,
+        max_output_tokens=256,
+        max_concurrent=1,
+        local_input_bytes=4_096,
+    )
+    client = _client(reports_root, runtime=runtime)
+
+    events = _events(
+        client.post("/api/assistant/stream", json={"question": "What failed?"})
+    )
+
+    names = [name for name, _ in events]
+    assert names[0] == "progress", names[:3]
+    assert "meta" in names and names[-1] == "done"
+    # Progress must arrive before meta: that is the whole point of it.
+    assert names.index("progress") < names.index("meta")
+    phases = [payload["phase"] for name, payload in events if name == "progress"]
+    assert phases[0] == "loading_model"
+    assert "local_reduce" in phases
+
+
+def test_direct_mode_streams_no_progress_it_has_nothing_to_wait_for(reports_root):
+    write_report(reports_root, ReportRef("dag", "run", "task", 1), failed=1)
+
+    response = _client(reports_root).post(
+        "/api/assistant/stream", json={"question": "What failed?"}
+    )
+    names = [name for name, _ in _events(response)]
+
+    assert "progress" not in names
+    assert names[0] == "meta"
+
+
+def test_every_assistant_dialog_lifts_the_embedded_iframe(reports_root):
+    """A modal missing from updateParentDim lets clicks fall through to Airflow's chrome.
+
+    The viewer runs inside an iframe in Airflow; the page only lifts itself while a modal
+    is open, and it decides that from an explicit list of dialog ids.
+    """
+    html = _client(reports_root).get("/").text
+    dim = html[html.index("function updateParentDim()") :]
+    dim = dim[: dim.index("setLocalDim(anyOpen)")]
+
+    declared = set(re.findall(r'getElementById\("([a-z-]+)"\)', dim))
+    declared |= set(re.findall(r"\((\w+Dlg) &&", dim))
+    modals = set(re.findall(r'<dialog id="(ast-[a-z-]+|assistant-dialog)"', html))
+
+    missing = sorted(name for name in modals if name not in declared)
+    assert missing == [], f"dialogs not lifting the iframe: {missing}"
+
+
+class _SurrogateProvider:
+    """A provider whose output is not encodable UTF-8.
+
+    Real models emit broken surrogate pairs, and captured test output can carry anything;
+    either way the text reaches us as a ``str`` that ``encode()`` refuses.
+    """
+
+    name = "fake"
+    model = "offline-fake"
+
+    def answer(self, *, system: str, prompt: str, max_tokens: int):
+        del system, prompt, max_tokens
+        return AssistantProviderResponse(text="before \ud800 after [R1]")
+
+    def stream(self, *, system: str, prompt: str, max_tokens: int):
+        del system, prompt, max_tokens
+        yield "before \ud800"
+        yield " after [R1]"
+
+    def close(self) -> None:
+        return None
+
+
+def test_an_unencodable_answer_does_not_break_the_stream(reports_root):
+    write_report(reports_root, ReportRef("dag", "run", "task", 1), failed=1)
+
+    response = _client(reports_root, runtime=_runtime_with(_SurrogateProvider)).post(
+        "/api/assistant/stream", json={"question": "What failed?"}
+    )
+
+    assert response.status_code == 200
+    names = [name for name, _ in _events(response)]
+    assert names[-1] == "done", names
+
+
+def test_an_unencodable_answer_does_not_break_the_json_reply(reports_root):
+    write_report(reports_root, ReportRef("dag", "run", "task", 1), failed=1)
+
+    response = _client(reports_root, runtime=_runtime_with(_SurrogateProvider)).post(
+        "/api/assistant/query", json={"question": "What failed?"}
+    )
+
+    assert response.status_code == 200, response.text
+    assert "after" in response.json()["answer"]
+
+
+def _runtime_with(provider):
+    """A runtime around one deliberately awkward provider."""
+    return AssistantRuntime(
+        provider_factory=provider,
+        reducer_factory=PassthroughReducer,
+        provider_name="fake",
+        model_name="offline-fake",
+        context_model_name=None,
+        max_context_bytes=16_384,
+        max_output_tokens=256,
+        max_concurrent=1,
+    )
+
+
+def _locale_keys(source: str, marker: str) -> dict[str, set[str]]:
+    """Return the translation keys defined per locale in a JS string table.
+
+    String literals are blanked first: the values are prose, and "reports processed:" in
+    one of them is not a key.
+    """
+    block = _without_literals(source[source.index(marker) :])
+    locales: dict[str, set[str]] = {}
+    current = None
+    depth = 0
+    for line in block.splitlines():
+        opened = re.match(r"\s*(en|ru):\s*\{", line)
+        if opened:
+            current, depth = opened.group(1), 1
+            locales[current] = set()
+            continue
+        if current is None:
+            continue
+        depth += line.count("{") - line.count("}")
+        for key in re.findall(r"(?:^|\s|\{)([A-Za-z][A-Za-z0-9_]*)\s*:", line):
+            locales[current].add(key)
+        if depth <= 0:
+            current = None
+            if len(locales) == 2:
+                break
+    return locales
+
+
+def _without_literals(source: str) -> str:
+    """Replace the contents of every JS string literal with spaces, keeping line breaks."""
+    out: list[str] = []
+    quote = None
+    escaped = False
+    for char in source:
+        if quote:
+            out.append("\n" if char == "\n" else " ")
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+                out[-1] = char
+            continue
+        if char in "\"'":
+            quote = char
+        out.append(char)
+    return "".join(out)
+
+
+def test_every_assistant_string_exists_in_both_languages(reports_root):
+    """A key present in one locale renders as `undefined` in the other.
+
+    Nothing fails, nothing logs -- the word simply disappears from a button, which is why
+    this drifts silently every time a control is added.
+    """
+    from airflow_pytest_plugin.web.assistant_templates import assistant_js
+
+    locales = _locale_keys(assistant_js(), "var AST_I18N")
+
+    assert set(locales) == {"en", "ru"}, sorted(locales)
+    assert locales["en"] - locales["ru"] == set(), "missing Russian"
+    assert locales["ru"] - locales["en"] == set(), "missing English"
+
+
+def test_every_help_string_exists_in_both_languages(reports_root):
+    from airflow_pytest_plugin.web.help_templates import help_html
+
+    page = help_html()
+    referenced = set(re.findall(r'data-i18n(?:-html)?="([A-Za-z0-9]+)"', page))
+    locales = _locale_keys(page, "var HELP_I18N")
+
+    missing_en = referenced - locales.get("en", set())
+    missing_ru = referenced - locales.get("ru", set())
+    assert missing_en == set(), (
+        f"English strings referenced but never defined: {missing_en}"
+    )
+    assert missing_ru == set(), (
+        f"Russian strings referenced but never defined: {missing_ru}"
+    )
+
+
+def _routeless_client(reports_root, runtime):
+    from airflow_pytest_plugin.web import create_app
+
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    return TestClient(
+        create_app(
+            FileSystemReportSource(report_root=reports_root),
+            authorizer=lambda dag, u: True,
+            read_authorizer=lambda dag, u: True,
+            user_dependency=lambda: {"username": "alice"},
+            assistant=runtime,
+        )
+    )
+
+
+ASSISTANT_ROUTES = [
+    ("GET", "/api/assistant/status"),
+    ("POST", "/api/assistant/query"),
+    ("POST", "/api/assistant/stream"),
+    ("GET", "/api/assistant/history"),
+    ("DELETE", "/api/assistant/history"),
+    ("POST", "/api/assistant/health"),
+]
+
+
+@pytest.mark.parametrize("method, path", ASSISTANT_ROUTES)
+def test_no_provider_means_no_assistant_endpoints_at_all(reports_root, method, path):
+    """Nobody asked for this feature, so it should not be reachable, not merely refuse.
+
+    A disabled endpoint is still an endpoint: it parses bodies, appears in the schema and
+    has to be reasoned about. When no provider is configured there is nothing behind it.
+    """
+    runtime = AssistantRuntime.disabled("Set the provider.", configured=False)
+
+    response = _routeless_client(reports_root, runtime).request(method, path)
+
+    assert response.status_code == 404, f"{method} {path} -> {response.status_code}"
+
+
+@pytest.mark.parametrize("method, path", ASSISTANT_ROUTES[:5])
+def test_a_configured_but_broken_assistant_keeps_its_endpoints(
+    reports_root, method, path
+):
+    """The operator asked for it, so the panel has to be able to say what went wrong."""
+    runtime = AssistantRuntime.disabled("SDK missing.", configured=True)
+
+    response = _routeless_client(reports_root, runtime).request(method, path)
+
+    assert response.status_code != 404, f"{method} {path} disappeared"
+
+
+def test_no_provider_leaves_the_assistant_out_of_the_api_schema(reports_root):
+    runtime = AssistantRuntime.disabled("Set the provider.", configured=False)
+
+    doc = _routeless_client(reports_root, runtime).get("/api/openapi.json").json()
+
+    assert not [path for path in doc["paths"] if "assistant" in path], doc[
+        "paths"
+    ].keys()
+
+
+def test_no_provider_still_leaves_the_rest_of_the_viewer_working(reports_root):
+    write_report(reports_root, ReportRef("dag", "run", "task", 1), failed=1)
+    runtime = AssistantRuntime.disabled("Set the provider.", configured=False)
+    client = _routeless_client(reports_root, runtime)
+
+    assert client.get("/api/reports").status_code == 200
+    assert client.get("/").status_code == 200
+
+
+def test_no_provider_leaves_the_chat_out_of_the_page_entirely(reports_root):
+    """Shipping the client anyway means a 404 in every visitor's console on every load."""
+    runtime = AssistantRuntime.disabled("Set the provider.", configured=False)
+
+    html = _routeless_client(reports_root, runtime).get("/").text
+
+    for marker in (
+        'id="assistant-btn"',  # the button
+        '<dialog id="assistant-dialog"',  # the panel
+        '<dialog id="ast-chats-dialog"',  # the chat list
+        "assistant/status",  # and any call to a route that is not there
+        "assistant/stream",
+    ):
+        assert marker not in html, marker
+    # And nothing is left half-substituted.
+    assert "__ASSISTANT" not in html
+    # The main script only ever looks these up defensively, which stays safe.
+    assert 'getElementById("ast-chats-dialog")' in html
+
+
+def test_a_configured_assistant_still_ships_its_client(reports_root):
+    runtime = AssistantRuntime.disabled("SDK missing.", configured=True)
+
+    html = _routeless_client(reports_root, runtime).get("/").text
+
+    assert "assistant-btn" in html and "assistant/status" in html
+
+
+ASSISTANT_DOC = (
+    pathlib.Path(__file__).resolve().parents[1]
+    / "src/airflow_pytest_plugin/assistant/README.md"
+)
+ROOT_DOC = pathlib.Path(__file__).resolve().parents[1] / "README.md"
+
+
+def test_every_assistant_setting_is_documented_where_it_now_lives():
+    """The assistant's documentation moved out of the main README.
+
+    A setting added later is easy to document in the file that no longer owns it, or in
+    neither -- so both are checked, and the assistant's own settings have to be in its own
+    file.
+    """
+    defined = set()
+    for path in (pathlib.Path(__file__).resolve().parents[1] / "src").rglob("*.py"):
+        defined |= set(
+            re.findall(r'"(AIRFLOW_PYTEST_ASSISTANT_[A-Z_]+)"', path.read_text())
+        )
+    documented = set(
+        re.findall(r"`(AIRFLOW_PYTEST_ASSISTANT_[A-Z_]+)`", ASSISTANT_DOC.read_text())
+    )
+
+    assert defined, "no assistant settings found at all -- the scan is broken"
+    assert defined - documented == set(), sorted(defined - documented)
+
+
+def test_the_main_readme_points_at_the_assistant_documentation():
+    root = ROOT_DOC.read_text()
+
+    assert "src/airflow_pytest_plugin/assistant/README.md" in root
+    # And it keeps only a summary: the detail lives in the other file now.
+    section = root[root.index("## Report assistant") :]
+    section = section[: section.index("\n## ")]
+    assert len(section.splitlines()) < 40, "the summary grew back into a manual"
+
+
+def test_the_assistant_documentation_links_back():
+    assert "../../../README.md" in ASSISTANT_DOC.read_text()
+
+
+def test_every_published_command_has_a_label_in_both_languages(reports_root):
+    """The server owns the names, the browser owns the wording -- both must be complete."""
+    from airflow_pytest_plugin.assistant.prompts import command_catalogue
+    from airflow_pytest_plugin.web.assistant_templates import assistant_js
+
+    locales = _locale_keys(assistant_js(), "var AST_I18N")
+
+    for command in command_catalogue():
+        key = f"command_{command['name']}"
+        assert key in locales["en"], key
+        assert key in locales["ru"], key

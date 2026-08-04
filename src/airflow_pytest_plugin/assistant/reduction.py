@@ -16,14 +16,26 @@
 
 from __future__ import annotations
 
+import re
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Generator, Iterable
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
+from typing import Any
 
 from .common import ContextReducer, clip_utf8
 from .redaction import redact_text
 
 _MAX_REDUCTION_PASSES = 12
+_CITATION = re.compile(r"\[R[1-9][0-9]*\]")
+
+#: A partial this short that also cites nothing carries no usable facts. Measured against
+#: real GGUF output: Qwen2.5-0.5B-Instruct answers a 9 KiB chunk with one to fifteen bytes
+#: ("4", "1", "4 тестов падают") instead of summarizing it. That is indistinguishable from
+#: a working reduction to the code that follows, so the whole request would quietly ask a
+#: paid provider to reason from nothing. A partial that kept a citation is never counted:
+#: the model demonstrably followed the labelling instruction, however terse it was.
+_MIN_USEFUL_PARTIAL_BYTES = 32
 _GROUP_HEADER = (
     "These are partial summaries of disjoint parts of one report tree. Merge them "
     "without answering the user. Preserve useful [R<n>] citations and cross-run trends."
@@ -41,6 +53,8 @@ class ReducedEvidence:
     chunks_processed: int
     budget_exhausted: bool = False
     reducer_calls: int = 0
+    degenerate: bool = False
+    """The local model produced too little text to carry any facts."""
 
 
 def reduce_context_tree(
@@ -55,28 +69,95 @@ def reduce_context_tree(
 ) -> ReducedEvidence:
     """Map every raw chunk, then reduce summaries until one provider prompt fits.
 
+    The blocking form: identical work to :func:`reduce_context_tree_events`, with the
+    progress reports thrown away. Kept because most callers -- and every test that only
+    cares about the evidence -- have no use for them.
+    """
+    events = reduce_context_tree_events(
+        question=question,
+        chunks=chunks,
+        reducer=reducer,
+        max_bytes=max_bytes,
+        input_bytes=input_bytes,
+        budget_seconds=budget_seconds,
+        clock=clock,
+    )
+    while True:
+        try:
+            next(events)
+        except StopIteration as stop:
+            result: ReducedEvidence = stop.value
+            return result
+
+
+def reduce_context_tree_events(
+    *,
+    question: str,
+    chunks: Iterable[str],
+    reducer: ContextReducer,
+    max_bytes: int,
+    input_bytes: int | None = None,
+    budget_seconds: float | None = None,
+    clock: Callable[[], float] = time.monotonic,
+    scope: Callable[[], AbstractContextManager[Any]] = nullcontext,
+) -> Generator[dict[str, Any], None, ReducedEvidence]:
+    """Map and merge as above, yielding one progress report per mapped chunk.
+
+    Local mode streams nothing until the whole tree has been reduced, which at the default
+    budget is up to two minutes of an unexplained spinner. Each yielded dict says how far
+    the map phase has got and how much of the budget is left, so the wait has a visible
+    end.
+
     ``budget_seconds`` bounds the wall clock spent in the local model. A synchronous
     llama.cpp call cannot be cancelled and the runtime holds its only slot for the whole
     request, so an unbounded tree would otherwise let one question monopolize the
     assistant for as long as it takes to map every chunk. When the budget runs out the
     map phase stops consuming chunks and the caller reports a limited context instead of
     hanging: a partial, honestly-labelled answer beats an unavailable assistant.
+
+    Yielding between chunks also makes the phase cancellable for the first time: a caller
+    that abandons this generator raises ``GeneratorExit`` at the chunk boundary, so a
+    browser pressing Stop no longer leaves a minute of local inference running.
+
+    ``scope`` wraps each individual chunk, so a caller can pin per-request state
+    (redaction uses it) without that state having to survive a ``yield`` -- a generator
+    resumes on whichever worker thread the server happens to use.
     """
     deadline = None if budget_seconds is None else clock() + budget_seconds
+    started = clock()
     partials: list[str] = []
     chunks_processed = 0
     calls = 0
+    # Counted on what the model itself wrote, before citations are restored: the repair
+    # adds bytes of our own and would otherwise mask a model that produced nothing.
+    useless = 0
     budget_exhausted = False
-    for chunk in chunks:
+    iterator = iter(chunks)
+    while True:
         if deadline is not None and clock() >= deadline:
             budget_exhausted = True
             break
-        partials.append(_reduce(reducer, question, chunk))
+        with scope():
+            chunk = next(iterator, None)
+            if chunk is None:
+                break
+            text, model_output = _reduce(reducer, question, chunk)
+        partials.append(text)
+        useless += _is_useless(model_output)
         calls += 1
         chunks_processed += 1
+        yield {
+            "phase": "local_reduce",
+            "chunks_done": chunks_processed,
+            "elapsed_seconds": round(clock() - started, 2),
+            "budget_seconds": budget_seconds,
+        }
     source_truncated = bool(getattr(chunks, "truncated", False))
+    mapped = chunks_processed
 
     def result(text: str, *, hard: bool, passes: int, spent: bool) -> ReducedEvidence:
+        # One useless partial is noise; a run of them means the configured model cannot do
+        # this job at all, and the caller must not present the answer as fully grounded.
         return ReducedEvidence(
             text=text,
             hard_truncated=hard,
@@ -85,6 +166,7 @@ def reduce_context_tree(
             chunks_processed=chunks_processed,
             budget_exhausted=spent,
             reducer_calls=calls,
+            degenerate=bool(mapped) and useless * 2 > mapped,
         )
 
     if not partials:
@@ -102,9 +184,17 @@ def reduce_context_tree(
 
         before = sum(len(item.encode("utf-8", "replace")) for item in partials)
         groups, packing_truncated = _pack_partials(partials, input_bytes or max_bytes)
-        next_partials = [_reduce(reducer, question, group) for group in groups]
+        with scope():
+            next_partials = [_reduce(reducer, question, group)[0] for group in groups]
         calls += len(groups)
         passes += 1
+        yield {
+            "phase": "local_merge",
+            "chunks_done": chunks_processed,
+            "pass": passes,
+            "elapsed_seconds": round(clock() - started, 2),
+            "budget_seconds": budget_seconds,
+        }
         after = sum(len(item.encode("utf-8", "replace")) for item in next_partials)
         if packing_truncated or (
             len(next_partials) >= len(partials) and after >= before
@@ -125,11 +215,36 @@ def reduce_context_tree(
     )
 
 
-def _reduce(reducer: ContextReducer, question: str, context: str) -> str:
+def _reduce(reducer: ContextReducer, question: str, context: str) -> tuple[str, str]:
+    """Return the usable partial and what the model itself produced."""
     result = reducer.reduce(question=question, context=context).strip()
     if not result:
         raise RuntimeError("the local context model returned an empty summary")
-    return redact_text(result)
+    cleaned = redact_text(result)
+    return _keep_citations(cleaned, context), cleaned
+
+
+def _is_useless(model_output: str) -> bool:
+    """Whether one model output is too small to carry a fact and cites nothing."""
+    if _CITATION.search(model_output):
+        return False
+    return len(model_output.encode("utf-8", "replace")) < _MIN_USEFUL_PARTIAL_BYTES
+
+
+def _keep_citations(summary: str, context: str) -> str:
+    """Re-attach the ``[R<n>]`` labels of a chunk when the model dropped all of them.
+
+    Small local models routinely ignore the instruction to preserve labels, and the final
+    provider then has nothing to cite: evidence buttons fall back to arbitrary reports. The
+    labels covered by this chunk are known exactly, so restoring them is deterministic. A
+    model that kept any label is trusted and left alone.
+    """
+    if _CITATION.search(summary):
+        return summary
+    labels = list(dict.fromkeys(_CITATION.findall(context)))
+    if not labels:
+        return summary
+    return f"{' '.join(labels)} — facts below come from these reports.\n{summary}"
 
 
 def _pack_partials(partials: list[str], max_bytes: int) -> tuple[list[str], bool]:

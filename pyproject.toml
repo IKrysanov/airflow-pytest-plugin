@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "airflow-pytest-plugin"
-version = "0.7.0"
+version = "0.8.0"
 description = "View airflow-pytest-operator results in the Airflow 3 web UI."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -87,6 +87,10 @@ dev = [
     # to pin where --alluredir actually writes. Faking that directory cannot catch results
     # landing outside the archive, which is precisely how the download button goes missing.
     "allure-pytest>=2.13",
+    # The plugin's own tables (src/airflow_pytest_plugin/db.py) run on whatever SQLAlchemy
+    # Airflow provides. Without it here, tests/test_db.py silently skips and the shared
+    # token quota goes unverified -- exactly the contract that must not drift.
+    "sqlalchemy>=1.4",
 ]
 # Playwright UI regression suite (tests/ui, marker `ui`). Opt-in: heavy (real browser),
 # run locally + in a dedicated CI job. After install: `playwright install chromium`.
@@ -166,6 +170,14 @@ strict = true
 ignore_missing_imports = true
 warn_unused_ignores = true
 no_implicit_reexport = false
+
+[[tool.mypy.overrides]]
+# The optional 'assistant-local' extra pulls in llama-cpp-python and numpy. Their stubs are
+# written for newer Pythons than the floor this package targets, so following them fails on
+# their syntax rather than on our code. Nothing here is imported for its types: llama_cpp is
+# imported lazily inside the reducer and typed as Any.
+module = ["llama_cpp.*", "numpy.*"]
+follow_imports = "skip"
 
 [tool.pyright]
 include = ["src"]

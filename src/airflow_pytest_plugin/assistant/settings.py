@@ -17,7 +17,9 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
+from typing import TypeVar
 
 PROVIDER_ENV = "AIRFLOW_PYTEST_ASSISTANT_PROVIDER"
 MODEL_ENV = "AIRFLOW_PYTEST_ASSISTANT_MODEL"
@@ -32,6 +34,24 @@ MAX_CONCURRENT_ENV = "AIRFLOW_PYTEST_ASSISTANT_MAX_CONCURRENT"
 DIRECT_MAX_SUMMARIES_ENV = "AIRFLOW_PYTEST_ASSISTANT_DIRECT_MAX_SUMMARIES"
 TRACEBACK_BYTES_ENV = "AIRFLOW_PYTEST_ASSISTANT_TRACEBACK_BYTES"
 CAPTURE_BYTES_ENV = "AIRFLOW_PYTEST_ASSISTANT_CAPTURE_BYTES"
+HEALTHCHECK_ENV = "AIRFLOW_PYTEST_ASSISTANT_HEALTHCHECK"
+RATE_LIMIT_ENV = "AIRFLOW_PYTEST_ASSISTANT_RATE_LIMIT"
+RATE_WINDOW_ENV = "AIRFLOW_PYTEST_ASSISTANT_RATE_WINDOW"
+DAILY_TOKEN_QUOTA_ENV = "AIRFLOW_PYTEST_ASSISTANT_DAILY_TOKEN_QUOTA"
+HISTORY_DAYS_ENV = "AIRFLOW_PYTEST_ASSISTANT_HISTORY_DAYS"
+
+_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+
+
+def healthcheck_enabled() -> bool:
+    """Whether the operator opted into the paid provider readiness endpoint.
+
+    Read per request rather than frozen at startup: turning a diagnostic on should not
+    require restarting every API-server process.
+    """
+    raw = _text_env(HEALTHCHECK_ENV)
+    return raw is not None and raw.lower() in _TRUE_VALUES
+
 
 DEFAULT_MODELS = {
     "anthropic": "claude-sonnet-5",
@@ -46,10 +66,33 @@ _PROVIDER_MODEL_ENVS = {
     "gigachat": "GIGACHAT_MODEL",
 }
 
+#: Simultaneous assistant calls per API-server process when no local reducer is configured.
+#: Enough for a small team to use the panel at once; each costs a fraction of a mebibyte,
+#: and what the request actually waits on is the remote provider.
+DEFAULT_DIRECT_CONCURRENCY = 4
+
+#: Paths to Markdown the assistant may quote when asked about the product. Off unless set:
+#: the short PRODUCT block covers what the packages are, and only a deployment can supply
+#: the operator's own manual, which lives in another repository.
+DOCS_ENV = "AIRFLOW_PYTEST_ASSISTANT_DOCS"
+DOCS_BYTES_ENV = "AIRFLOW_PYTEST_ASSISTANT_DOCS_BYTES"
+
+
+def _paths_env(name: str) -> tuple[str, ...]:
+    """Split a path list on the separators an operator is likely to reach for."""
+    raw = _text_env(name)
+    if not raw:
+        return ()
+    parts = [part.strip() for part in re.split(r"[,:;\n]", raw)]
+    return tuple(part for part in parts if part)
+
 
 def _text_env(name: str) -> str | None:
     raw = os.environ.get(name)
     return raw.strip() if raw and raw.strip() else None
+
+
+_Number = TypeVar("_Number", int, float)
 
 
 def _bounded_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
@@ -60,7 +103,28 @@ def _bounded_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
         value = int(raw)
     except ValueError:
         return default
-    return value if minimum <= value <= maximum else default
+    return _bound(value, default, minimum, maximum)
+
+
+def _bound(
+    value: _Number, default: _Number, minimum: _Number, maximum: _Number
+) -> _Number:
+    """Resolve an out-of-range setting the way its author most likely meant.
+
+    Above the ceiling the value is clamped to it: "as much as you allow" is what someone
+    writing a number too large means, and the ceiling is by definition still safe. Below
+    the floor the value is nonsense and the documented default is used -- clamping up would
+    be wrong for the settings whose floor is the *off* position, where ``RATE_LIMIT=-5``
+    would disable the limiter and ``DAILY_TOKEN_QUOTA`` would mean unlimited.
+
+    The asymmetry matters because ``DAILY_TOKEN_QUOTA`` defaults to unlimited: falling back
+    to the default for a too-large value turned "cap me at two billion tokens" into no cap.
+    """
+    if value > maximum:
+        return maximum
+    if value < minimum:
+        return default
+    return value
 
 
 def _bounded_float(
@@ -73,7 +137,9 @@ def _bounded_float(
         value = float(raw)
     except ValueError:
         return default
-    return value if minimum <= value <= maximum else default
+    if value != value or value in (float("inf"), float("-inf")):
+        return default
+    return _bound(value, default, minimum, maximum)
 
 
 @dataclass(frozen=True)
@@ -88,11 +154,19 @@ class AssistantSettings:
     context_max_tokens: int
     local_budget_seconds: float
     max_output_tokens: int
+    rate_limit: int
+    rate_window_seconds: float
+    daily_token_quota: int
+    history_days: int
     timeout: float
     max_concurrent: int
     direct_max_summaries: int
     traceback_bytes: int
     capture_bytes: int
+    #: Markdown an operator mounted for the assistant to quote. Empty unless configured.
+    docs_paths: tuple[str, ...] = ()
+    #: How much of it one question may carry.
+    docs_bytes: int = 4_096
 
     @classmethod
     def from_env(cls) -> AssistantSettings:
@@ -125,8 +199,33 @@ class AssistantSettings:
             max_output_tokens=_bounded_int(
                 MAX_OUTPUT_TOKENS_ENV, 3_072, minimum=128, maximum=8_192
             ),
+            # A generous default that still stops a runaway loop: one question a minute,
+            # sustained for an hour, is far beyond human use of a chat window.
+            rate_limit=_bounded_int(RATE_LIMIT_ENV, 60, minimum=0, maximum=100_000),
+            rate_window_seconds=_bounded_float(
+                RATE_WINDOW_ENV, 3_600.0, minimum=1.0, maximum=86_400.0
+            ),
+            # Only the operator knows their budget, so spend is unlimited until they say.
+            daily_token_quota=_bounded_int(
+                DAILY_TOKEN_QUOTA_ENV, 0, minimum=0, maximum=1_000_000_000
+            ),
+            # Server-side chat is opt-out rather than opt-in: the tables only exist if an
+            # operator ran the CLI, so reaching this line already means they chose it.
+            history_days=_bounded_int(HISTORY_DAYS_ENV, 30, minimum=0, maximum=3_650),
             timeout=_bounded_float(TIMEOUT_ENV, 45.0, minimum=1.0, maximum=300.0),
-            max_concurrent=_bounded_int(MAX_CONCURRENT_ENV, 1, minimum=1, maximum=8),
+            # The semaphore exists for the in-process GGUF: llama.cpp serialises on its
+            # own lock and each copy costs gigabytes, so that path gets exactly one slot.
+            # Direct mode has neither problem -- measured at ~0.15 MiB per additional
+            # concurrent request -- and one slot there made the assistant single-user:
+            # the second person to ask got 429 until the first was finished.
+            docs_paths=_paths_env(DOCS_ENV),
+            docs_bytes=_bounded_int(DOCS_BYTES_ENV, 4_096, minimum=0, maximum=32_768),
+            max_concurrent=_bounded_int(
+                MAX_CONCURRENT_ENV,
+                1 if path else DEFAULT_DIRECT_CONCURRENCY,
+                minimum=1,
+                maximum=8,
+            ),
             direct_max_summaries=_bounded_int(
                 DIRECT_MAX_SUMMARIES_ENV, 100, minimum=1, maximum=1_000
             ),
@@ -151,14 +250,20 @@ __all__ = [
     "CONTEXT_MODEL_ENV",
     "CONTEXT_N_CTX_ENV",
     "CAPTURE_BYTES_ENV",
+    "DAILY_TOKEN_QUOTA_ENV",
     "DIRECT_MAX_SUMMARIES_ENV",
+    "HEALTHCHECK_ENV",
+    "HISTORY_DAYS_ENV",
     "LOCAL_BUDGET_SECONDS_ENV",
     "MAX_CONCURRENT_ENV",
     "MAX_OUTPUT_TOKENS_ENV",
     "MODEL_ENV",
     "PROVIDER_ENV",
+    "RATE_LIMIT_ENV",
+    "RATE_WINDOW_ENV",
     "TIMEOUT_ENV",
     "TRACEBACK_BYTES_ENV",
     "AssistantSettings",
     "DEFAULT_MODELS",
+    "healthcheck_enabled",
 ]

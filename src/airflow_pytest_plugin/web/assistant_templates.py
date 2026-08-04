@@ -39,8 +39,16 @@ _CSS = r"""
     gap: 7px; color: var(--muted); font-size: 11px; }
   .ast-provider { min-width: 0; flex: 1 1 auto; white-space: nowrap;
     overflow: hidden; text-overflow: ellipsis; }
-  .ast-session-tokens { flex: 0 0 auto; padding-left: 7px; border-left: 1px solid var(--border);
-    color: var(--fg); font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  /* The session total sits beside "View list" so cost and scope read as one row. When no
+     runs are selected the button is hidden and the total simply takes its place, which is
+     why the aside is right-aligned rather than the total being positioned against the
+     button. */
+  .ast-scope-aside { display: flex; align-items: center; justify-content: flex-end;
+    gap: 8px; flex: 0 0 auto; min-width: 0; margin-left: auto; }
+  .ast-session-tokens { flex: 0 1 auto; min-width: 0; color: var(--muted); font-size: 11px;
+    font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden;
+    text-overflow: ellipsis; }
+  .ast-session-tokens b { color: var(--fg); font-weight: 650; }
   .ast-head-actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
   .ast-close { width: 44px; height: 44px; padding: 0; justify-content: center;
     flex: 0 0 auto; }
@@ -50,7 +58,8 @@ _CSS = r"""
     background: transparent;
     color: var(--muted); cursor: pointer; font: inherit; font-size: 11px; }
   .ast-clear:hover { color: var(--fg); text-decoration: underline; }
-  .ast-scope-row { display: flex; align-items: center; gap: 10px; min-height: 32px; }
+  .ast-scope-row { display: flex; align-items: center; gap: 10px; min-height: 32px;
+    flex-wrap: wrap; }
   .ast-scope { display: block; min-width: 0; flex: 1 1 auto; font-size: 12px;
     line-height: 1.45; overflow-wrap: anywhere; }
   .ast-processing { display: flex; min-width: 0; color: var(--muted); font-size: 11px;
@@ -168,14 +177,18 @@ _CSS = r"""
   .ast-starter:focus-visible, .ast-close:focus-visible, .ast-send:focus-visible,
   .ast-source:focus-visible, .ast-clear:focus-visible, .ast-copy:focus-visible {
     outline: 2px solid var(--ring); outline-offset: 2px; }
+  /* The question is the card and the answer is the page. An answer carries tables, code
+     and lists; boxing it inside a bubble narrower than the panel is what made those hard
+     to read, while a question is short and benefits from being visibly one object. */
   .ast-msg { max-width: 92%; border-radius: 12px; padding: 12px 14px;
     overflow-wrap: anywhere; }
-  .ast-msg.user { max-width: 76%; align-self: flex-end;
-    background: color-mix(in srgb, var(--primary) 88%, #000); color: var(--on-primary);
-    border: 0; border-bottom-right-radius: 4px; box-shadow: none; }
-  .ast-msg.user.ast-has-meta { width: min(360px, 100%); }
-  .ast-msg.assistant { width: min(92%, 840px); align-self: flex-start; background: var(--surface-2);
-    border: 1px solid var(--border); border-bottom-left-radius: 4px; }
+  .ast-msg.user { max-width: min(88%, 620px); align-self: flex-end;
+    background: var(--surface-2); color: var(--fg);
+    border: 1px solid color-mix(in srgb, var(--muted) 45%, transparent);
+    border-bottom-right-radius: 4px; }
+  .ast-msg.user.ast-has-meta { width: min(420px, 100%); }
+  .ast-msg.assistant { width: 100%; max-width: 100%; align-self: stretch;
+    background: transparent; border: 0; border-radius: 0; padding: 2px 0 6px; }
   .ast-answer { line-height: 1.55; }
   .ast-msg.user .ast-answer, .ast-answer.ast-error { white-space: pre-wrap; }
   .ast-answer > :first-child { margin-top: 0; }
@@ -207,18 +220,17 @@ _CSS = r"""
   .ast-answer th:last-child, .ast-answer td:last-child { border-right: 0; }
   .ast-error { color: var(--fail); }
   .ast-msg-meta { color: var(--muted); font-size: 11px; margin-top: 8px; }
-  /* The breakdown lives inside the filled question bubble, so every part of it needs its
-     own contrast against that fill: a rule that separates it from the question, pills the
-     numbers sit in, and a real button for the context. Nothing may read as flat text. */
-  .ast-msg.user .ast-msg-meta { color: inherit; opacity: 1; margin-top: 11px;
-    padding-top: 10px;
-    border-top: 1px solid color-mix(in srgb, var(--on-primary) 65%, transparent); }
-  /* An outlined pill, not a filled one: the bubble's text colour is what a fill would be
-     mixed from, so filling drags the number towards its own background. The outline keeps
-     each value at the bubble's full text contrast and still separates it from the row. */
+  /* The breakdown sits under the question, separated by a rule and with each number in an
+     outlined pill: it is reference data, so it must be legible without competing with the
+     question itself. */
+  /* A mid-tone, not the app's hairline: on the neutral question card the hairline is
+     invisible, and the rule and the value pills are what separate reference data from the
+     question above it. Non-text boundaries carry their own contrast requirement. */
+  .ast-msg.user .ast-msg-meta { margin-top: 11px; padding-top: 10px;
+    border-top: 1px solid color-mix(in srgb, var(--muted) 72%, transparent); }
   .ast-msg.user .ast-msg-meta code {
-    border: 1px solid color-mix(in srgb, var(--on-primary) 65%, transparent);
-    background: transparent; color: inherit; }
+    border: 1px solid color-mix(in srgb, var(--muted) 72%, transparent);
+    background: var(--surface); color: var(--fg); }
   .ast-prompt-title { display: block; margin-bottom: 7px; font-weight: 650;
     letter-spacing: .01em; }
   .ast-prompt-parts { display: grid; gap: 4px; margin: 0; }
@@ -228,36 +240,36 @@ _CSS = r"""
   .ast-prompt-row dt { min-width: 0; overflow-wrap: anywhere; }
   .ast-prompt-row dd { font-variant-numeric: tabular-nums; }
   .ast-prompt-total { margin-top: 7px; padding-top: 7px; font-weight: 650;
-    border-top: 1px solid color-mix(in srgb, var(--on-primary) 65%, transparent); }
-  .ast-msg.assistant .ast-prompt-total { border-top-color: var(--border); }
-  .ast-context-review { display: inline-flex; align-items: center; gap: 7px;
-    min-height: 36px; margin-top: 11px; padding: 0 12px; border-radius: 9px;
-    border: 1px solid var(--border); background: var(--surface); color: var(--primary);
-    cursor: pointer; font: inherit; font-size: 12px; font-weight: 650; text-align: left;
+    border-top: 1px solid color-mix(in srgb, var(--muted) 72%, transparent); }
+  /* Quiet by default: one small outlined control under the breakdown, not a second
+     primary action competing with Send. */
+  .ast-context-review { display: inline-flex; align-items: center; gap: 6px;
+    min-height: 28px; margin-top: 10px; padding: 0 9px; border-radius: 7px;
+    border: 1px solid color-mix(in srgb, var(--muted) 72%, transparent);
+    background: var(--surface);
+    /* Brand blue on white lands just under 4.5 at this size; mixing in the foreground
+       keeps it recognisably a link-coloured control and clears the threshold. */
+    color: color-mix(in srgb, var(--primary) 78%, var(--fg));
+    cursor: pointer; font: inherit; font-size: 11.5px; font-weight: 600; text-align: left;
     transition: background .15s, border-color .15s; }
-  .ast-context-review svg { width: 14px; height: 14px; flex: 0 0 auto; }
-  /* No resting fill on the bubble: any fill here is mixed from the label's own colour, so
-     it would pull the label towards its background. The outline, icon and hit area carry
-     the affordance; the fill appears on hover, where the dip is transient. */
-  .ast-msg.user .ast-context-review { color: var(--on-primary); background: transparent;
-    border-color: color-mix(in srgb, var(--on-primary) 70%, transparent); }
-  .ast-context-review:hover { background: var(--surface-2); }
-  .ast-msg.user .ast-context-review:hover {
-    background: color-mix(in srgb, var(--on-primary) 28%, transparent);
-    border-color: color-mix(in srgb, var(--on-primary) 65%, transparent); }
+  .ast-context-review svg { width: 13px; height: 13px; flex: 0 0 auto; }
+  .ast-context-review:hover { background: var(--surface-2); border-color: var(--primary); }
   .ast-context-review:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
-  .ast-msg.user .ast-context-review:focus-visible { outline-color: var(--on-primary); }
   .ast-output-warning { margin: 10px 0 2px; padding: 9px 11px; border-radius: 8px;
     background: var(--warn-bg); color: var(--warn); font-size: 12px; line-height: 1.5; }
   .ast-msg-footer { display: flex; align-items: center; justify-content: space-between;
     gap: 10px; margin-top: 8px; }
   .ast-msg-footer .ast-msg-meta { margin-top: 0; }
   .ast-msg-footer > .ast-copy:first-child { margin-left: auto; }
-  .ast-copy { min-width: 44px; min-height: 44px; padding: 0 10px; flex: 0 0 auto;
-    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
-    border: 1px solid var(--border); border-radius: 8px; background: var(--surface);
+  /* Small and quiet: the answer is the content, and a full-size button under every reply
+     turned the transcript into a column of controls. Full touch size returns on mobile. */
+  .ast-copy { min-height: 26px; padding: 0 8px; flex: 0 0 auto;
+    display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+    border: 1px solid transparent; border-radius: 7px; background: transparent;
     color: var(--muted); cursor: pointer; font: inherit; font-size: 11px; }
-  .ast-copy:hover { color: var(--fg); background: var(--surface-2); }
+  .ast-copy svg { width: 13px; height: 13px; }
+  .ast-copy:hover { color: var(--fg); background: var(--surface-2);
+    border-color: var(--border); }
   .ast-copy:disabled { cursor: wait; opacity: .75; }
   .ast-copy svg { width: 14px; height: 14px; }
   .ast-sources { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
@@ -271,7 +283,16 @@ _CSS = r"""
     animation: ast-pulse 1.1s ease-in-out infinite; }
   .ast-thinking i:nth-child(2) { animation-delay: .14s; }
   .ast-thinking i:nth-child(3) { animation-delay: .28s; }
-  .ast-msg.assistant.ast-waiting { width: auto; max-width: none; padding: 9px 11px;
+  .ast-progress { display: block; margin-top: 7px; color: var(--muted); font-size: 12px;
+    line-height: 1.4; }
+  .ast-progress-bar { display: block; width: 168px; max-width: 100%; height: 3px;
+    margin-top: 6px; border-radius: 2px; background: var(--border); overflow: hidden; }
+  .ast-progress-bar > i { display: block; height: 100%; border-radius: 2px;
+    background: var(--primary); transition: width .3s linear; }
+  @media (prefers-reduced-motion: reduce) { .ast-progress-bar > i { transition: none; } }
+  .ast-msg.assistant.ast-waiting { width: auto; max-width: none; align-self: flex-start;
+    background: var(--surface-2); border: 1px solid var(--border); border-radius: 12px;
+    padding: 9px 11px;
     flex: 0 0 auto; }
   /* A blinking block after the last streamed character, so a slow model still looks alive. */
   .ast-caret { display: inline-block; width: 7px; height: 14px; margin-left: 1px;
@@ -288,9 +309,123 @@ _CSS = r"""
     .ast-caret { animation: none; }
   }
   @keyframes ast-pulse { 0%, 70%, 100% { opacity: .25; } 35% { opacity: 1; } }
+  #ast-chats-dialog { width: min(520px, calc(100vw - 32px)); max-height: min(70vh, 560px);
+    padding: 0; border: 1px solid var(--border); border-radius: 14px;
+    background: var(--surface); color: var(--fg); overflow: hidden; }
+  #ast-chats-dialog::backdrop { background: rgba(0, 0, 0, .38); }
+  /* In the header row, left of the close control: the two window-level actions belong
+     together, and a full-width primary button above the list shouted over the chats. */
+  .ast-chat-new { display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto;
+    min-height: 32px; padding: 0 11px; border: 1px solid var(--border);
+    border-radius: 8px; background: var(--surface); color: var(--primary);
+    cursor: pointer; font: inherit; font-size: 12px; font-weight: 650; }
+  .ast-chat-new:hover { background: var(--surface-2); border-color: var(--primary); }
+  .ast-chat-new:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+  .ast-chat-list { list-style: none; margin: 0; padding: 12px 12px 14px; overflow-y: auto;
+    max-height: min(48vh, 380px); }
+  .ast-chat-row { display: flex; align-items: stretch; gap: 6px; margin: 0 0 6px; }
+  .ast-chat-item { flex: 1 1 auto; display: block; text-align: left; padding: 9px 11px;
+    border: 1px solid var(--border); border-radius: 9px; background: var(--surface-2);
+    color: var(--fg); font: inherit; cursor: pointer; }
+  .ast-chat-item:hover { border-color: var(--primary); }
+  .ast-chat-item:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
+  /* Marked by its own outline and a word, not a bar down the left edge: the edge marker
+     read as a scrollbar or a nesting cue rather than "this is the one you are reading". */
+  .ast-chat-item[aria-current="true"] { border-color: var(--primary);
+    background: color-mix(in srgb, var(--primary) 8%, var(--surface-2)); }
+  .ast-chat-current { margin-left: 6px; padding: 1px 6px; border-radius: 999px;
+    background: color-mix(in srgb, var(--primary) 16%, transparent);
+    color: var(--primary); font-size: 10px; font-weight: 700; letter-spacing: .02em;
+    text-transform: uppercase; white-space: nowrap; }
+  .ast-chat-title { display: block; font-weight: 600; font-size: 13px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ast-chat-meta { display: block; margin-top: 2px; color: var(--muted); font-size: 11px; }
+  .ast-chat-row-confirming { align-items: center; gap: 8px; padding: 8px 11px;
+    border: 1px solid var(--danger, #dc2626); border-radius: 9px;
+    background: var(--surface-2); }
+  .ast-chat-confirm-label { flex: 1 1 auto; font-size: 12px; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }
+  .ast-chat-confirm, .ast-chat-cancel { flex: 0 0 auto; min-height: 30px; padding: 0 11px;
+    border-radius: 8px; border: 1px solid var(--border); background: var(--surface);
+    color: var(--fg); font: inherit; font-size: 12px; cursor: pointer; }
+  .ast-chat-confirm { border-color: var(--danger, #dc2626);
+    color: var(--danger, #dc2626); font-weight: 600; }
+  .ast-chat-confirm:focus-visible, .ast-chat-cancel:focus-visible {
+    outline: 2px solid var(--ring); outline-offset: 1px; }
+  .ast-chat-name-input { flex: 1 1 auto; min-width: 0; min-height: 30px; padding: 0 9px;
+    border: 1px solid var(--primary); border-radius: 8px; background: var(--surface);
+    color: var(--fg); font: inherit; font-size: 12px; }
+  .ast-chat-name-input:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
+  .ast-chat-rename, .ast-chat-delete { flex: 0 0 auto; width: 34px; display: inline-flex;
+    align-items: center; justify-content: center; border: 1px solid transparent;
+    border-radius: 9px; background: transparent; color: var(--muted); cursor: pointer;
+    transition: color .15s, background .15s, border-color .15s; }
+  .ast-chat-rename svg, .ast-chat-delete svg { width: 15px; height: 15px; }
+  .ast-chat-rename:hover { border-color: var(--primary); color: var(--primary);
+    background: color-mix(in srgb, var(--primary) 10%, transparent); }
+  .ast-chat-delete:hover { border-color: var(--danger, #dc2626);
+    color: var(--danger, #dc2626);
+    background: color-mix(in srgb, var(--danger, #dc2626) 10%, transparent); }
+  .ast-chat-delete:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
+  .ast-chat-delete:disabled { opacity: .4; cursor: not-allowed; }
+  .ast-clear:disabled { opacity: .5; cursor: not-allowed; }
+  @media (max-width: 700px) {
+    #ast-chats-dialog { width: 100vw; max-width: none; height: 100dvh; max-height: none;
+      margin: 0; border: 0; border-radius: 0; }
+    .ast-chat-list { max-height: none; }
+  }
+  .ast-clear-confirm { flex: 0 0 auto; display: flex; align-items: center; gap: 10px;
+    padding: 10px 24px; border-bottom: 1px solid var(--border);
+    background: var(--surface-2); }
+  .ast-clear-confirm-text { flex: 1 1 auto; font-size: 12px; line-height: 1.45; }
+  .ast-clear-keep, .ast-clear-yes { flex: 0 0 auto; min-height: 30px; padding: 0 12px;
+    border-radius: 8px; border: 1px solid var(--border); background: var(--surface);
+    color: var(--fg); font: inherit; font-size: 12px; cursor: pointer; }
+  .ast-clear-yes { border-color: var(--danger, #dc2626); color: var(--danger, #dc2626);
+    font-weight: 650; }
+  .ast-clear-keep:focus-visible, .ast-clear-yes:focus-visible {
+    outline: 2px solid var(--ring); outline-offset: 1px; }
+  @media (max-width: 700px) { .ast-clear-confirm { padding: 10px 12px; } }
+  .ast-unavailable { flex: 1 1 auto; overflow: auto; padding: 22px 24px 24px; }
+  .ast-unavailable-title { margin: 0 0 8px; font-size: 15px; font-weight: 650; }
+  .ast-unavailable-lead { margin: 0 0 12px; color: var(--muted); font-size: 13px;
+    line-height: 1.5; }
+  .ast-unavailable-reason { margin: 0 0 12px; padding: 11px 12px; border-radius: 9px;
+    border: 1px solid var(--border); background: var(--surface-2); overflow-x: auto;
+    font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
+  .ast-unavailable-hint { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+  @media (max-width: 700px) { .ast-unavailable { padding: 16px 12px 20px; } }
   .ast-form { flex: 0 0 auto; border-top: 1px solid var(--border); padding: 14px 24px 20px;
     background: var(--surface); }
   .ast-label { display: block; font-size: 12px; font-weight: 600; margin-bottom: 6px; }
+  /* The ghost is a second copy of the field's own text plus the completion, sitting
+     exactly under the real one: same box, same metrics, so the grey tail lines up with
+     what has been typed however it wraps. */
+  .ast-question-wrap { position: relative; }
+  /* Above the field, not below it: the composer is already at the bottom of the panel. */
+  .ast-commands { position: absolute; left: 0; right: 0; bottom: calc(100% + 6px);
+    z-index: 3; margin: 0; padding: 4px; list-style: none; max-height: 240px;
+    overflow-y: auto; border: 1px solid var(--border); border-radius: 10px;
+    background: var(--surface); box-shadow: 0 10px 30px rgba(0, 0, 0, .18); }
+  .ast-command { display: block; width: 100%; padding: 7px 9px; border: 0;
+    border-radius: 7px; background: transparent; color: var(--fg); cursor: pointer;
+    font: inherit; font-size: 12px; text-align: left; }
+  .ast-command:hover, .ast-command[aria-selected="true"] { background: var(--surface-2); }
+  .ast-command[aria-selected="true"] { outline: 1px solid var(--primary); }
+  /* Brand blue on this surface lands just under 4.5 at 12px; mixing in the foreground
+     keeps it recognisably the command colour and clears the threshold for text. */
+  .ast-command b { display: inline-block; min-width: 74px; font-weight: 650;
+    color: color-mix(in srgb, var(--primary) 78%, var(--fg)); }
+  .ast-command span { color: var(--muted); }
+  .ast-ghost { position: absolute; inset: 0; z-index: 0; overflow: hidden;
+    padding: 10px 11px; border: 1px solid transparent; border-radius: 9px;
+    color: var(--muted); font: inherit; line-height: 1.45; white-space: pre-wrap;
+    overflow-wrap: anywhere; pointer-events: none; }
+  .ast-ghost b { font-weight: inherit; color: transparent; }
+  .ast-question { position: relative; z-index: 1; background: transparent; }
+  .ast-question:not(:placeholder-shown) + #ast-ghost { }
+  .ast-visually-hidden { position: absolute; width: 1px; height: 1px; margin: -1px;
+    padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
   .ast-question { display: block; width: 100%; min-height: 88px; max-height: 220px;
     resize: vertical; padding: 10px 11px; border: 1px solid var(--border); border-radius: 9px;
     background: var(--surface-2); color: var(--fg); font: inherit; line-height: 1.45; }
@@ -354,10 +489,12 @@ _PANEL = r"""
       </h2>
       <div class="ast-title-meta">
         <div id="ast-provider" class="ast-provider"></div>
-        <span id="ast-session-tokens" class="ast-session-tokens" aria-live="polite" hidden></span>
       </div>
     </div>
     <div class="ast-head-actions">
+      <button id="ast-chats" class="ast-clear" type="button" hidden
+              aria-haspopup="dialog" aria-controls="ast-chats-dialog"
+              aria-expanded="false">Chats</button>
       <button id="ast-clear" class="ast-clear" type="button" hidden>Clear chat</button>
       <button id="ast-close" class="btn ast-close" type="button" aria-label="Close assistant">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -370,15 +507,38 @@ _PANEL = r"""
   <div id="ast-context" class="ast-context" hidden>
     <div class="ast-scope-row">
       <span id="ast-scope" class="ast-scope" aria-live="polite"></span>
-      <button id="ast-scope-list" class="ast-scope-list" type="button"
-              aria-haspopup="dialog" aria-controls="ast-scope-dialog"
-              aria-expanded="false" hidden>View list</button>
+      <div class="ast-scope-aside">
+        <span id="ast-session-tokens" class="ast-session-tokens" aria-live="polite" hidden></span>
+        <button id="ast-scope-list" class="ast-scope-list" type="button"
+                aria-haspopup="dialog" aria-controls="ast-scope-dialog"
+                aria-expanded="false" hidden>View list</button>
+      </div>
     </div>
+  </div>
+  <div id="ast-unavailable" class="ast-unavailable" hidden>
+    <h3 id="ast-unavailable-title" class="ast-unavailable-title"></h3>
+    <p id="ast-unavailable-lead" class="ast-unavailable-lead"></p>
+    <pre class="ast-unavailable-reason"><code id="ast-unavailable-reason"></code></pre>
+    <p id="ast-unavailable-hint" class="ast-unavailable-hint"></p>
+  </div>
+  <div id="ast-clear-confirm" class="ast-clear-confirm" role="alertdialog"
+       aria-labelledby="ast-clear-confirm-text" hidden>
+    <span id="ast-clear-confirm-text" class="ast-clear-confirm-text"></span>
+    <button id="ast-clear-keep" class="ast-clear-keep" type="button"></button>
+    <button id="ast-clear-yes" class="ast-clear-yes" type="button"></button>
   </div>
   <div id="ast-messages" class="ast-messages" aria-live="polite" aria-busy="false"></div>
   <form id="ast-form" class="ast-form">
     <label id="ast-question-label" class="ast-label" for="ast-question">Ask about reports</label>
-    <textarea id="ast-question" class="ast-question" maxlength="4000" required></textarea>
+    <div class="ast-question-wrap">
+      <ul id="ast-commands" class="ast-commands" role="listbox"
+          aria-label="Assistant commands" hidden></ul>
+      <div id="ast-ghost" class="ast-ghost" aria-hidden="true" hidden></div>
+      <textarea id="ast-question" class="ast-question" maxlength="4000" required
+                autocomplete="off" spellcheck="true"
+                aria-describedby="ast-ghost-hint"></textarea>
+      <span id="ast-ghost-hint" class="ast-visually-hidden"></span>
+    </div>
     <div class="ast-form-row">
       <span id="ast-hint" class="ast-hint">Ctrl/⌘ + Enter to send</span>
       <div class="ast-form-actions">
@@ -401,6 +561,30 @@ _PANEL = r"""
     </div>
   </form>
 </dialog>
+<dialog id="ast-chats-dialog" aria-labelledby="ast-chats-dialog-title">
+  <div class="ast-scope-dialog-head">
+    <div class="ast-scope-dialog-title-wrap">
+      <h2 id="ast-chats-dialog-title">Your chats</h2>
+      <div id="ast-chats-dialog-summary" class="ast-scope-dialog-summary"></div>
+    </div>
+    <button id="ast-chat-new" class="ast-chat-new" type="button">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M12 5v14M5 12h14"/>
+      </svg>
+      <span id="ast-chat-new-label">New chat</span>
+    </button>
+    <button id="ast-chats-dialog-close" class="btn ast-scope-dialog-close" type="button"
+            aria-label="Close chat list">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M18 6 6 18M6 6l12 12"/>
+      </svg>
+    </button>
+  </div>
+  <ol id="ast-chat-list" class="ast-chat-list"></ol>
+</dialog>
+
 <dialog id="ast-scope-dialog" aria-labelledby="ast-scope-dialog-title">
   <div class="ast-scope-dialog-head">
     <div class="ast-scope-dialog-title-wrap">
@@ -480,7 +664,7 @@ _JS = r"""
       stoppedEmpty: "Stopped before the model produced anything.",
       clear: "Clear chat", introTitle: "Ask the report history",
       promptSize: "Sent to LLM", promptSystem: "System", promptUser: "User",
-      promptContext: "Context data", promptHistory: "History",
+      promptContext: "Context data", promptDocs: "Documentation", promptHistory: "History",
       promptStructure: "Prompt structure", promptTotal: "Total",
       promptNothingSent: "Nothing was sent to the LLM: no readable reports in this scope.",
       noReportsInScope: "No readable reports match the current scope. Clear or widen the dashboard filters and try again.",
@@ -495,9 +679,33 @@ _JS = r"""
       sessionTokens: "Session total: {total} tokens",
       intro: "Answers use only reports you may read. This tab keeps the chat after refresh.",
       thinking: "Reviewing reports…", retry: "Try again", noDetail: "The request failed.",
+      chats: "Chats", chatsTitle: "Your chats", chatsClose: "Close chat list",
+      chatsSummary: "{n} saved on the server", newChat: "New chat",
+      chatMeta: "{n} messages · {when}", chatUntitled: "New chat",
+      deleteChat: "Delete this chat", chatsEmpty: "No saved chats yet.",
+      renameChat: "Rename this chat", renameSave: "Save",
+      renamePlaceholder: "Name this chat",
+      deleteChatConfirm: "Delete “{title}”?", deleteChatYes: "Delete",
+      deleteChatNo: "Cancel", chatOpen: "open",
+      clearConfirm: "Clear this chat? The copy saved on the server goes too.",
+      clearConfirmLocal: "Clear this chat? It is only in this tab, so it cannot come back.",
+      clearConfirmYes: "Clear", clearConfirmNo: "Keep",
+      command_bug: "Draft a bug report from a failure",
+      command_flaky: "Judge a flaky test, and whether to quarantine it",
+      command_priority: "What to fix first, and why",
+      command_compare: "What changed between runs",
+      command_test: "Write pytest for code you paste",
+      progressLoadingModel: "Loading the local model…",
+      progressReduce: "Reading the report tree locally · {done} chunks · {elapsed} s of {budget} s",
+      progressReduceNoBudget: "Reading the report tree locally · {done} chunks · {elapsed} s",
+      progressMerge: "Merging what was read · pass {pass} · {elapsed} s",
       invalidRequest: "The request was rejected: {reason}",
       outputLimited: "The model reached its output-token limit, so this answer may be incomplete. Ask a narrower question or increase AIRFLOW_PYTEST_ASSISTANT_MAX_OUTPUT_TOKENS.",
+      unavailableTitle: "The assistant is not available",
+      unavailableLead: "This deployment asked for a report assistant, but the API server could not start it.",
+      unavailableHint: "The same line is in the API-server log. Fix the configuration and restart the server; nothing else in the viewer is affected.",
       truncated: "Context was limited", reports: "{n} reports", direct: "direct context",
+      suggestionHint: "Press Tab to complete: {text}",
       starters: ["What broke in the latest runs?", "Which failures look flaky?", "What became slower?"]
     },
     ru: {
@@ -526,7 +734,7 @@ _JS = r"""
       stoppedEmpty: "Остановлено до того, как модель что-то ответила.",
       clear: "Очистить чат", introTitle: "Спросите историю прогонов",
       promptSize: "Отправлено в LLM", promptSystem: "System", promptUser: "User",
-      promptContext: "Данные отчётов", promptHistory: "История",
+      promptContext: "Данные отчётов", promptDocs: "Документация", promptHistory: "История",
       promptStructure: "Структура промпта", promptTotal: "Всего",
       promptNothingSent: "В LLM ничего не отправлялось: в этой области нет доступных отчётов.",
       noReportsInScope: "В текущей области нет доступных отчётов. Сбросьте или расширьте фильтры и попробуйте снова.",
@@ -541,9 +749,33 @@ _JS = r"""
       sessionTokens: "За сессию: {total} токенов",
       intro: "Ответ строится только по доступным вам отчётам. Эта вкладка сохранит чат после обновления.",
       thinking: "Изучаю отчёты…", retry: "Повторить", noDetail: "Запрос не выполнен.",
+      chats: "Чаты", chatsTitle: "Ваши чаты", chatsClose: "Закрыть список чатов",
+      chatsSummary: "Сохранено на сервере: {n}", newChat: "Новый чат",
+      chatMeta: "Сообщений: {n} · {when}", chatUntitled: "Новый чат",
+      deleteChat: "Удалить этот чат", chatsEmpty: "Сохранённых чатов пока нет.",
+      renameChat: "Переименовать чат", renameSave: "Сохранить",
+      renamePlaceholder: "Название чата",
+      deleteChatConfirm: "Удалить «{title}»?", deleteChatYes: "Удалить",
+      deleteChatNo: "Отмена", chatOpen: "открыт",
+      clearConfirm: "Очистить этот чат? Копия на сервере тоже будет удалена.",
+      clearConfirmLocal: "Очистить этот чат? Он есть только в этой вкладке — вернуть будет нельзя.",
+      clearConfirmYes: "Очистить", clearConfirmNo: "Оставить",
+      command_bug: "Оформить багрепорт по падению",
+      command_flaky: "Разобрать flaky-тест и нужен ли карантин",
+      command_priority: "Что чинить в первую очередь и почему",
+      command_compare: "Что изменилось между прогонами",
+      command_test: "Написать pytest по присланному коду",
+      progressLoadingModel: "Загружаю локальную модель…",
+      progressReduce: "Читаю дерево отчётов локально · порций: {done} · {elapsed} с из {budget} с",
+      progressReduceNoBudget: "Читаю дерево отчётов локально · порций: {done} · {elapsed} с",
+      progressMerge: "Свожу прочитанное · проход {pass} · {elapsed} с",
       invalidRequest: "Запрос отклонён: {reason}",
       outputLimited: "Модель достигла лимита токенов ответа, поэтому текст может быть неполным. Сузьте вопрос или увеличьте AIRFLOW_PYTEST_ASSISTANT_MAX_OUTPUT_TOKENS.",
+      unavailableTitle: "Ассистент недоступен",
+      unavailableLead: "На этом стенде помощник по отчётам включён, но API-сервер не смог его запустить.",
+      unavailableHint: "Та же строка есть в логе API-сервера. Поправьте конфигурацию и перезапустите сервер — на остальную часть интерфейса это не влияет.",
       truncated: "Контекст был ограничен", reports: "Отчётов: {n}", direct: "контекст без сжатия",
+      suggestionHint: "Нажмите Tab, чтобы дописать: {text}",
       starters: ["Что сломалось в последних прогонах?", "Какие падения похожи на flaky?", "Какие тесты замедлились?"]
     }
   };
@@ -553,6 +785,11 @@ _JS = r"""
   }
   function astFmt(text, key, value) { return String(text).replace("{" + key + "}", value); }
 
+  //: Set once the server says the feature was configured but could not start.
+  var astUnavailable = false;
+  //: Latest local-phase progress for the one in-flight request, or null. Only one
+  //: request can be pending at a time, so a single value is always the right one.
+  var astProgress = null;
   var astButton = document.getElementById("assistant-btn");
   var astDialog = document.getElementById("assistant-dialog");
   var astMessages = document.getElementById("ast-messages");
@@ -561,6 +798,19 @@ _JS = r"""
   var astSend = document.getElementById("ast-send");
   var astStop = document.getElementById("ast-stop");
   var astClear = document.getElementById("ast-clear");
+  var astChats = document.getElementById("ast-chats");
+  var astChatsDialog = document.getElementById("ast-chats-dialog");
+  var astChatList = document.getElementById("ast-chat-list");
+  var astClearConfirm = document.getElementById("ast-clear-confirm");
+  var astCommands = document.getElementById("ast-commands");
+  //: Commands the server published, and the state of the menu built from them.
+  var AST_COMMANDS = [];
+  var astCommandList = [];
+  var astCommandIndex = 0;
+  var astGhost = document.getElementById("ast-ghost");
+  var astGhostHint = document.getElementById("ast-ghost-hint");
+  //: The completion currently offered, or "" when there is none.
+  var astSuggestion = "";
   var astContext = document.getElementById("ast-context");
   var astScopeList = document.getElementById("ast-scope-list");
   var astScopeDialog = document.getElementById("ast-scope-dialog");
@@ -573,6 +823,7 @@ _JS = r"""
   var AST_WINDOW_PREFS_KEY = null, AST_WINDOW_OPEN_KEY = null, AST_CONTEXT_WRAP_KEY = null;
   var AST_MAX_MESSAGES = 12;
   var AST_MAX_HISTORY_CHARS = 4000;
+  var AST_SERVER_HISTORY = false;
   var AST_MAX_SESSION_TOKENS = 1_000_000_000_000_000;
   var astLastFocus = null, astPending = false, astLastQuestion = "", astStatus = null;
   var astController = null;
@@ -581,6 +832,10 @@ _JS = r"""
   var astReportContextIndex = null;
   var astContextWrapped = true, astSessionTotalTokens = 0;
   var astTranscript = [];
+  //: The stored chat being read. Empty means "whichever the server calls newest", which
+  //: is what a freshly opened panel wants. Only meaningful with server-side history.
+  var astConversation = "";
+  var astConversations = [];
 
   function astApplyText() {
     document.getElementById("assistant-btn-label").textContent = astT("button");
@@ -593,6 +848,13 @@ _JS = r"""
     document.getElementById("ast-send-label").textContent = astT("send");
     document.getElementById("ast-stop-label").textContent = astT("stop");
     astStop.setAttribute("aria-label", astT("stopHint"));
+    astChats.textContent = astT("chats");
+    document.getElementById("ast-chats-dialog-title").textContent = astT("chatsTitle");
+    document.getElementById("ast-chats-dialog-close")
+      .setAttribute("aria-label", astT("chatsClose"));
+    // The label only: the button also holds an icon, and textContent would erase it.
+    document.getElementById("ast-chat-new-label").textContent = astT("newChat");
+    if (astChatsDialog.open) astRenderChatList();
     astScopeList.textContent = astT("scopeList");
     document.getElementById("ast-scope-dialog-title").textContent = astT("scopeListTitle");
     document.getElementById("ast-scope-dialog-close").setAttribute("aria-label", astT("scopeListClose"));
@@ -610,11 +872,88 @@ _JS = r"""
     else if (astMessages.querySelector(".ast-empty")) astEmpty();
   }
 
+  function astShowUnavailable(status) {
+    astUnavailable = true;
+    document.getElementById("ast-unavailable-title").textContent = astT("unavailableTitle");
+    document.getElementById("ast-unavailable-lead").textContent = astT("unavailableLead");
+    // The reason is written by the server for an operator and is not translated; it is
+    // rendered as text so a provider name can never become markup.
+    document.getElementById("ast-unavailable-reason").textContent =
+      status.reason || astT("noDetail");
+    document.getElementById("ast-unavailable-hint").textContent = astT("unavailableHint");
+    document.getElementById("ast-unavailable").hidden = false;
+    astMessages.hidden = true;
+    document.getElementById("ast-form").hidden = true;
+    astClear.hidden = true;
+    astChats.hidden = true;
+    astContext.hidden = true;
+    astApplyProviderText();
+    astButton.hidden = false;
+  }
+
   function astApplyProviderText() {
     if (!astStatus) return;
     var parts = [astStatus.provider, astStatus.model].filter(Boolean);
     parts.push(astStatus.context_model || astT("direct"));
     document.getElementById("ast-provider").textContent = parts.join(" · ");
+  }
+
+  //: What the field offers to finish. The starters the panel already shows, plus the
+  //: questions this user has asked before -- no model call: a request per keystroke would
+  //: cost real money, add latency to typing and burn the rate limit.
+  function astSuggestionPool() {
+    var pool = astT("starters").slice();
+    for (var i = astTranscript.length - 1; i >= 0; i--) {
+      var item = astTranscript[i];
+      if (item.role === "user" && item.text && pool.indexOf(item.text) === -1) {
+        pool.push(item.text);
+      }
+    }
+    return pool;
+  }
+
+  function astSuggestionFor(typed) {
+    var text = String(typed || "");
+    if (text.length < 2 || text.indexOf("\n") !== -1) return "";
+    var lowered = text.toLowerCase();
+    var pool = astSuggestionPool();
+    for (var i = 0; i < pool.length; i++) {
+      var candidate = pool[i];
+      if (candidate.length > text.length
+          && candidate.toLowerCase().indexOf(lowered) === 0) {
+        return candidate;
+      }
+    }
+    return "";
+  }
+
+  function astRenderGhost() {
+    var typed = astQuestion.value;
+    astSuggestion = astPending ? "" : astSuggestionFor(typed);
+    if (!astSuggestion) {
+      astGhost.hidden = true;
+      astGhost.textContent = "";
+      astGhostHint.textContent = "";
+      return;
+    }
+    // The typed part is rendered transparent so only the tail shows, and it keeps the
+    // completion aligned with the real text under every wrap.
+    astGhost.textContent = "";
+    var typedPart = document.createElement("b");
+    typedPart.textContent = typed;
+    astGhost.appendChild(typedPart);
+    astGhost.appendChild(
+      document.createTextNode(astSuggestion.slice(typed.length))
+    );
+    astGhost.hidden = false;
+    astGhostHint.textContent = astFmt(astT("suggestionHint"), "text", astSuggestion);
+  }
+
+  function astAcceptSuggestion() {
+    if (!astSuggestion) return false;
+    astQuestion.value = astSuggestion;
+    astRenderGhost();
+    return true;
   }
 
   function astSelectedReports() {
@@ -795,6 +1134,9 @@ _JS = r"""
   }
 
   function astUpdateScope() {
+    // Nothing can be asked, so the scope banner would only describe a question that
+    // cannot be sent.
+    if (astUnavailable) { astContext.hidden = true; return; }
     var scope = astScope();
     document.getElementById("ast-scope").textContent = scope.label;
     astRenderProcessing(scope);
@@ -818,6 +1160,7 @@ _JS = r"""
     } catch (error) { astContextWrapped = true; }
     astApplyContextWrap();
     astTranscript = astLoadTranscript();
+    if (AST_SERVER_HISTORY) astLoadServerHistory(astConversation, false);
     astRenderSessionTokens();
     var lastUsers = astTranscript.filter(function (item) { return item.role === "user"; });
     astLastQuestion = lastUsers.length ? lastUsers[lastUsers.length - 1].text : "";
@@ -827,11 +1170,280 @@ _JS = r"""
     }
   }
 
+  function astLoadServerHistory(conversation, replace) {
+    // The server is the source of truth once it stores the transcript: it survives the tab
+    // closing and follows the user to another browser, which sessionStorage cannot do.
+    var url = API + "assistant/history";
+    if (conversation) url += "?conversation=" + encodeURIComponent(conversation);
+    return fetch(url).then(function (response) {
+      return response.ok ? response.json() : null;
+    }).then(function (body) {
+      if (!body || body.available !== true || !Array.isArray(body.messages)) return;
+      if (astPending) return;
+      astConversations = Array.isArray(body.conversations) ? body.conversations : [];
+      astConversation = typeof body.conversation === "string" ? body.conversation : "";
+      astChats.hidden = !AST_SERVER_HISTORY;
+      if (astChatsDialog.open) astRenderChatList();
+      var restored = body.messages.filter(function (item) {
+        return item && (item.role === "user" || item.role === "assistant")
+          && typeof item.content === "string" && item.content;
+      }).slice(-AST_MAX_MESSAGES).map(function (item) {
+        return {
+          role: item.role,
+          text: item.content.slice(0, 64 * 1024),
+          evidence: Array.isArray(item.evidence) ? item.evidence : [],
+          reports: null, promptParts: null, promptBytes: null, reportContext: null,
+          tokenUsage: null, contextLimited: false, outputLimited: false,
+          pending: false, stopped: false, truncated: false
+        };
+      });
+      if (!restored.length && !replace) return;
+      astTranscript = restored;
+      astSessionTotalTokens = 0;
+      astPersistTranscript(); astRenderSessionTokens();
+      astClear.hidden = !astTranscript.length;
+      if (astDialog.open) {
+        if (astTranscript.length) astRenderTranscript(); else astEmpty();
+      }
+    }).catch(function () { /* Stored history is a convenience; the chat works without it. */ });
+  }
+
+  function astIcon(path) {
+    var svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("fill", "none");
+    svg.setAttribute("stroke", "currentColor");
+    svg.setAttribute("stroke-width", "2");
+    svg.setAttribute("stroke-linecap", "round");
+    svg.setAttribute("stroke-linejoin", "round");
+    svg.setAttribute("aria-hidden", "true");
+    var shape = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    shape.setAttribute("d", path);
+    svg.appendChild(shape);
+    return svg;
+  }
+
+  function astChatWhen(value) {
+    if (!value) return "";
+    var when = new Date(value);
+    if (isNaN(when.getTime())) return "";
+    return when.toLocaleString();
+  }
+
+  function astChatsForDisplay() {
+    // A chat that has never been answered exists only here: the list comes from the
+    // server, and the server learns about it with the first stored exchange. Without
+    // this, New chat emptied the panel and then showed a list you were not in.
+    var listed = astConversations.slice();
+    if (astConversation && !listed.some(function (chat) {
+      return chat.id === astConversation;
+    })) {
+      listed.unshift({ id: astConversation, title: "", messages: 0, updated_at: null });
+    }
+    return listed;
+  }
+
+  function astRenderChatList() {
+    astChatList.textContent = "";
+    var chats = astChatsForDisplay();
+    document.getElementById("ast-chats-dialog-summary").textContent =
+      astFmt(astT("chatsSummary"), "n", astConversations.length);
+    if (!chats.length) {
+      var empty = document.createElement("li");
+      empty.className = "ast-chat-meta";
+      empty.textContent = astT("chatsEmpty");
+      astChatList.appendChild(empty);
+      return;
+    }
+    chats.forEach(function (chat) {
+      var row = document.createElement("li"); row.className = "ast-chat-row";
+      var open = document.createElement("button");
+      open.type = "button"; open.className = "ast-chat-item";
+      var current = chat.id === astConversation;
+      if (current) open.setAttribute("aria-current", "true");
+      var title = document.createElement("span"); title.className = "ast-chat-title";
+      // textContent, never innerHTML: the title is a question a user typed.
+      title.textContent = chat.title || astT("chatUntitled");
+      var meta = document.createElement("span"); meta.className = "ast-chat-meta";
+      meta.textContent = astFmt(astFmt(astT("chatMeta"), "n", chat.messages || 0),
+        "when", astChatWhen(chat.updated_at));
+      if (current) {
+        var badge = document.createElement("span");
+        badge.className = "ast-chat-current";
+        badge.textContent = astT("chatOpen");
+        meta.appendChild(badge);
+      }
+      open.appendChild(title); open.appendChild(meta);
+      open.addEventListener("click", function () { astSwitchChat(chat.id); });
+      var remove = document.createElement("button");
+      remove.type = "button"; remove.className = "ast-chat-delete";
+      remove.setAttribute("aria-label", astT("deleteChat"));
+      remove.title = astT("deleteChat");
+      remove.appendChild(astIcon(
+        "M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14M10 11v6M14 11v6"));
+      var rename = document.createElement("button");
+      rename.type = "button"; rename.className = "ast-chat-rename";
+      rename.setAttribute("aria-label", astT("renameChat"));
+      rename.title = astT("renameChat");
+      rename.appendChild(astIcon("M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"));
+      rename.addEventListener("click", function (event) {
+        event.stopPropagation(); astStartRename(row, chat);
+      });
+      // Deleting a chat that is not being written to stays available.
+      remove.disabled = astPending && chat.id === astConversation;
+      remove.addEventListener("click", function (event) {
+        event.stopPropagation(); astAskToDelete(row, chat);
+      });
+      row.appendChild(open); row.appendChild(rename); row.appendChild(remove);
+      astChatList.appendChild(row);
+    });
+  }
+
+  function astStartRename(row, chat) {
+    // In place of the row, like the delete confirmation: no second modal stacked on this
+    // one, and the chat being renamed stays where the user was looking at it.
+    row.textContent = "";
+    row.classList.add("ast-chat-row-confirming");
+    var field = document.createElement("input");
+    field.type = "text"; field.className = "ast-chat-name-input";
+    field.maxLength = 200;
+    field.value = chat.title || "";
+    field.placeholder = astT("renamePlaceholder");
+    field.setAttribute("aria-label", astT("renameChat"));
+    var save = document.createElement("button");
+    save.type = "button"; save.className = "ast-chat-confirm";
+    save.textContent = astT("renameSave");
+    var cancel = document.createElement("button");
+    cancel.type = "button"; cancel.className = "ast-chat-cancel";
+    cancel.textContent = astT("deleteChatNo");
+    function commit() { astRenameChat(chat.id, field.value); }
+    save.addEventListener("click", commit);
+    cancel.addEventListener("click", astRenderChatList);
+    field.addEventListener("keydown", function (event) {
+      if (event.key === "Enter") { event.preventDefault(); commit(); }
+      else if (event.key === "Escape") { event.preventDefault(); astRenderChatList(); }
+    });
+    row.appendChild(field); row.appendChild(cancel); row.appendChild(save);
+    field.focus(); field.select();
+  }
+
+  function astRenameChat(id, title) {
+    fetch(API + "assistant/history?conversation=" + encodeURIComponent(id), {
+      method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: title })
+    }).catch(function () { /* The refresh below reports the real state either way. */ })
+      .then(function () { astLoadChatList(); });
+  }
+
+  function astAskToDelete(row, chat) {
+    // Deleting a whole conversation cannot be undone, and the row's small x is easy to hit
+    // by accident. The confirmation replaces the row in place: no second modal to stack on
+    // top of this one, and the chat being deleted stays named on screen.
+    row.textContent = "";
+    row.classList.add("ast-chat-row-confirming");
+    var label = document.createElement("span");
+    label.className = "ast-chat-confirm-label";
+    label.textContent = astFmt(astT("deleteChatConfirm"), "title",
+      chat.title || astT("chatUntitled"));
+    var yes = document.createElement("button");
+    yes.type = "button"; yes.className = "ast-chat-confirm";
+    yes.textContent = astT("deleteChatYes");
+    yes.addEventListener("click", function () { astDeleteChat(chat.id); });
+    var no = document.createElement("button");
+    no.type = "button"; no.className = "ast-chat-cancel";
+    no.textContent = astT("deleteChatNo");
+    no.addEventListener("click", function () { astRenderChatList(); });
+    row.appendChild(label); row.appendChild(no); row.appendChild(yes);
+    yes.focus();
+  }
+
+  function astOpenChats() {
+    astRenderChatList();
+    if (typeof astChatsDialog.showModal === "function") {
+      if (!astChatsDialog.open) astChatsDialog.showModal();
+    } else astChatsDialog.setAttribute("open", "");
+    astChats.setAttribute("aria-expanded", "true");
+    if (typeof updateParentDim === "function") updateParentDim();
+    // Refresh in the background: another tab may have added a chat since this one loaded.
+    astLoadChatList();
+  }
+
+  function astCloseChats() {
+    if (astChatsDialog.open && typeof astChatsDialog.close === "function") {
+      astChatsDialog.close();
+    } else astChatsDialog.removeAttribute("open");
+    astChats.setAttribute("aria-expanded", "false");
+  }
+
+  function astLoadChatList() {
+    fetch(API + "assistant/history" +
+      (astConversation ? "?conversation=" + encodeURIComponent(astConversation) : ""))
+      .then(function (response) { return response.ok ? response.json() : null; })
+      .then(function (body) {
+        if (!body || body.available !== true) return;
+        astConversations = Array.isArray(body.conversations) ? body.conversations : [];
+        if (astChatsDialog.open) astRenderChatList();
+      }).catch(function () { /* The list is a convenience. */ });
+  }
+
+  function astSwitchChat(id) {
+    if (astPending) return;
+    astCloseChats();
+    if (id === astConversation) return;
+    astConversation = id;
+    astLoadServerHistory(id, true);
+    astQuestion.focus();
+  }
+
+  function astNewChat() {
+    if (astPending) return;
+    astCloseChats();
+    // A fresh id is minted here and only reaches the server with the first answer, so an
+    // abandoned new chat leaves nothing behind.
+    astConversation = astNewConversationId();
+    astTranscript = []; astLastQuestion = ""; astSessionTotalTokens = 0;
+    astPersistTranscript(); astRenderSessionTokens();
+    astClear.hidden = true; astEmpty(); astQuestion.focus();
+  }
+
+  function astDeleteChat(id) {
+    if (astPending && id === astConversation) return;
+    fetch(API + "assistant/history?conversation=" + encodeURIComponent(id),
+      { method: "DELETE" })
+      .catch(function () { /* Reported by the refresh below either way. */ })
+      .then(function () {
+        astLoadChatList();
+        if (id === astConversation) {
+          astConversation = "";
+          astTranscript = []; astLastQuestion = ""; astSessionTotalTokens = 0;
+          astPersistTranscript(); astRenderSessionTokens();
+          astClear.hidden = true; astEmpty();
+          astLoadServerHistory("", true);
+        }
+      });
+  }
+
+  function astNewConversationId() {
+    var random = "";
+    if (window.crypto && typeof window.crypto.getRandomValues === "function") {
+      var bytes = new Uint8Array(8);
+      window.crypto.getRandomValues(bytes);
+      for (var i = 0; i < bytes.length; i++) {
+        random += ("0" + bytes[i].toString(16)).slice(-2);
+      }
+    } else random = String(Math.random()).slice(2, 18);
+    return "c" + Date.now().toString(36) + random;
+  }
+
   function astCleanPromptParts(raw) {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
-    var names = ["system", "user", "context", "history", "structure"], clean = {};
+    var names = ["system", "user", "context", "history", "docs", "structure"], clean = {};
     for (var i = 0; i < names.length; i++) {
       var value = raw[names[i]];
+      // A part this build knows about and the payload does not is zero, not a reason to
+      // throw the whole breakdown away: a transcript stored before a part existed, or a
+      // browser held open across a deploy, would otherwise show no breakdown at all.
+      if (value === undefined || value === null) { clean[names[i]] = 0; continue; }
       if (!Number.isFinite(value) || value < 0) return null;
       clean[names[i]] = Math.min(Math.floor(value), 100 * 1024 * 1024);
     }
@@ -876,12 +1488,17 @@ _JS = r"""
   }
 
   function astRenderSessionTokens() {
-    if (astSessionTotalTokens <= 0) {
-      astSessionTokens.textContent = ""; astSessionTokens.hidden = true; return;
-    }
+    astSessionTokens.textContent = "";
+    if (astSessionTotalTokens <= 0) { astSessionTokens.hidden = true; return; }
     var locale = LOCALE === "ru" ? "ru-RU" : "en-US";
     var total = astSessionTotalTokens.toLocaleString(locale);
-    astSessionTokens.textContent = astFmt(astT("sessionTokens"), "total", total);
+    // Built as nodes so the number can carry its own weight without innerHTML.
+    var text = astFmt(astT("sessionTokens"), "total", "\u0000").split("\u0000");
+    astSessionTokens.appendChild(document.createTextNode(text[0]));
+    var value = document.createElement("b"); value.textContent = total;
+    astSessionTokens.appendChild(value);
+    if (text.length > 1) astSessionTokens.appendChild(document.createTextNode(text[1]));
+    astSessionTokens.title = astSessionTokens.textContent;
     astSessionTokens.hidden = false;
   }
 
@@ -899,6 +1516,10 @@ _JS = r"""
     try {
       var saved = JSON.parse(sessionStorage.getItem(AST_STORAGE_KEY) || "null");
       if (!saved || saved.version !== 1 || !Array.isArray(saved.messages)) return [];
+      // Reopen the chat this tab was reading. Without it a refresh silently jumps to
+      // whichever chat the server calls newest, which may be one written in another tab.
+      astConversation = typeof saved.conversation === "string"
+        ? saved.conversation.slice(0, 64) : "";
       var messages = saved.messages.filter(function (item) {
         return item && (item.role === "user" || item.role === "assistant")
           && typeof item.text === "string";
@@ -954,6 +1575,7 @@ _JS = r"""
     try { if (AST_STORAGE_KEY) {
       sessionStorage.setItem(AST_STORAGE_KEY,
         JSON.stringify({ version: 1, messages: astTranscript,
+          conversation: astConversation,
           sessionTotalTokens: astSessionTotalTokens }));
     } } catch (error) { /* Storage may be blocked or full; chat still works in memory. */ }
     astClear.hidden = !astTranscript.length;
@@ -985,6 +1607,7 @@ _JS = r"""
         { label: astT("promptSystem"), value: astByteLabel(item.promptParts.system) },
         { label: astT("promptUser"), value: astByteLabel(item.promptParts.user) },
         { label: astT("promptContext"), value: astByteLabel(item.promptParts.context) },
+        { label: astT("promptDocs"), value: astByteLabel(item.promptParts.docs) },
         { label: astT("promptHistory"), value: astByteLabel(item.promptParts.history) },
         { label: astT("promptStructure"), value: astByteLabel(item.promptParts.structure) },
         { label: astT("promptTotal"), value: astByteLabel(item.promptParts.total), total: true }
@@ -1088,10 +1711,38 @@ _JS = r"""
     if (atBottom) astMessages.scrollTop = astMessages.scrollHeight;
   }
 
+  function astAskToClear() {
+    // Clear throws away the transcript *and* its stored copy, and it sits in the header
+    // next to Close. Asking first is the difference between a mistake and a loss.
+    if (astPending) return;
+    document.getElementById("ast-clear-confirm-text").textContent =
+      AST_SERVER_HISTORY ? astT("clearConfirm") : astT("clearConfirmLocal");
+    document.getElementById("ast-clear-keep").textContent = astT("clearConfirmNo");
+    document.getElementById("ast-clear-yes").textContent = astT("clearConfirmYes");
+    astClearConfirm.hidden = false;
+    document.getElementById("ast-clear-keep").focus();
+  }
+
+  function astHideClearConfirm() {
+    astClearConfirm.hidden = true;
+  }
+
   function astClearTranscript() {
+    astHideClearConfirm();
+    if (astPending) return;
+    if (AST_SERVER_HISTORY) {
+      // Scoped to the chat on screen: with a list of chats, a button that silently wiped
+      // all of them would be a trap. The list has a delete of its own per chat.
+      var url = API + "assistant/history";
+      if (astConversation) url += "?conversation=" + encodeURIComponent(astConversation);
+      fetch(url, { method: "DELETE" })
+        .catch(function () { /* Local clear still happens below. */ })
+        .then(function () { astLoadChatList(); });
+    }
     astTranscript = []; astLastQuestion = ""; astSessionTotalTokens = 0;
     try { if (AST_STORAGE_KEY) sessionStorage.removeItem(AST_STORAGE_KEY); } catch (error) {}
-    astRenderSessionTokens(); astClear.hidden = true; astEmpty(); astQuestion.focus();
+    astRenderSessionTokens(); astClear.hidden = true; astEmpty();
+    astRenderGhost(); astQuestion.focus();
   }
 
   function astEmpty() {
@@ -1347,6 +1998,124 @@ _JS = r"""
     return button;
   }
 
+  function astCommandMatch() {
+    // Only a slash that opens the whole question: "/bug", not "why did /tmp/x fail".
+    var value = astQuestion.value;
+    var match = /^\/([A-Za-z]*)$/.exec(value);
+    return match ? match[1].toLowerCase() : null;
+  }
+
+  function astRenderCommands() {
+    var typed = astCommandMatch();
+    var offered = typed === null ? [] : AST_COMMANDS.filter(function (command) {
+      return command.name.indexOf(typed) === 0;
+    });
+    astCommandList = offered;
+    astCommandIndex = 0;
+    astCommands.textContent = "";
+    if (!offered.length) { astCommands.hidden = true; return; }
+    offered.forEach(function (command, index) {
+      var row = document.createElement("li");
+      var button = document.createElement("button");
+      button.type = "button"; button.className = "ast-command";
+      button.setAttribute("role", "option");
+      button.setAttribute("aria-selected", index === 0 ? "true" : "false");
+      var name = document.createElement("b");
+      name.textContent = "/" + command.name;
+      var what = document.createElement("span");
+      // Described in the reader's language; the server owns the names, not the wording.
+      what.textContent = astT("command_" + command.name) || command.title;
+      button.appendChild(name); button.appendChild(what);
+      button.addEventListener("mousedown", function (event) {
+        // mousedown, not click: the field must not lose focus first.
+        event.preventDefault(); astUseCommand(index);
+      });
+      row.appendChild(button); astCommands.appendChild(row);
+    });
+    astCommands.hidden = false;
+  }
+
+  function astHighlightCommand(step) {
+    if (!astCommandList.length) return;
+    astCommandIndex =
+      (astCommandIndex + step + astCommandList.length) % astCommandList.length;
+    var buttons = astCommands.querySelectorAll(".ast-command");
+    for (var i = 0; i < buttons.length; i++) {
+      buttons[i].setAttribute("aria-selected", i === astCommandIndex ? "true" : "false");
+      if (i === astCommandIndex && buttons[i].scrollIntoView) {
+        buttons[i].scrollIntoView({ block: "nearest" });
+      }
+    }
+  }
+
+  function astUseCommand(index) {
+    var command = astCommandList[index];
+    if (!command) return;
+    astQuestion.value = "/" + command.name + " ";
+    astCloseCommands();
+    astRenderGhost();
+    astQuestion.focus();
+  }
+
+  function astCloseCommands() {
+    astCommandList = [];
+    astCommands.hidden = true;
+    astCommands.textContent = "";
+  }
+
+  function astProgressText(progress) {
+    if (!progress) return "";
+    if (progress.phase === "loading_model") return astT("progressLoadingModel");
+    var elapsed = Math.round(Number(progress.elapsed_seconds) || 0);
+    if (progress.phase === "local_merge") {
+      return astFmt(astFmt(astT("progressMerge"), "pass", progress["pass"] || 1),
+        "elapsed", elapsed);
+    }
+    var done = Number(progress.chunks_done) || 0;
+    var budget = Number(progress.budget_seconds);
+    if (!Number.isFinite(budget) || budget <= 0) {
+      return astFmt(astFmt(astT("progressReduceNoBudget"), "done", done),
+        "elapsed", elapsed);
+    }
+    return astFmt(astFmt(astFmt(astT("progressReduce"), "done", done),
+      "elapsed", elapsed), "budget", Math.round(budget));
+  }
+
+  function astProgressFraction(progress) {
+    // Chunk count has no known total, but the wall-clock budget does: it is the only
+    // honest denominator available, and it is also what actually ends the wait.
+    if (!progress || progress.phase === "loading_model") return 0;
+    var elapsed = Number(progress.elapsed_seconds), budget = Number(progress.budget_seconds);
+    if (!Number.isFinite(elapsed) || !Number.isFinite(budget) || budget <= 0) return 0;
+    return Math.max(0, Math.min(1, elapsed / budget));
+  }
+
+  function astBuildProgress() {
+    if (!astProgress) return null;
+    var wrap = document.createElement("span");
+    wrap.className = "ast-progress";
+    wrap.textContent = astProgressText(astProgress);
+    var fraction = astProgressFraction(astProgress);
+    if (fraction > 0) {
+      var bar = document.createElement("span");
+      bar.className = "ast-progress-bar";
+      bar.setAttribute("aria-hidden", "true");
+      var fill = document.createElement("i");
+      fill.style.width = Math.round(fraction * 100) + "%";
+      bar.appendChild(fill); wrap.appendChild(bar);
+    }
+    return wrap;
+  }
+
+  function astRenderProgress() {
+    var box = astMessages.querySelector(".ast-msg.ast-waiting");
+    if (!box) return;
+    var existing = box.querySelector(".ast-progress");
+    if (existing) existing.remove();
+    var built = astBuildProgress();
+    if (built) box.appendChild(built);
+  }
+
   function astAddMessage(role, text, evidence, meta, isError, outputLimited, state,
                          stoppedNote) {
     var empty = astMessages.querySelector(".ast-empty"); if (empty) empty.remove();
@@ -1359,6 +2128,8 @@ _JS = r"""
       var dots = document.createElement("span"); dots.className = "ast-thinking";
       for (var d = 0; d < 3; d++) dots.appendChild(document.createElement("i"));
       box.appendChild(dots);
+      var progressLine = astBuildProgress();
+      if (progressLine) box.appendChild(progressLine);
       astMessages.appendChild(box); astMessages.scrollTop = astMessages.scrollHeight;
       return box;
     }
@@ -1414,6 +2185,13 @@ _JS = r"""
     astSend.hidden = on; astStop.hidden = !on;
     astMessages.setAttribute("aria-busy", String(on));
     if (on) astStop.disabled = false;
+    // The chat an answer is being written into must not be erased underneath it: the
+    // reply would land in a transcript that no longer exists, and the server would keep
+    // an exchange the user believes they deleted. Switching and New already refuse while
+    // pending; these two are the same rule made visible.
+    astClear.disabled = on;
+    if (on) astHideClearConfirm();
+    if (astChatsDialog.open) astRenderChatList();
   }
 
   function astErrorDetail(body, status) {
@@ -1444,12 +2222,11 @@ _JS = r"""
   }
 
   function astApplyDone(item, body) {
-    // The server guesses the reply language from the question, which is wrong for a short
-    // or English question typed into a Russian dashboard. The browser knows the locale for
-    // certain, so it owns this one fixed sentence.
-    var answer = body.reports_considered === 0 && !body.report_context
-      ? astT("noReportsInScope") : (body.answer || item.text || "");
-    item.text = answer;
+    // Whatever the model wrote, including when no report matched: the dashboard language
+    // is sent with the question now, so the answer already comes back in the right one.
+    // Substituting a fixed sentence here used to overwrite real answers -- a question
+    // about the product needs no reports at all.
+    item.text = body.answer || item.text || "";
     item.pending = false;
     item.stopped = false;
     item.evidence = body.evidence || [];
@@ -1498,12 +2275,19 @@ _JS = r"""
       pending: true, stopped: false };
     astTranscript.push(userItem); astTranscript.push(pendingItem);
     astPersistTranscript(); astRenderTranscript(); astQuestion.value = "";
+    astCloseCommands(); astRenderGhost();
     var scope = astScope(); astUpdateScope(); astSetPending(true);
+    astProgress = null;
     astController = typeof AbortController === "function" ? new AbortController() : null;
     var settled = false, sawDone = false, lastPersist = 0;
 
     function onEvent(name, payload) {
-      if (name === "meta") {
+      if (name === "progress") {
+        astProgress = payload || null;
+        astRenderProgress();
+      } else if (name === "meta") {
+        // Preparation is over: from here the answer itself is the progress.
+        astProgress = null;
         astApplyMeta(userItem, payload);
         astRenderTranscript();
       } else if (name === "delta" && typeof payload.text === "string") {
@@ -1526,7 +2310,8 @@ _JS = r"""
     fetch(API + "assistant/stream", {
       method: "POST", headers: { "Content-Type": "application/json" },
       signal: astController ? astController.signal : undefined,
-      body: JSON.stringify({ question: question, scope: scope.payload, history: history })
+      body: JSON.stringify({ question: question, scope: scope.payload, history: history,
+        conversation: astConversation, locale: LOCALE })
     }).then(function (response) {
       if (!response.ok) {
         return response.json().catch(function () { return {}; }).then(function (body) {
@@ -1631,6 +2416,14 @@ _JS = r"""
   function astOpen() {
     if (astDialog.open) return;
     astLastFocus = document.activeElement; astApplyText(); astUpdateScope();
+    if (astUnavailable) {
+      if (typeof astDialog.showModal === "function") astDialog.showModal();
+      else astDialog.setAttribute("open", "");
+      astButton.setAttribute("aria-expanded", "true");
+      if (typeof updateParentDim === "function") updateParentDim();
+      document.getElementById("ast-close").focus();
+      return;
+    }
     astApplyWindowPrefs();
     if (typeof astDialog.showModal === "function") astDialog.showModal();
     else astDialog.setAttribute("open", "");
@@ -1643,6 +2436,7 @@ _JS = r"""
     astQuestion.focus();
   }
   function astClose() {
+    astHideClearConfirm();
     astPersistWindowPrefs();
     if (astDialog.open && typeof astDialog.close === "function") astDialog.close();
     else astDialog.removeAttribute("open");
@@ -1666,7 +2460,15 @@ _JS = r"""
   function astLoadStatus() {
     fetch(API + "assistant/status").then(function (r) { return r.ok ? r.json() : null; })
       .then(function (status) {
-        if (!status || !status.enabled) return;
+        if (!status) return;
+        if (!status.enabled) {
+          // A deployment that never set a provider gets no button at all: advertising a
+          // feature it did not install would only be noise. One that did set a provider
+          // and got it wrong gets the button and the reason, because otherwise the
+          // symptom is an assistant that silently does not exist.
+          if (status.configured) { astStatus = status; astShowUnavailable(status); }
+          return;
+        }
         astStatus = status;
         if (Number.isFinite(status.max_history_messages)) {
           AST_MAX_MESSAGES = status.max_history_messages;
@@ -1674,6 +2476,10 @@ _JS = r"""
         if (Number.isFinite(status.max_history_chars) && status.max_history_chars > 0) {
           AST_MAX_HISTORY_CHARS = status.max_history_chars;
         }
+        AST_COMMANDS = Array.isArray(status.commands) ? status.commands.filter(
+          function (command) { return command && typeof command.name === "string"; }
+        ) : [];
+        AST_SERVER_HISTORY = status.history_server_side === true;
         astUseStorageNamespace(status.storage_namespace);
         astButton.hidden = false;
         astQuestion.maxLength = status.max_question_chars || 4000;
@@ -1684,7 +2490,20 @@ _JS = r"""
 
   astButton.addEventListener("click", function () { astDialog.open ? astClose() : astOpen(); });
   document.getElementById("ast-close").addEventListener("click", astClose);
-  astClear.addEventListener("click", astClearTranscript);
+  astClear.addEventListener("click", astAskToClear);
+  document.getElementById("ast-clear-keep").addEventListener("click", function () {
+    astHideClearConfirm(); astQuestion.focus();
+  });
+  document.getElementById("ast-clear-yes").addEventListener("click", astClearTranscript);
+  astChats.addEventListener("click", function () {
+    astChatsDialog.open ? astCloseChats() : astOpenChats();
+  });
+  document.getElementById("ast-chats-dialog-close").addEventListener("click", astCloseChats);
+  document.getElementById("ast-chat-new").addEventListener("click", astNewChat);
+  astChatsDialog.addEventListener("close", function () {
+    astChats.setAttribute("aria-expanded", "false");
+    if (typeof updateParentDim === "function") updateParentDim();
+  });
   astStop.addEventListener("click", function () { astStop.disabled = true; astStopStream(); });
   astScopeList.addEventListener("click", astOpenScopeList);
   document.addEventListener("click", function (event) {
@@ -1766,10 +2585,38 @@ _JS = r"""
     event.preventDefault(); astSendQuestion(astQuestion.value);
   });
   astQuestion.addEventListener("keydown", function (event) {
+    // While the command menu is open it owns the keys it needs. Sending "/" as a question
+    // would be nonsense, and Escape here should close the menu, not the whole window.
+    if (!astCommands.hidden && astCommandList.length) {
+      if (event.key === "ArrowDown") { event.preventDefault(); astHighlightCommand(1); return; }
+      if (event.key === "ArrowUp") { event.preventDefault(); astHighlightCommand(-1); return; }
+      if (event.key === "Enter" || event.key === "Tab") {
+        event.preventDefault(); astUseCommand(astCommandIndex); return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault(); event.stopPropagation(); astCloseCommands(); return;
+      }
+    }
     if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
       event.preventDefault(); astSendQuestion(astQuestion.value);
+      return;
+    }
+    // Tab is only taken when there is something to take it for. With no suggestion it
+    // keeps its usual job and moves focus, or a keyboard user is trapped in the field.
+    if (event.key === "Tab" && !event.shiftKey && astSuggestion) {
+      event.preventDefault(); astAcceptSuggestion();
     }
   });
+  astQuestion.addEventListener("input", function () {
+    astRenderCommands(); astRenderGhost();
+  });
+  astQuestion.addEventListener("scroll", function () {
+    astGhost.scrollTop = astQuestion.scrollTop;
+  });
+  astQuestion.addEventListener("blur", function () {
+    astGhost.hidden = true; astCloseCommands();
+  });
+  astQuestion.addEventListener("focus", astRenderGhost);
   ["f-dag", "f-task", "f-run"].forEach(function (id) {
     document.getElementById(id).addEventListener("input", function () {
       if (astDialog.open) astUpdateScope();

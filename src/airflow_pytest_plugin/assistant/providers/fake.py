@@ -19,7 +19,7 @@ from __future__ import annotations
 import time
 from collections.abc import Iterator
 
-from .common import AssistantProviderResponse
+from ..common import AssistantProviderResponse
 
 
 class FakeAssistant:
