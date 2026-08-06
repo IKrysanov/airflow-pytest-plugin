@@ -114,7 +114,16 @@ def test_every_fragment_on_disk_is_registered():
 
 
 def test_every_skill_has_triggers_in_both_languages():
+    """...except the one that cannot be guessed at, which is reachable only by command.
+
+    The documentation skill says a DOCUMENTATION section *is* supplied. Letting a keyword
+    add it would put that sentence in front of the model on questions where no manual
+    matched, which is an instruction to quote something that is not there.
+    """
     for name, skill in SKILLS.items():
+        if not skill.triggers and not skill.pairs:
+            assert skill.command, f"{name} is reachable by nothing at all"
+            continue
         assert skill.triggers, name
         assert any(
             any("а" <= char <= "я" for char in trigger) for trigger in skill.triggers
@@ -324,3 +333,36 @@ def test_the_authoring_skill_says_what_to_do_with_evidence_it_did_not_ask_for():
 
     assert "reproduces it" in text
     assert "ignore it" in text
+
+
+def test_the_documentation_skill_is_reachable_only_by_command():
+    """Keywords must not add it: see the note on triggers above."""
+    assert SKILLS["documentation"].command == "docs"
+    assert not SKILLS["documentation"].wants("расскажи про документацию и параметры")
+    assert parse_command("/docs какие параметры") == (("docs",), "какие параметры")
+
+
+def test_a_docs_command_does_not_claim_documentation_that_is_not_there():
+    """/docs on a deployment that mounted no manuals must not promise a section."""
+    prompt = build_system_prompt(
+        "какие параметры", has_documentation=False, commands=("docs",)
+    )
+
+    assert "A DOCUMENTATION section is supplied" not in prompt
+    assert core_prompt() in prompt
+
+
+def test_a_docs_command_carries_the_documentation_rules_exactly_once():
+    prompt = build_system_prompt(
+        "какие параметры", has_documentation=True, commands=("docs",)
+    )
+
+    assert prompt.count("A DOCUMENTATION section is supplied") == 1
+
+
+def test_a_docs_question_is_not_told_to_widen_its_filters():
+    """It is a question about the product; the user's runs have nothing to do with it."""
+    text = no_evidence_text(commands=("docs",), question="какие параметры")
+
+    assert "no report was needed" in text
+    assert "no report matched the current scope" not in text

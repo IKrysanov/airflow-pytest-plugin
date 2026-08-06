@@ -201,7 +201,10 @@ class AssistantRuntime:
         )
         self._history = history
         self._history_days = max(0, history_days)
-        self._purged_at = 0.0
+        # ``None`` rather than 0.0: the clock is monotonic and counts from boot, so zero
+        # is not "long ago" but "an hour after this host came up", which is when the first
+        # sweep would otherwise happen.
+        self._purged_at: float | None = None
         self._clock = time.monotonic
         self._health: dict[str, Any] | None = None
         self._health_at = 0.0
@@ -454,7 +457,7 @@ class AssistantRuntime:
         most once an hour per process, which is cheap and needs no operator wiring.
         """
         now = self._clock()
-        if now - self._purged_at < 3_600:
+        if self._purged_at is not None and now - self._purged_at < 3_600:
             return
         self._purged_at = now
         try:
@@ -1074,7 +1077,9 @@ class AssistantRuntime:
                 reduced = redact_text(
                     reducer.reduce(question=question, context=context.text)
                 )
-        documentation = self.documentation.select(question, budget=self.docs_bytes)
+        documentation = self.documentation.select(
+            question, budget=self.docs_bytes, forced="docs" in commands
+        )
         system = build_system_prompt(
             question, has_documentation=bool(documentation), commands=commands
         )

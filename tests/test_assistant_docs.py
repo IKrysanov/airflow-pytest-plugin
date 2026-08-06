@@ -150,3 +150,27 @@ def test_secrets_in_documentation_are_redacted_before_they_can_be_sent(
     )
 
     assert "sk-live-0123456789abcdef" not in picked
+
+
+def test_a_forced_selection_answers_what_the_specificity_gate_would_reject(tmp_path):
+    """`/docs` is the user saying the question is about the manual.
+
+    The gate exists because a question that matches only a word the whole manual uses is
+    usually about the user's own runs, and a real manual is big enough for that to happen
+    often. Guessing wrong costs the answer; being told costs nothing.
+    """
+    manual = "\n".join(
+        f"## Chapter {n}\nThis chapter explains the cleanup behaviour of step {n}.\n"
+        for n in range(12)
+    )
+    (tmp_path / "manual.md").write_text(manual, encoding="utf-8")
+    library = load_documentation((str(tmp_path / "manual.md"),))
+
+    assert library.select("what about cleanup?", budget=4_096) == ""
+    assert "cleanup" in library.select("what about cleanup?", budget=4_096, forced=True)
+
+
+def test_a_forced_selection_still_sends_nothing_when_nothing_matches(library):
+    """Forcing lowers the bar; it does not invent a match."""
+    assert library.select("проблемы с кубернетесом", budget=4_096, forced=True) == ""
+    assert library.select("какие параметры", budget=0, forced=True) == ""

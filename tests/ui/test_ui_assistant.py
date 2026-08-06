@@ -2870,8 +2870,9 @@ def test_typing_a_slash_offers_the_commands(assistant_dash):
     menu = page.locator("#ast-commands")
     expect(menu).to_be_visible()
     items = menu.locator(".ast-command")
-    expect(items).to_have_count(5)
+    expect(items).to_have_count(6)
     expect(items.first).to_contain_text("/bug")
+    expect(menu).to_contain_text("/docs")
     # Each one says what it does, not just its name.
     assert items.first.inner_text().strip() != "/bug"
 

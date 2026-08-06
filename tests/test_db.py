@@ -745,6 +745,46 @@ def test_old_rate_windows_are_swept_without_an_operator(reports_root):
     assert store.spent("ancient", 1_000) == 0, "stale windows must not accumulate"
 
 
+def test_the_first_sweep_does_not_wait_for_the_host_to_have_been_up_an_hour(
+    reports_root,
+):
+    """The hour is a rate limit on sweeping, not a delay before the first one.
+
+    ``time.monotonic()`` counts from boot, so comparing it against a zero start meant a
+    freshly booted API server swept nothing for its first hour -- and made this suite pass
+    or fail on how long the developer's machine had been awake.
+    """
+    db.upgrade()
+    write_report(reports_root, ReportRef("dag", "run", "task", 1), failed=1)
+    store = db.rate_store()
+    store.charge("ancient", 1_000)
+
+    runtime = AssistantRuntime(
+        provider_factory=FakeAssistant,
+        reducer_factory=PassthroughReducer,
+        provider_name="fake",
+        model_name="offline-fake",
+        context_model_name=None,
+        max_context_bytes=16_384,
+        max_output_tokens=256,
+        max_concurrent=1,
+        rate_limit=60,
+        rate_window_seconds=3_600.0,
+        rate_store=store,
+    )
+    ticks = iter([12.0, 13.0, 14.0])
+    runtime._clock = lambda: next(ticks)  # a host that booted twelve seconds ago
+
+    runtime.ask(
+        source=FileSystemReportSource(report_root=reports_root),
+        can_read=lambda dag, user: True,
+        user={"username": "alice"},
+        query=AssistantQuery(question="What failed?"),
+    )
+
+    assert store.spent("ancient", 1_000) == 0
+
+
 def test_the_cli_purge_also_sweeps_rate_windows():
     db.upgrade()
     db.rate_store().charge("alice", 1)

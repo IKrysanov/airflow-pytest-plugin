@@ -105,12 +105,18 @@ class DocumentationLibrary:
         """Whether anything was loaded at all."""
         return bool(self.sections)
 
-    def select(self, question: str, *, budget: int) -> str:
+    def select(self, question: str, *, budget: int, forced: bool = False) -> str:
         """Return the documentation worth sending with ``question``, within ``budget``.
 
         Scored on how many of the question's own words a section uses, so a question about
         the user's runs matches nothing and sends nothing. Ties go to the shorter section:
         a heading that is mostly the answer beats a chapter that merely mentions it.
+
+        ``forced`` is the user having typed ``/docs``. The specificity gate below exists to
+        guess whether a question is about the manual at all, and that guess is worth less
+        than being told: a vague "how do I install this?" shares only ordinary words with
+        the manual and is dropped, which is right when it was guessed and wrong when it was
+        asked for. Forcing lowers the bar; it never invents a match.
         """
         if budget <= 0 or not self.sections:
             return ""
@@ -137,7 +143,7 @@ class DocumentationLibrary:
         if not scored:
             return ""
         scored.sort(key=lambda item: (-item[0], item[1]))
-        specific = math.log(max(2, total)) * self.MIN_RELEVANCE_SHARE
+        specific = 0.0 if forced else math.log(max(2, total)) * self.MIN_RELEVANCE_SHARE
         if scored[0][0] < specific:
             # The question shares only common words with the manual: it is about the
             # user's own runs, or about something the documentation does not cover.

@@ -114,6 +114,16 @@ def _skill(
 #: are deliberately generous: sending a skill that was not needed costs a few hundred
 #: bytes, while missing one costs the specialised advice entirely.
 SKILLS: dict[str, Skill] = {
+    # Reachable by ``/docs`` and by nothing else. Its text says a DOCUMENTATION section is
+    # supplied, which is true only when the question matched a manual the deployment
+    # mounted -- so it rides on retrieval (``has_documentation``), never on a keyword.
+    # The command exists because retrieval has to guess, and the user knows.
+    "documentation": _skill(
+        "documentation",
+        "the product manuals",
+        "docs",
+        needs_evidence=False,
+    ),
     "bugreport": _skill(
         "bugreport",
         "drafting a bug report",
@@ -266,13 +276,14 @@ def build_system_prompt(
     parts = [core_prompt()]
     if has_documentation:
         parts.append(_fragment("documentation"))
-    if commands:
-        # Asked for by name, so the keywords do not get a vote: someone typing /bug about
-        # a flaky test wants the bug-report rules, not both.
-        wanted = [COMMANDS[name] for name in commands if name in COMMANDS]
-        parts.extend(SKILLS[name].text for name in wanted)
-    else:
-        parts.extend(skill.text for skill in SKILLS.values() if skill.wants(question))
+    # Asked for by name, the keywords get no vote: someone typing /bug about a flaky test
+    # wants the bug-report rules, not both.
+    for name in selected_skills(question, commands):
+        if name == "documentation":
+            # Added above or not at all. Its text speaks of a section that only exists
+            # when a manual matched, and /docs cannot conjure one.
+            continue
+        parts.append(SKILLS[name].text)
     return "\n\n".join(parts)
 
 

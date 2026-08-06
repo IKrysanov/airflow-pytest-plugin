@@ -226,10 +226,15 @@ server which rules to send, it is not part of what you asked.
 | `/priority` | **prioritise** — "что чинить в первую очередь?" | rank by runs blocked, determinism, shared failure signature and duration cost, stating the rule it ranked by, and that this orders symptoms rather than causes |
 | `/compare` | **compare runs** — "what changed since yesterday?" | list outcome changes, tests present on one side only, totals and durations — and refuse to narrate a cause the evidence does not contain |
 | `/test` | **write tests** — "напиши три теста на эту функцию" | return runnable pytest, exactly as many cases as asked, presented as a starting point it has never run |
+| `/docs` | **answer from the manuals** — "как запустить первый тест?" | quote the documentation you mounted (`AIRFLOW_PYTEST_ASSISTANT_DOCS`) and name the heading it came from. Without the command a vague question has to clear a relevance bar to pull any documentation at all, because most questions are about runs; the command says plainly that this one is not. If you mounted nothing, it promises nothing — the rules for quoting a manual are never sent when there is no manual |
 
 The instructions live in [`prompts/`](prompts) as one Markdown file per subject, next to the
 code. Reading them is the fastest way to know exactly what your assistant is told; changing
 one is editing a file.
+
+Two of these — `/test` and `/docs` — are not questions about your runs, so on an empty
+dashboard they are answered instead of being met with "no report matched, widen your
+filters". The rest still say so, because for them it is the answer.
 
 ## Limits, cost and audit
 

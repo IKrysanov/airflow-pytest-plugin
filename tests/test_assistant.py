@@ -3903,6 +3903,59 @@ def test_documentation_reaches_the_prompt_and_is_paid_for_visibly(
     )
 
 
+def test_the_docs_command_sends_the_manual_a_guess_would_have_withheld(
+    reports_root, tmp_path
+):
+    """Unforced selection holds a vague question to a specificity bar; /docs settles it."""
+    manual = tmp_path / "manual.md"
+    manual.write_text(
+        "\n".join(
+            f"## Chapter {n}\nThis chapter explains the cleanup behaviour of step {n}.\n"
+            for n in range(12)
+        ),
+        encoding="utf-8",
+    )
+    write_report(reports_root, ReportRef("dag", "run", "task", 1), failed=1)
+    provider = _CapturingProvider()
+    runtime = _runtime(provider, PassthroughReducer())
+    runtime.documentation = load_documentation((str(manual),))
+    runtime.docs_bytes = 4_096
+    source = FileSystemReportSource(report_root=reports_root)
+
+    for question in ("what about cleanup?", "/docs what about cleanup?"):
+        runtime.ask(
+            source=source,
+            can_read=lambda dag, user: True,
+            user=SimpleNamespace(username="alice"),
+            query=AssistantQuery(question=question),
+        )
+
+    assert "DOCUMENTATION" not in provider.calls[0][1]
+    assert "cleanup behaviour" in provider.calls[1][1]
+
+
+def test_the_docs_command_promises_nothing_when_no_manual_is_mounted(reports_root):
+    """The deployment configured no docs, so the rules for quoting them must not ride.
+
+    Telling a model that a DOCUMENTATION section is supplied when none is invites it to
+    fill the gap from memory, which is the failure this whole feature exists to prevent.
+    """
+    write_report(reports_root, ReportRef("dag", "run", "task", 1), failed=1)
+    provider = _CapturingProvider()
+    runtime = _runtime(provider, PassthroughReducer())
+
+    runtime.ask(
+        source=FileSystemReportSource(report_root=reports_root),
+        can_read=lambda dag, user: True,
+        user=SimpleNamespace(username="alice"),
+        query=AssistantQuery(question="/docs какие параметры у PytestOperator?"),
+    )
+
+    system, prompt, _ = provider.calls[0]
+    assert "A DOCUMENTATION section is supplied" not in system
+    assert "DOCUMENTATION" not in prompt
+
+
 def test_a_question_about_runs_pays_nothing_for_documentation(reports_root, tmp_path):
     manual = tmp_path / "operator.md"
     manual.write_text(
@@ -4002,6 +4055,7 @@ def test_the_status_endpoint_publishes_the_commands(reports_root):
         "priority",
         "compare",
         "test",
+        "docs",
     }
 
 
