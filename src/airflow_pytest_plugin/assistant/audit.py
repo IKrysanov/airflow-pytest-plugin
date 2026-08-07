@@ -46,7 +46,14 @@ _MAX_DAGS = 50
 #: Attributes that identify *an account*, in order of preference. A display name is
 #: deliberately absent: ``BaseUser.get_name()`` may be "First Last", two colleagues can
 #: share one, and this string keys both the stored transcript and the token quota.
-_PRINCIPAL_ATTRS = ("username", "user_id", "id")
+#:
+#: The primary key comes first and the username last, because a username is a label an
+#: administrator can change and re-issue. Keying on it meant a rename moved someone's
+#: chats and spent quota to a fresh namespace -- their history simply vanished -- and
+#: re-creating a deleted account under the same name handed the new person the old
+#: person's transcripts. The browser-side namespace already preferred the key; these two
+#: now agree, so one person cannot see two different chat lists.
+_PRINCIPAL_ATTRS = ("id", "user_id", "username")
 
 #: Anything longer is truncated, so the identity stays readable in a log line.
 _MAX_PRINCIPAL = 128
@@ -74,7 +81,8 @@ def principal(user: Any) -> str:
     manager guarantees to be unique, never from a display name.
 
     Unlike the browser-storage namespace it is deliberately *not* hashed: an audit trail
-    naming ``8f4a55c1`` answers nothing.
+    naming ``8f4a55c1`` answers nothing. It does carry which attribute it came from, so
+    the account whose *id* is 42 and the one whose *username* is "42" stay two people.
     """
     if user is None:
         return "standalone"
@@ -83,7 +91,7 @@ def principal(user: Any) -> str:
             user.get(attr) if isinstance(user, Mapping) else getattr(user, attr, None)
         )
         if value is not None and str(value).strip():
-            return _bounded(str(value).strip())
+            return _bounded(f"{attr}:{str(value).strip()}")
     get_id = getattr(user, "get_id", None)
     if callable(get_id):
         try:
@@ -91,7 +99,7 @@ def principal(user: Any) -> str:
         except Exception:  # pragma: no cover - defensive: a foreign user object
             return ANONYMOUS
         if value is not None and str(value).strip():
-            return _bounded(str(value).strip())
+            return _bounded(f"get_id:{str(value).strip()}")
     return ANONYMOUS
 
 

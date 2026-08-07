@@ -2877,6 +2877,95 @@ def test_typing_a_slash_offers_the_commands(assistant_dash):
     assert items.first.inner_text().strip() != "/bug"
 
 
+def test_a_command_picked_from_the_menu_survives_into_the_request(assistant_dash):
+    """What the user picked has to be what the server is told, keystroke for keystroke.
+
+    Reported symptom: a question asked with /bug sometimes comes back answered as
+    something else. Server-side parsing handles every spelling, so the only way that
+    happens is the command not being in the text that was sent.
+    """
+    page = assistant_dash.page
+    sent: list[dict] = []
+    page.route(
+        "**/api/assistant/stream",
+        lambda route: (
+            sent.append(route.request.post_data_json),
+            _fulfil_stream(route, {"answer": "ok", "evidence": [], "reports": []}),
+        )[-1],
+    )
+    page.locator("#assistant-btn").click()
+    field = page.locator("#ast-question")
+
+    field.click()
+    field.type("/")
+    expect(page.locator("#ast-commands")).to_be_visible()
+    page.keyboard.press("Enter")  # accept the highlighted /bug
+    field.type("почему упал test_login?")
+    page.locator("#ast-send").click()
+
+    expect(page.locator(".ast-msg.assistant .ast-answer").last).to_contain_text("ok")
+    assert sent[0]["question"] == "/bug почему упал test_login?", sent[0]["question"]
+    assert assistant_dash.errors == []
+
+
+def test_arrowing_to_a_command_is_not_undone_by_typing(assistant_dash):
+    """Highlighting survives the next keystroke, or the menu picks something else.
+
+    The list is rebuilt on every input event and the highlight was reset to the top each
+    time, so narrowing "/p" after arrowing down sent whatever now sat first.
+    """
+    page = assistant_dash.page
+    page.locator("#assistant-btn").click()
+    field = page.locator("#ast-question")
+
+    field.click()
+    field.type("/")
+    page.keyboard.press("ArrowDown")
+    page.keyboard.press("ArrowDown")
+    chosen = page.locator("#ast-commands .ast-command[aria-selected=true]").inner_text()
+    field.type("d")  # narrows the list; the choice above must not silently move
+
+    still = page.locator("#ast-commands .ast-command[aria-selected=true]")
+    expect(still).to_have_count(1)
+    assert chosen.split()[0] in still.inner_text() or still.inner_text().startswith(
+        "/d"
+    )
+
+
+def test_the_command_menu_is_not_rebuilt_on_every_keystroke(assistant_dash):
+    """The reported flicker: the list is destroyed and recreated as the name is typed.
+
+    Typing "/bug" offers the same single command at "/b", "/bu" and "/bug", and each
+    keystroke tore the row out of the DOM and built a new one -- which is visible, and
+    which also threw away the aria-selected state screen readers and arrow keys rely on.
+    """
+    page = assistant_dash.page
+    page.locator("#assistant-btn").click()
+    field = page.locator("#ast-question")
+    field.click()
+    field.type("/b")
+    expect(page.locator("#ast-commands .ast-command")).to_have_count(1)
+
+    page.evaluate(
+        """() => {
+          window.__astRebuilds = 0;
+          new MutationObserver(records => {
+            for (const record of records) {
+              if (record.removedNodes.length) window.__astRebuilds++;
+            }
+          }).observe(document.getElementById('ast-commands'),
+                     { childList: true, subtree: true });
+        }"""
+    )
+    field.type("ug")
+    page.wait_for_timeout(120)
+
+    assert page.evaluate("window.__astRebuilds") == 0
+    expect(
+        page.locator("#ast-commands .ast-command[aria-selected=true]")
+    ).to_contain_text("/bug")
+
+
 def test_the_list_narrows_as_the_command_is_typed(assistant_dash):
     page = assistant_dash.page
     page.locator("#assistant-btn").click()
@@ -3008,3 +3097,119 @@ def test_the_command_menu_is_readable_in_both_themes(assistant_dash, theme):
 
     assert ratios["name"] >= 4.5, ratios
     assert ratios["what"] >= 4.5, ratios
+
+
+@pytest.mark.parametrize(
+    ("width", "height", "label"),
+    [
+        (320, 640, "small phone"),
+        (375, 812, "phone"),
+        (414, 896, "large phone"),
+        (768, 1024, "tablet"),
+        (1280, 800, "desktop"),
+    ],
+)
+def test_the_assistant_fits_every_viewport_it_is_opened_in(
+    assistant_dash, width, height, label
+):
+    """The panel is embedded in an Airflow page whose width is not ours to choose.
+
+    Checked with the window doing everything at once -- an answer rendered, the command
+    menu open, the chat list open -- because each of those is absolutely positioned and
+    each is a way to push a scrollbar onto a phone.
+    """
+    page = assistant_dash.page
+    page.set_viewport_size({"width": width, "height": height})
+    # The chat list only exists when the server stores one, and it is the widest thing
+    # the window can put on screen.
+    _server_history(page)
+    page.route(
+        "**/api/assistant/stream",
+        lambda route: _fulfil_stream(
+            route,
+            {
+                "answer": (
+                    "## Вывод\n\n`tests.test_auth::test_login` падает с "
+                    "`AssertionError: assert 401 == 200`.\n\n```\n"
+                    "tests/test_auth.py:42: in test_login\n"
+                    "    assert response.status_code == 200\n"
+                    "E   AssertionError: assert 401 == 200\n```\n\n"
+                    # An unbreakable run is what actually pushes a scrollbar onto a
+                    # phone: real node ids are parametrised and get this long.
+                    "Затронут `tests/integration/test_checkout_flow.py::"
+                    "TestCheckoutIntegration::test_pay_with_saved_card"
+                    "[currency=EUR-provider=stripe-retries=3-idempotency_key="
+                    "0f8c2b1a9d7e4f6a8b3c5d7e9f1a2b3c]`.\n"
+                ),
+                "evidence": [],
+                "reports": [],
+            },
+        ),
+    )
+    page.locator("#assistant-btn").click()
+    expect(page.locator("#assistant-dialog")).to_be_visible()
+
+    page.locator("#ast-question").fill("почему упал test_login?")
+    page.locator("#ast-send").click()
+    expect(page.locator(".ast-msg.assistant .ast-answer").last).to_contain_text(
+        "Вывод", timeout=15_000
+    )
+    page.locator("#ast-question").click()
+    page.locator("#ast-question").type("/")
+    expect(page.locator("#ast-commands")).to_be_visible()
+    page.locator("#ast-chats").click()
+    expect(page.locator("#ast-chats-dialog")).to_be_visible()
+
+    overflow = page.evaluate(
+        """() => {
+          const doc = document.documentElement;
+          const wide = [];
+          const room = window.innerWidth + 2;
+          const scope = document.querySelectorAll(
+            '#assistant-dialog *, #ast-chats-dialog *');
+          for (const el of scope) {
+            const box = el.getBoundingClientRect();
+            if (box.width === 0) continue;
+            if (box.right > room || box.left < -2) {
+              wide.push(el.id || el.className || el.tagName);
+            }
+          }
+          return {
+            page: doc.scrollWidth - window.innerWidth,
+            elements: wide.slice(0, 6),
+          };
+        }"""
+    )
+
+    assert overflow["page"] <= 2, f"{label}: page scrolls horizontally"
+    assert overflow["elements"] == [], f"{label}: {overflow['elements']}"
+    assert assistant_dash.errors == []
+
+
+@pytest.mark.parametrize("width", [320, 375, 768])
+def test_every_control_stays_tappable_on_a_narrow_screen(assistant_dash, width):
+    """WCAG 2.2 asks 24x24 CSS pixels for a target; a phone deserves at least that."""
+    page = assistant_dash.page
+    page.set_viewport_size({"width": width, "height": 800})
+    page.locator("#assistant-btn").click()
+    expect(page.locator("#assistant-dialog")).to_be_visible()
+
+    small = page.evaluate(
+        """() => {
+          const bad = [];
+          const dialog = document.getElementById('assistant-dialog');
+          for (const el of dialog.querySelectorAll('button, a[href], summary')) {
+            if (el.hidden || el.closest('[hidden]')) continue;
+            const box = el.getBoundingClientRect();
+            if (box.width === 0 && box.height === 0) continue;
+            if (box.width < 24 || box.height < 24) {
+              bad.push((el.id || el.className) + ' ' +
+                       Math.round(box.width) + 'x' + Math.round(box.height));
+            }
+          }
+          return bad;
+        }"""
+    )
+
+    assert small == [], f"{width}px: {small}"
+    assert assistant_dash.errors == []

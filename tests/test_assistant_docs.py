@@ -27,7 +27,9 @@ from pathlib import Path
 import pytest
 
 from airflow_pytest_plugin.assistant.docs import (
+    BUILTIN_MANUAL,
     DocumentationLibrary,
+    builtin_paths,
     load_documentation,
 )
 
@@ -174,3 +176,213 @@ def test_a_forced_selection_still_sends_nothing_when_nothing_matches(library):
     """Forcing lowers the bar; it does not invent a match."""
     assert library.select("проблемы с кубернетесом", budget=4_096, forced=True) == ""
     assert library.select("какие параметры", budget=0, forced=True) == ""
+
+
+RUSSIAN_ASKS_ENGLISH_MANUAL = """\
+# airflow-pytest-operator
+
+## Running your first test
+
+Add a `PytestOperator` to a DAG, point `tests` at your suite, and give the task an
+`ArchivingResultParser` so the JUnit report is archived where the dashboard reads it.
+
+## Installing the plugin
+
+Install it into the API server image and restart.
+
+## Coverage
+
+Pass `--cov` through `pytest_args`.
+"""
+
+
+@pytest.fixture
+def bilingual(tmp_path: Path) -> DocumentationLibrary:
+    (tmp_path / "operator.md").write_text(RUSSIAN_ASKS_ENGLISH_MANUAL, encoding="utf-8")
+    return load_documentation((str(tmp_path / "operator.md"),))
+
+
+def test_a_russian_question_finds_an_english_manual(bilingual):
+    """The dashboard speaks two languages; the manual it is given speaks one.
+
+    Matching is lexical, so "как запустить первый тест?" shared not one term with
+    "Running your first test" and the reader was told to go and read the manual they had
+    already been given. A small domain glossary bridges the two -- no model, no index.
+    """
+    picked = bilingual.select("как запустить первый тест?", budget=4_096)
+
+    assert "Running your first test" in picked
+    assert "PytestOperator" in picked
+
+
+def test_the_bridge_works_in_the_other_direction_too(tmp_path):
+    """A deployment whose runbook is in Russian, read by someone asking in English."""
+    (tmp_path / "runbook.md").write_text(
+        "# Руководство\n\n## Как запустить первый тест\n\n"
+        "Добавьте PytestOperator в DAG и укажите путь к набору тестов.\n\n"
+        "## Покрытие\n\nПередайте `--cov` через `pytest_args`.\n",
+        encoding="utf-8",
+    )
+    library = load_documentation((str(tmp_path / "runbook.md"),))
+
+    picked = library.select("how do I run my first test?", budget=4_096)
+
+    assert "запустить первый тест" in picked
+
+
+def test_the_glossary_does_not_drag_the_manual_into_a_question_about_runs(bilingual):
+    """The words it adds are common ones; the relevance bar still has to hold."""
+    assert bilingual.select("почему упал test_login вчера?", budget=4_096) == ""
+    assert bilingual.select("что сломалось в последнем прогоне?", budget=4_096) == ""
+
+
+# --- the manual shipped with the package -------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def builtin() -> DocumentationLibrary:
+    return load_documentation(builtin_paths())
+
+
+def test_the_shipped_manual_is_found_and_loads(builtin):
+    assert builtin.available
+    assert builtin.missing == ()
+    assert builtin.bytes_loaded < DocumentationLibrary.MAX_TOTAL_BYTES
+
+
+@pytest.mark.parametrize(
+    ("question", "expected"),
+    [
+        ("как запустить первый тест?", "ArchivingResultParser"),
+        ("how do I run my first test?", "ArchivingResultParser"),
+        ("какие параметры есть у ArchivingResultParser?", "coverage_threshold"),
+        ("what does coverage_source do?", "coverage_source"),
+        ("где хранятся отчёты?", "reports_root"),
+        ("how do I delete old reports?", "RETENTION"),
+        ("почему дашборд пустой?", "empty"),
+        ("чаты не сохраняются, что делать?", "doctor"),
+        ("что такое flaky тест?", "flaky"),
+        ("нужен ли cleanup never?", "cleanup"),
+    ],
+)
+def test_the_shipped_manual_answers_the_questions_it_exists_for(
+    builtin, question, expected
+):
+    """Each of these is a question a person asks on their first day."""
+    picked = builtin.select(question, budget=8_192)
+
+    assert expected in picked, picked[:200] or "(nothing selected)"
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "почему упал test_login вчера?",
+        "which tests failed in the last run?",
+        "что сломалось в run_42?",
+        "сколько тестов упало сегодня?",
+        "покажи самые медленные тесты",
+        "what changed between the last two runs?",
+        "оформи багрепорт по этому падению",
+        "какой тест самый нестабильный?",
+        "что чинить в первую очередь?",
+        "напиши тест на эту функцию",
+    ],
+)
+def test_a_question_about_runs_pulls_none_of_the_shipped_manual(builtin, question):
+    """It ships with every install, so it must stay silent on the common question.
+
+    While the corpus was the operator's own, a false positive was their bytes and their
+    problem. Now it is on every request in every deployment, which is what made the
+    relevance rule worth measuring rather than assuming.
+    """
+    assert builtin.select(question, budget=8_192) == "", question
+
+
+def test_the_manual_documents_the_parser_the_code_actually_has():
+    """A hand-written manual drifts; this is the guard that says so out loud.
+
+    Every parameter the manual names must exist on ``ArchivingResultParser``, and every
+    parameter the class takes must be named in the manual -- so adding one to the code
+    without documenting it fails here rather than in front of a user.
+    """
+    import inspect
+    import re
+
+    from airflow_pytest_plugin import ArchivingResultParser
+
+    text = (BUILTIN_MANUAL / "02-archiving-parser.md").read_text(encoding="utf-8")
+    documented = set(re.findall(r"^\| `([a-z_]+)`", text, re.M))
+    real = {
+        name
+        for name in inspect.signature(ArchivingResultParser.__init__).parameters
+        if name != "self"
+    }
+
+    assert documented == real, (
+        f"only in manual: {documented - real}; missing: {real - documented}"
+    )
+
+
+def test_the_manual_only_names_environment_variables_that_exist():
+    """The other half of the same guard, for the settings it tells people to set."""
+    import re
+
+    from airflow_pytest_plugin import config, db, retention
+    from airflow_pytest_plugin.assistant import settings as assistant_settings
+
+    named = set()
+    for path in sorted(BUILTIN_MANUAL.glob("*.md")):
+        named |= set(
+            re.findall(
+                r"`(AIRFLOW_PYTEST_[A-Z0-9_]+)`", path.read_text(encoding="utf-8")
+            )
+        )
+    known = {
+        value
+        for module in (config, retention, assistant_settings, db)
+        for value in vars(module).values()
+        if isinstance(value, str) and value.startswith("AIRFLOW_PYTEST_")
+    }
+
+    assert named, "the manual should name the settings it tells people to set"
+    assert named <= known, (
+        f"named in the manual but not in the code: {sorted(named - known)}"
+    )
+
+
+def test_a_section_earns_its_place_by_itself(builtin):
+    """One good match does not entitle a question to the rest of the manual.
+
+    Judged once against the best section, "which tests failed in the last run?" arrived
+    with five sections and 3.4 KiB attached. Each section now has to have been named by
+    something it uses rarely.
+    """
+    picked = builtin.select("what does coverage_source do?", budget=32_768)
+
+    assert "coverage_source" in picked
+    assert picked.count("### ") <= 3, picked.count("### ")
+
+
+def test_the_builtin_manual_is_replaced_by_a_configured_one(monkeypatch, tmp_path):
+    """Setting the variable means "use mine", not "use both"."""
+    from airflow_pytest_plugin.assistant.settings import AssistantSettings
+
+    monkeypatch.delenv("AIRFLOW_PYTEST_ASSISTANT_DOCS", raising=False)
+    monkeypatch.delenv("AIRFLOW_PYTEST_ASSISTANT_DOCS_BUILTIN", raising=False)
+    assert AssistantSettings.from_env().docs_paths == builtin_paths()
+
+    mine = tmp_path / "runbook.md"
+    mine.write_text("# Runbook\n\n## Our rules\n\nAsk Ivan.\n", encoding="utf-8")
+    monkeypatch.setenv("AIRFLOW_PYTEST_ASSISTANT_DOCS", str(mine))
+
+    assert AssistantSettings.from_env().docs_paths == (str(mine),)
+
+
+def test_the_builtin_manual_can_be_switched_off_entirely(monkeypatch):
+    from airflow_pytest_plugin.assistant.settings import AssistantSettings
+
+    monkeypatch.delenv("AIRFLOW_PYTEST_ASSISTANT_DOCS", raising=False)
+    monkeypatch.setenv("AIRFLOW_PYTEST_ASSISTANT_DOCS_BUILTIN", "0")
+
+    assert AssistantSettings.from_env().docs_paths == ()

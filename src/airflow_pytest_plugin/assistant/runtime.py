@@ -22,6 +22,7 @@ from collections.abc import Callable, Generator
 from dataclasses import dataclass
 from typing import Any
 
+from .. import chatcrypto
 from ..sources import ReportSource
 from . import audit
 from .common import (
@@ -295,6 +296,11 @@ class AssistantRuntime:
             "commands": command_catalogue(),
             "history_server_side": stored_for_caller,
             "history_days": self._history_days if stored_for_caller else None,
+            # Whether the transcript this server stores is encrypted at rest. Only
+            # meaningful when it stores one, and it is the operator's answer to "who
+            # else can read my team's questions" -- so it is reported rather than
+            # assumed.
+            "history_encrypted": (chatcrypto.enabled() if stored_for_caller else None),
         }
 
     def _can_own_history(self, user: Any) -> bool:
@@ -657,6 +663,7 @@ class AssistantRuntime:
             raise
         prepared: _PreparedRequest | None = None
         audit_reply: AssistantReply | None = None
+        remembered = False
         outcome = "stopped"
         try:
             # Progress is yielded from inside the local phase, which also makes that
@@ -686,6 +693,13 @@ class AssistantRuntime:
                 provider_seconds=time.monotonic() - provider_started,
             )
             audit_reply = reply
+            # Stored *before* the browser is told the answer is finished. Everything
+            # else about this request can settle afterwards, but the transcript cannot:
+            # a reader who opens the chat list -- or reloads -- in the moment the answer
+            # appears would be shown a chat that does not have it yet.
+            if outcome == "answered":
+                self._remember(user, raw_question, reply, query.conversation)
+                remembered = True
             yield "done", reply.to_dict()
         except AssistantError as exc:
             outcome = _error_outcome(exc)
@@ -710,6 +724,7 @@ class AssistantRuntime:
                 streamed=True,
                 reply=audit_reply,
                 conversation=query.conversation,
+                remember=not remembered,
             )
             self._slots.release()
 
@@ -881,12 +896,17 @@ class AssistantRuntime:
         streamed: bool,
         reply: AssistantReply | None,
         conversation: str = "",
+        remember: bool = True,
     ) -> None:
-        """Emit exactly one audit record for this request, whatever its outcome."""
+        """Emit exactly one audit record for this request, whatever its outcome.
+
+        ``remember`` is false where the streaming path has already stored the exchange,
+        which it does before announcing completion rather than after.
+        """
         usage = reply.token_usage if reply is not None else None
         if reply is not None:
             self.limits.charge(audit.principal(user), self._billable(prepared, reply))
-        if reply is not None and outcome == "answered":
+        if reply is not None and outcome == "answered" and remember:
             self._remember(user, question, reply, conversation)
         self._sweep()
         context = prepared.context if prepared is not None else None

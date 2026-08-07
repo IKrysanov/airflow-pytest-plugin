@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Iterator
 from itertools import islice
 from typing import Any
@@ -111,6 +112,24 @@ def _summary_record(summary: ReportSummary) -> tuple[dict[str, Any], bool]:
             values[key], clipped = _bounded_redacted(item, _MAX_MODEL_SCOPE_BYTES)
             truncated = truncated or clipped
     return values, truncated
+
+
+#: A question about how long something took, in either interface language. Per-test detail
+#: is otherwise carried only for failures -- which is right, because a traceback is what a
+#: failure question needs and a passing test has nothing to say -- but it left the one
+#: question whose answer is usually a test that passed unanswerable: asked which test was
+#: slowest, the assistant could see the durations of failures and nothing else.
+_DURATION_QUESTION = re.compile(
+    r"(?i)(slow|slowest|fastest|duration|how long|takes? the most|elapsed|"
+    r"медлен|быстр|длительн|дольше|доль|сколько (?:по )?времени|время выполнен)"
+)
+
+#: Kept per report while scanning, then ranked across all of them. Both bounds matter:
+#: the per-report one keeps the working set small, and the total one stops a wide scope
+#: turning "which test is slowest" into a full listing that evicts the failures. Durations
+#: are an extra and are appended only once every failure has its place.
+_MAX_SLOWEST_CASES = 5
+_MAX_SLOWEST_TOTAL = 20
 
 
 def _json(value: dict[str, Any]) -> str:
@@ -283,7 +302,15 @@ class ReportContextBuilder:
         detail_lines: list[str] = []
         detail_budget = max(0, payload_budget - used)
         detail_used = 0
+        wants_durations = bool(_DURATION_QUESTION.search(query.question or ""))
+        slowest_pool: list[tuple[float, str]] = []
         candidates = [s for s in included_summaries if s.failed or s.errors]
+        if wants_durations:
+            # Every report has a slowest test, including the ones where nothing failed.
+            seen = {id(item) for item in candidates}
+            candidates = candidates + [
+                item for item in included_summaries if id(item) not in seen
+            ]
         detail_budget_exhausted = False
         for summary in candidates:
             detail = source.get_detail(summary.ref)
@@ -315,8 +342,46 @@ class ReportContextBuilder:
                     break
                 detail_lines.append(line)
                 detail_used += cost
+            if wants_durations:
+                slowest = sorted(
+                    (case for case in detail.cases if case.time),
+                    key=lambda case: -(case.time or 0.0),
+                )[:_MAX_SLOWEST_CASES]
+                for case in slowest:
+                    record, record_truncated = _case_values(case, evidence)
+                    truncated = truncated or record_truncated
+                    # The traceback is already above for a failure; this block answers
+                    # "how long", so it carries nothing else.
+                    slowest_pool.append(
+                        (
+                            float(record["duration"] or 0.0),
+                            _json(
+                                {
+                                    "report": record["report"],
+                                    "node_id": record["node_id"],
+                                    "outcome": record["outcome"],
+                                    "duration": record["duration"],
+                                }
+                            ),
+                        )
+                    )
             if detail_budget_exhausted or detail_used >= detail_budget:
                 break
+
+        # Appended last, so a duration question is answered with everything a failure
+        # question would have had, plus whatever room is left over.
+        for _, line in sorted(slowest_pool, key=lambda item: -item[0])[
+            :_MAX_SLOWEST_TOTAL
+        ]:
+            if line in detail_lines:
+                continue
+            cost = len((line + "\n").encode("utf-8"))
+            if detail_used + cost > detail_budget:
+                truncated = True
+                context_limited = True
+                break
+            detail_lines.append(line)
+            detail_used += cost
 
         header = (
             f"Scope: {scope_label}\n"

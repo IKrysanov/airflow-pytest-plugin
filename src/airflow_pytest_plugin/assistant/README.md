@@ -30,6 +30,20 @@ lives in another package and which nothing here could tell you truthfully. Only 
 a question actually matches are sent, so a question about your runs carries none of it, and
 the **Documentation** row in the byte breakdown shows exactly what each answer cost.
 
+**A manual ships with the plugin**, so this works on a fresh install with nothing
+configured: how to run your first test, every `ArchivingResultParser` parameter, what the
+dashboard shows, how retention works, and what to do when reports or chats do not appear.
+Two tests keep it from drifting — one checks the documented parameters against the real
+signature, the other checks that every setting it names still exists. Setting
+`AIRFLOW_PYTEST_ASSISTANT_DOCS` **replaces** it with yours rather than adding to it, and
+`AIRFLOW_PYTEST_ASSISTANT_DOCS_BUILTIN=0` removes it without putting anything in its place.
+
+Matching is lexical, and the dashboard speaks two languages while your manual speaks one, so
+a small domain glossary bridges them: "как запустить первый тест?" finds *Running your first
+test*, and an English question finds a Russian runbook. It is a word list, not a translator —
+it covers the vocabulary this product actually uses (run, test, parameter, install, coverage,
+quota, encryption, …), and anything outside it still needs a shared word.
+
 Ask it to write tests and it will: paste code or describe behaviour, say how many cases you
 want, and it returns runnable pytest — presented as a starting point it has never run, never
 as evidence about your suite. Those facts are written in the source and covered by a
@@ -47,6 +61,9 @@ filtering and secret redaction — so nothing about what left the server is impl
 
 > The outbound context can contain run summaries, case IDs, outcomes, durations, failure
 > tracebacks, saved triage verdicts and up to 2 KiB of captured stdout/stderr per failure.
+> Per-test detail is carried for failures; a question about **how long** something took also
+> carries the twenty slowest cases across the scope, whatever their outcome, since the
+> slowest test is usually one that passed.
 > Known secrets and values from the server environment are redacted first, but redaction is a
 > guard rail, not a proof. Enable the assistant only where sending failure output to your
 > chosen provider is allowed.
@@ -341,11 +358,31 @@ the tab was reading. Without the tables the button stays hidden and the panel be
 as before — one transcript, kept in the tab.
 
 Ownership is enforced in the query, not in the UI: every read, write and delete is filtered by
-the acting principal. That principal is taken only from a unique account key (username, user
-id) — never from a display name, which two colleagues can share. A user the auth manager does
-not let us identify that way gets **no** server-side history, since a shared bucket would be a
-cross-account leak; the same applies to a viewer running with no auth manager at all, where
-every visitor would otherwise be one principal.
+the acting principal. That principal is the account's **primary key** where the auth manager
+exposes one — `id`, then `user_id`, then `username`, recorded with the attribute it came from
+(`id:42`, `username:alice`) so one person's id can never be another's name. A display name is
+never used: two colleagues can share one. Preferring the key over the username matters twice
+over — renaming a user keeps their chats, and re-creating a deleted account under the same
+username does **not** hand the new person the old one's transcripts. A user the auth manager
+does not let us identify that way gets **no** server-side history, since a shared bucket would
+be a cross-account leak; the same applies to a viewer running with no auth manager at all,
+where every visitor would otherwise be one principal.
+
+Because the principal is the key, the audit trail names `id:42` rather than `alice` on
+deployments whose auth manager exposes a numeric id. Map it back through your auth manager's
+own user list — the alternative was an identity that changes when someone is renamed.
+
+**The stored transcript is encrypted at rest** with the same Fernet key Airflow uses for
+connection passwords (`AIRFLOW__CORE__FERNET_KEY`), because a chat holds the same class of
+material: questions naming failing tests, answers quoting tracebacks. Message text and any
+chat name you chose are encrypted; the principal, timestamps and token counts stay readable so
+an operator can still account for spend. Key rotation works as it does for connections — list
+the keys, the first encrypts and any of them decrypts. Nothing needs migrating: rows written
+before this existed are read as they are, and a row whose key is gone becomes a placeholder
+rather than an error that would empty the window. `GET /api/assistant/status` reports
+`history_encrypted` so you can see which you have, and `AIRFLOW_PYTEST_ASSISTANT_ENCRYPT_HISTORY=0`
+turns it off for new messages while still reading the old ones. With no Fernet key configured
+the transcript is stored as plain text.
 
 Two more rules follow from the same principle. The stored question is the **redacted** one the
 model saw, so a value scrubbed on its way to a provider does not survive in the metadata
@@ -395,6 +432,8 @@ cap are fixed abuse-safety contracts, not tuning knobs.
 | `AIRFLOW_PYTEST_ASSISTANT_DAILY_TOKEN_QUOTA` | `0` | provider tokens one principal may spend per UTC day; `0` = unlimited |
 | `AIRFLOW_PYTEST_ASSISTANT_DB_CONN_ID` | — | Airflow connection naming the database for the plugin's tables |
 | `AIRFLOW_PYTEST_ASSISTANT_DB_URL` | Airflow's metadata DB | literal SQLAlchemy URL; wins over the connection id |
+| `AIRFLOW_PYTEST_ASSISTANT_DOCS_BUILTIN` | on | set to `0` to ship no manual at all, so product questions are answered only from the short PRODUCT block |
 | `AIRFLOW_PYTEST_ASSISTANT_HISTORY_DAYS` | `30` | how long a stored chat is kept; `0` stores nothing server-side |
+| `AIRFLOW_PYTEST_ASSISTANT_ENCRYPT_HISTORY` | on | set to `0` to store the transcript as plain text instead of encrypting it with Airflow's Fernet key |
 | `AIRFLOW_PYTEST_ASSISTANT_DOCS` | — | Markdown files or directories the assistant may quote when asked about the product; separate several with `,`, `:` or `;` |
 | `AIRFLOW_PYTEST_ASSISTANT_DOCS_BYTES` | `4096` | how much of that documentation one question may carry (0–32768; `0` disables) |

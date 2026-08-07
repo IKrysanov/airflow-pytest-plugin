@@ -2007,13 +2007,31 @@ _JS = r"""
     return match ? match[1].toLowerCase() : null;
   }
 
+  function astCommandNames(list) {
+    return list.map(function (command) { return command.name; }).join(" ");
+  }
+
   function astRenderCommands() {
     var typed = astCommandMatch();
     var offered = typed === null ? [] : AST_COMMANDS.filter(function (command) {
       return command.name.indexOf(typed) === 0;
     });
+    // Typing "/bug" offers the same single command three times over. Rebuilding the list
+    // for each keystroke is visible as a flicker, and it discarded the highlighted row --
+    // so arrowing to a command and typing one more letter moved the choice back to the
+    // top without the user touching it.
+    if (astCommandNames(offered) === astCommandNames(astCommandList)) {
+      astCommandList = offered;
+      return;
+    }
+    var wasChosen = astCommandList[astCommandIndex];
     astCommandList = offered;
     astCommandIndex = 0;
+    if (wasChosen) {
+      for (var kept = 0; kept < offered.length; kept++) {
+        if (offered[kept].name === wasChosen.name) { astCommandIndex = kept; break; }
+      }
+    }
     astCommands.textContent = "";
     if (!offered.length) { astCommands.hidden = true; return; }
     offered.forEach(function (command, index) {

@@ -46,10 +46,27 @@ _SAFE_ENV_KEYS = frozenset(
         "_",
     }
 )
-_SECRET_ENV_NAME = re.compile(
-    r"(?i)(secret|token|password|passwd|api[_-]?key|access[_-]?key|"
-    r"private[_-]?key|credential|auth|session)"
+#: Whole words in a variable's *name* that make its value a secret whatever it looks like.
+#: Matched as words rather than substrings, so ``MONKEY_PATCH`` is not a key and
+#: ``AIRFLOW__CORE__FERNET_KEY`` is -- the old pattern wanted ``api_key`` or ``access_key``
+#: spelled out and let a bare ``KEY`` through to be caught by length alone.
+_SECRET_NAME_WORDS = frozenset(
+    """
+    secret secrets token tokens password passwords passwd pwd key keys apikey
+    credential credentials auth session salt signature private cert conn dsn
+    """.split()
 )
+#: An acronym run first, so ``ANTHROPIC_API_KEY`` splits into three words rather than
+#: fifteen single letters; ``MonkeyPatch`` still splits on the camel hump.
+_NAME_WORDS = re.compile(r"[A-Z]+(?![a-z])|[A-Za-z][a-z0-9]*")
+
+#: A value shorter than this is not redacted from free text even when its variable is
+#: named like a secret. Below it the collateral damage exceeds the protection: the stock
+#: ``docker-compose.yaml`` for Airflow ships ``POSTGRES_PASSWORD=airflow``, and deleting
+#: every occurrence of "airflow" from a plugin *for Airflow* costs more than it saves.
+#: Real credentials are longer than this, and the shape patterns above catch the prefixed
+#: ones (``sk-``, ``ghp_``, …) at any length.
+_MIN_ENV_SECRET = 8
 
 _PEM = re.compile(
     r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
@@ -98,10 +115,23 @@ _OPAQUE_TOKEN = re.compile(r"(?<![A-Za-z0-9+])[A-Za-z0-9+]{20,}={0,2}(?![A-Za-z0
 _WORD_SHAPE = re.compile(r"[A-Z]?[a-z]{2,}")
 _WORD_SHAPE_RATIO = 0.65
 
+#: The same test applied to an environment *value* can afford to be stricter, and the
+#: difference is worth having: measured over 6000 random credentials, 53 read enough like
+#: words to survive at 0.65 and 1 at 0.80 -- while 28 values a real Airflow deployment
+#: sets (``LocalExecutor``, ``checkout-api``, ``dag_id_checkout_nightly``) are judged
+#: exactly the same at both. The looser bar has to stay for free text, where the string
+#: under test is one token out of a report rather than a whole configured value.
+_ENV_WORD_SHAPE_RATIO = 0.80
 
-def _looks_like_opaque_secret(token: str) -> bool:
+
+def _looks_like_opaque_secret(token: str, ratio: float = _WORD_SHAPE_RATIO) -> bool:
     covered = sum(len(word) for word in _WORD_SHAPE.findall(token))
-    return covered < _WORD_SHAPE_RATIO * len(token)
+    return covered < ratio * len(token)
+
+
+def _is_secret_name(key: str) -> bool:
+    """Whether a variable's name says its value is a credential."""
+    return any(word.lower() in _SECRET_NAME_WORDS for word in _NAME_WORDS.findall(key))
 
 
 def _redact_opaque_tokens(text: str) -> str:
@@ -183,8 +213,17 @@ def _build_environment_matcher(
     for key, value in environment.items():
         if key in _SAFE_ENV_KEYS or _looks_like_path(value):
             continue
-        minimum_length = 4 if _SECRET_ENV_NAME.search(key) else 8
-        if len(value) >= minimum_length:
+        if len(value) < _MIN_ENV_SECRET:
+            continue
+        # An API server is configured almost entirely through the environment, so "long
+        # enough to be a secret" made secrets of the provider name, the executor and every
+        # other setting -- and those words then disappeared from the reports, the
+        # questions and the answers. A value earns redaction by the name it is stored
+        # under or by not reading like configuration; the shape patterns above are the
+        # net for anything that is a credential regardless of where it came from.
+        if _is_secret_name(key) or _looks_like_opaque_secret(
+            value, _ENV_WORD_SHAPE_RATIO
+        ):
             values.append(value)
     if not values:
         return None

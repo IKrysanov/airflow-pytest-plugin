@@ -41,6 +41,7 @@ DAILY_TOKEN_QUOTA_ENV = "AIRFLOW_PYTEST_ASSISTANT_DAILY_TOKEN_QUOTA"
 HISTORY_DAYS_ENV = "AIRFLOW_PYTEST_ASSISTANT_HISTORY_DAYS"
 
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+_FALSE_VALUES = frozenset({"0", "false", "no", "off"})
 
 
 def healthcheck_enabled() -> bool:
@@ -71,11 +72,16 @@ _PROVIDER_MODEL_ENVS = {
 #: and what the request actually waits on is the remote provider.
 DEFAULT_DIRECT_CONCURRENCY = 4
 
-#: Paths to Markdown the assistant may quote when asked about the product. Off unless set:
-#: the short PRODUCT block covers what the packages are, and only a deployment can supply
-#: the operator's own manual, which lives in another repository.
+#: Paths to Markdown the assistant may quote when asked about the product. Setting this
+#: **replaces** the manual shipped with the package rather than adding to it: an operator
+#: who has written their own documentation for this product means that one, and two
+#: overlapping manuals in the same retrieval pool answer the same question twice.
 DOCS_ENV = "AIRFLOW_PYTEST_ASSISTANT_DOCS"
 DOCS_BYTES_ENV = "AIRFLOW_PYTEST_ASSISTANT_DOCS_BYTES"
+
+#: Set to a false value to ship no documentation at all -- no built-in manual, and the
+#: assistant answers product questions only from the short PRODUCT block in its prompt.
+DOCS_BUILTIN_ENV = "AIRFLOW_PYTEST_ASSISTANT_DOCS_BUILTIN"
 
 
 def _paths_env(name: str) -> tuple[str, ...]:
@@ -85,6 +91,24 @@ def _paths_env(name: str) -> tuple[str, ...]:
         return ()
     parts = [part.strip() for part in re.split(r"[,:;\n]", raw)]
     return tuple(part for part in parts if part)
+
+
+def _documentation_paths() -> tuple[str, ...]:
+    """Return what the assistant may quote: the operator's manual, or the shipped one.
+
+    The built-in manual is the default so that ``/docs`` answers "how do I run my first
+    test?" on a fresh install -- before this, the mechanism was there and every deployment
+    started with an empty corpus, which reads to a user as the feature not working.
+    """
+    from .docs import builtin_paths
+
+    configured = _paths_env(DOCS_ENV)
+    if configured:
+        return configured
+    raw = _text_env(DOCS_BUILTIN_ENV)
+    if raw is not None and raw.lower() in _FALSE_VALUES:
+        return ()
+    return builtin_paths()
 
 
 def _text_env(name: str) -> str | None:
@@ -218,7 +242,7 @@ class AssistantSettings:
             # Direct mode has neither problem -- measured at ~0.15 MiB per additional
             # concurrent request -- and one slot there made the assistant single-user:
             # the second person to ask got 429 until the first was finished.
-            docs_paths=_paths_env(DOCS_ENV),
+            docs_paths=_documentation_paths(),
             docs_bytes=_bounded_int(DOCS_BYTES_ENV, 4_096, minimum=0, maximum=32_768),
             max_concurrent=_bounded_int(
                 MAX_CONCURRENT_ENV,
@@ -252,6 +276,8 @@ __all__ = [
     "CAPTURE_BYTES_ENV",
     "DAILY_TOKEN_QUOTA_ENV",
     "DIRECT_MAX_SUMMARIES_ENV",
+    "DOCS_BUILTIN_ENV",
+    "DOCS_ENV",
     "HEALTHCHECK_ENV",
     "HISTORY_DAYS_ENV",
     "LOCAL_BUDGET_SECONDS_ENV",

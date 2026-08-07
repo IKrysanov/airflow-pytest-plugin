@@ -47,6 +47,8 @@ from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
+from . import chatcrypto
+
 if TYPE_CHECKING:  # pragma: no cover - import-light at runtime
     from sqlalchemy import MetaData, Table
     from sqlalchemy.engine import Engine
@@ -61,7 +63,7 @@ _SCHEME_ALIASES = {"postgres": "postgresql", "mysql": "mysql+mysqldb"}
 
 #: Bumped whenever the tables change; ``upgrade`` records it so a future version can tell
 #: what it is looking at instead of guessing from column names.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 TABLE_PREFIX = "pytest_assistant_"
 USAGE_TABLE = f"{TABLE_PREFIX}usage"
@@ -165,7 +167,10 @@ def _build_metadata() -> MetaData | None:
         Column("conversation", String(64), primary_key=True),
         # A name the user chose. Absent means "use the first question", which is the
         # default every chat starts with -- so this table only holds the exceptions.
-        Column("title", String(200), nullable=False),
+        # Text rather than a bounded string because the stored form may be a Fernet
+        # token: a 200-character title encrypts to 356, which VARCHAR(200) rejects
+        # outright on PostgreSQL. Schema 5 widens it on databases created before that.
+        Column("title", Text, nullable=False),
     )
     _tables[SCHEMA_TABLE] = Table(
         SCHEMA_TABLE,
@@ -434,11 +439,38 @@ def _migrate_to_4(connection: Any) -> None:
     del connection
 
 
+def _migrate_to_5(connection: Any) -> None:
+    """Schema 5 widened the chat title so an encrypted one fits.
+
+    Encryption is decided per row and needs no data migration, but the column it is
+    written to does have to hold a token: 200 characters of title become 356 of Fernet,
+    and PostgreSQL enforces the declared width. SQLite does not, so it is left alone --
+    ``ALTER COLUMN`` is not in its dialect and the existing column already accepts the
+    value.
+    """
+    from sqlalchemy import text
+
+    dialect = connection.engine.dialect.name
+    if dialect == "sqlite":
+        return
+    statement = {
+        "postgresql": f"ALTER TABLE {CONVERSATION_TABLE} ALTER COLUMN title TYPE TEXT",
+        "mysql": f"ALTER TABLE {CONVERSATION_TABLE} MODIFY title TEXT NOT NULL",
+    }.get(dialect)
+    if statement is None:  # pragma: no cover - an unfamiliar dialect
+        return
+    connection.execute(text(statement))
+
+
 #: Version -> the statements that turn the previous shape into this one. ``create_all``
 #: covers new tables; anything that alters an existing table has to live here, because a
 #: recorded version that the tables do not actually match is invisible until an insert
 #: fails somewhere it is caught and swallowed.
-_MIGRATIONS: dict[int, Callable[[Any], None]] = {3: _migrate_to_3, 4: _migrate_to_4}
+_MIGRATIONS: dict[int, Callable[[Any], None]] = {
+    3: _migrate_to_3,
+    4: _migrate_to_4,
+    5: _migrate_to_5,
+}
 
 
 def _missing_columns(active: Engine) -> dict[str, list[str]]:
@@ -608,6 +640,13 @@ class _Store:
         self._failed_at = 0.0
 
     def _warn(self, error: BaseException) -> None:
+        # A statement that fails on the *content* of one row is not an outage, and
+        # treating it as one let any user switch server-side history off for everybody
+        # by sending a single character the database could not encode. The cooldown is
+        # for a database that is genuinely unreachable.
+        if isinstance(error, (UnicodeError, ValueError, TypeError)):
+            _log.warning("%s could not store one row: %s", type(self).__name__, error)
+            return
         self._failed_at = time.monotonic()
         if not self._warned:
             self._warned = True
@@ -718,6 +757,23 @@ _CONVERSATION_SHAPE = re.compile(r"[^A-Za-z0-9._-]")
 
 #: Matches the column width.
 _MAX_CONVERSATION = 64
+
+
+def storable_text(value: str) -> str:
+    """Return ``value`` in a form the database and Fernet can both accept.
+
+    A browser can put a lone surrogate in a question -- it survives JSON, and Python
+    holds it happily -- but it has no UTF-8 encoding, so the driver raises on the way to
+    the column. Repairing the character keeps the message: the alternative is dropping
+    an exchange the user can see in their own window and cannot explain the loss of.
+    """
+    if not value:
+        return value
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return value.encode("utf-8", "replace").decode("utf-8")
+    return value
 
 
 def clean_conversation(value: str | None) -> str:
@@ -885,7 +941,7 @@ class ChatHistoryStore(_Store):
         return [
             {
                 "role": row.role,
-                "content": row.content,
+                "content": chatcrypto.decrypt(row.content),
                 "evidence": _decode_evidence(row.evidence),
                 "total_tokens": int(row.total_tokens or 0),
             }
@@ -948,7 +1004,7 @@ class ChatHistoryStore(_Store):
             with active.connect() as connection:
                 rows = connection.execute(summary).all()
                 titles = {
-                    row.conversation: row.content
+                    row.conversation: chatcrypto.decrypt(row.content)
                     for row in connection.execute(
                         select(table.c.conversation, table.c.content).where(
                             table.c.id.in_([row.first_id for row in rows] or [-1])
@@ -959,7 +1015,7 @@ class ChatHistoryStore(_Store):
                     # A name the user chose wins over the opening question.
                     titles.update(
                         {
-                            row.conversation: row.title
+                            row.conversation: chatcrypto.decrypt(row.title)
                             for row in connection.execute(
                                 select(names.c.conversation, names.c.title).where(
                                     names.c.principal == principal
@@ -994,7 +1050,7 @@ class ChatHistoryStore(_Store):
         if not self.storable(principal):
             return 0
         chat = clean_conversation(conversation)
-        clean = " ".join(str(title or "").split())[:MAX_TITLE]
+        clean = storable_text(" ".join(str(title or "").split())[:MAX_TITLE])
         try:
             from sqlalchemy import delete, func, insert, select, update
 
@@ -1021,12 +1077,14 @@ class ChatHistoryStore(_Store):
                         table.c.principal == principal,
                         table.c.conversation == chat,
                     )
-                    .values(title=clean)
+                    .values(title=chatcrypto.encrypt(clean))
                 )
                 if not changed.rowcount:
                     connection.execute(
                         insert(table).values(
-                            principal=principal, conversation=chat, title=clean
+                            principal=principal,
+                            conversation=chat,
+                            title=chatcrypto.encrypt(clean),
                         )
                     )
                 return 1
@@ -1063,7 +1121,7 @@ class ChatHistoryStore(_Store):
                             "principal": principal,
                             "conversation": chat,
                             "role": "user",
-                            "content": question,
+                            "content": chatcrypto.encrypt(storable_text(question)),
                             "evidence": None,
                             "total_tokens": 0,
                             "created_at": now,
@@ -1072,7 +1130,7 @@ class ChatHistoryStore(_Store):
                             "principal": principal,
                             "conversation": chat,
                             "role": "assistant",
-                            "content": answer,
+                            "content": chatcrypto.encrypt(storable_text(answer)),
                             "evidence": json.dumps(evidence, ensure_ascii=False)
                             if evidence
                             else None,

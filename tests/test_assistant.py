@@ -99,6 +99,7 @@ from airflow_pytest_plugin.models import (
     ReportSummary,
 )
 from airflow_pytest_plugin.sources import FileSystemReportSource, ReportSource
+from airflow_pytest_plugin.web.routes.assistant import _storage_namespace
 from conftest import write_report, write_report_xml
 
 
@@ -258,6 +259,149 @@ def test_assistant_redacts_environment_values_and_node_parameters(monkeypatch):
     safe = safe_node_id(node_id)
     assert safe.startswith("tests/test_api.py::test_call[")
     assert secret not in safe and "[REDACTED]" in safe
+
+
+def test_configuration_values_are_not_mistaken_for_secrets(monkeypatch):
+    """Every variable's value used to be a secret if it was merely long enough.
+
+    An Airflow API server is configured almost entirely through the environment, so that
+    rule quietly deleted ordinary words from reports, questions and answers -- and from
+    the assistant's own error messages, which is how it was found: "Provider
+    '[REDACTED]' is selected but its SDK is not installed".
+    """
+    monkeypatch.setenv(PROVIDER_ENV, "anthropic")
+    monkeypatch.setenv("AIRFLOW__CORE__EXECUTOR", "LocalExecutor")
+
+    message = redact_text(
+        "Provider 'anthropic' is selected but its SDK is not installed; "
+        "install the 'assistant-anthropic' extra."
+    )
+
+    assert message.count("anthropic") == 2
+    assert "test_login fails under LocalExecutor" == redact_text(
+        "test_login fails under LocalExecutor"
+    )
+
+
+def test_a_weak_password_does_not_delete_a_word_from_every_report(monkeypatch):
+    """`POSTGRES_PASSWORD=airflow` is what the stock compose file ships.
+
+    Redacting a seven-character value globally removed the word "airflow" from every
+    answer this plugin gave -- while protecting a password that no report would contain.
+    """
+    monkeypatch.setenv("POSTGRES_PASSWORD", "airflow")
+    monkeypatch.setenv("_AIRFLOW_WWW_USER_PASSWORD", "airflow")
+
+    text = redact_text("test_dag_import failed on the airflow scheduler")
+
+    assert text == "test_dag_import failed on the airflow scheduler"
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        # Named as a secret: redacted whatever it looks like.
+        ("ANTHROPIC_API_KEY", "correct-horse-battery-staple"),
+        ("AIRFLOW__CORE__FERNET_KEY", "dGhpcy1pcy1hLWZlcm5ldC1rZXktZm9yLXRlc3Rpbmc="),
+        ("GIGACHAT_CREDENTIALS", "ZmFrZTpjcmVkZW50aWFscw=="),
+        ("MY_SESSION_TOKEN", "abcdefghijklmnop"),
+        # Not named as a secret, but shaped like one.
+        ("SOME_SETTING", "9c1f2a7b4d6e8f0a1b2c3d4e5f607182"),
+        ("REQUEST_ID", "550e8400-e29b-41d4-a716-446655440000"),
+    ],
+)
+def test_secrets_are_still_redacted_after_narrowing_the_rule(name, value, monkeypatch):
+    monkeypatch.setenv(name, value)
+
+    assert value not in redact_text(f"the call failed with {value} on retry")
+
+
+def test_identity_is_the_account_primary_key_not_the_username():
+    """A username is a label an admin can change; the primary key is the account.
+
+    Two separate consequences, both real:
+
+    * renaming a user moved their stored chats and their spent quota to a fresh
+      namespace, so their history simply disappeared;
+    * deleting a user and creating a new one with the same username handed the new
+      person the old person's transcripts.
+    """
+    renamed_before = audit.principal({"id": 42, "username": "ivan"})
+    renamed_after = audit.principal({"id": 42, "username": "ivan.petrov"})
+
+    assert renamed_before == renamed_after
+
+    old_account = audit.principal({"id": 42, "username": "ivan"})
+    new_account_same_name = audit.principal({"id": 77, "username": "ivan"})
+
+    assert old_account != new_account_same_name
+
+
+def test_an_id_and_a_username_that_look_alike_are_different_people():
+    """One person's id is another person's username on any system that allows digits."""
+    by_id = audit.principal({"id": "42"})
+    by_name = audit.principal({"username": "42"})
+
+    assert by_id != by_name
+
+
+def test_the_server_and_browser_namespaces_agree_on_who_the_user_is():
+    """They keyed on different attributes, so one browser and one server disagreed.
+
+    The same person then saw one set of chats restored from the tab and another from the
+    database, depending only on which attribute their auth manager happened to expose.
+    """
+    user = {"id": 42, "user_id": 99, "username": "ivan"}
+    renamed = {"id": 42, "user_id": 99, "username": "ivan.petrov"}
+
+    assert _storage_namespace(user) == _storage_namespace(renamed)
+    assert audit.principal(user) == audit.principal(renamed)
+
+
+def test_a_user_object_with_only_a_username_still_has_an_identity():
+    """Airflow's simple auth manager exposes no numeric key at all."""
+    assert audit.principal({"username": "ivan"}) not in ("", audit.ANONYMOUS)
+
+
+def test_an_environment_value_is_judged_more_strictly_than_a_word_in_a_report(
+    monkeypatch,
+):
+    """The same heuristic, two costs, so two thresholds.
+
+    Scanning free text, a false positive deletes an identifier out of a report -- and
+    `test_login_v2` reads only 69% as words, so the bar there has to stay low. An
+    environment value is matched whole and against configuration, where measurement over
+    6000 random credentials put the bar at 80% with no new false positives: 53 secrets in
+    6000 slipped through at the looser setting, 1 at this one.
+    """
+    slipped = "pnwRDElb0wcClzluql18snmZ"  # 75% word-shaped: kept by the looser rule
+    monkeypatch.setenv("SOME_HARMLESS_SETTING", slipped)
+
+    assert slipped not in redact_text(f"the call failed with {slipped}")
+    # ...while the identifiers a report is made of are still safe in free text, where
+    # the same 75% would have to survive.
+    for identifier in ("TestCheckoutIntegration", "ArchivingResultParserTests"):
+        assert redact_text(f"{identifier} failed") == f"{identifier} failed"
+
+
+def test_the_stricter_environment_bar_keeps_real_configuration(monkeypatch):
+    """Measured against what an Airflow deployment actually sets."""
+    values = [
+        "LocalExecutor",
+        "KubernetesExecutor",
+        "checkout-api",
+        "dag_id_checkout_nightly",
+        "ArchivingResultParser",
+        "team-payments",
+        "america_east",
+        "production",
+    ]
+    for index, value in enumerate(values):
+        monkeypatch.setenv(f"SOME_SETTING_{index}", value)
+
+    for value in values:
+        sentence = f"test_login failed under {value} in the checkout suite"
+        assert redact_text(sentence) == sentence, value
 
 
 def test_untrusted_triage_structure_is_depth_and_width_bounded():
@@ -2586,7 +2730,7 @@ def test_audit_log_records_who_asked_over_which_dags_and_what_it_cost(
     assert len(records) == 1
     record = records[0]
     assert record["event"] == "assistant.query"
-    assert record["principal"] == "alice"
+    assert record["principal"] == "username:alice"
     assert record["outcome"] == "answered"
     assert record["mode"] == "direct"
     assert sorted(record["dags"]) == ["etl", "ml"]
@@ -2656,7 +2800,7 @@ def test_audit_log_records_a_refused_and_a_failed_request(reports_root, caplog):
 
     outcomes = [record["outcome"] for record in _audit_records(caplog)]
     assert outcomes == ["forbidden", "error"]
-    assert _audit_records(caplog)[0]["principal"] == "mallory"
+    assert _audit_records(caplog)[0]["principal"] == "username:mallory"
 
 
 def test_audit_log_can_be_switched_off(reports_root, caplog, monkeypatch):
@@ -2688,7 +2832,8 @@ def test_audit_log_records_a_streamed_answer_once(reports_root, caplog):
 
     records = _audit_records(caplog)
     assert len(records) == 1
-    assert records[0]["principal"] == "carol" and records[0]["outcome"] == "answered"
+    assert records[0]["principal"] == "username:carol"
+    assert records[0]["outcome"] == "answered"
     assert records[0]["streamed"] is True
 
 
@@ -2786,7 +2931,7 @@ def test_daily_token_quota_blocks_the_next_question_not_the_current_one(reports_
 
     assert ask().answer  # 500 of 1000 spent
     assert ask().answer  # 1000 of 1000 spent: still had budget when it started
-    assert runtime.limits.spent_today("alice") == 1_000
+    assert runtime.limits.spent_today("username:alice") == 1_000
     with pytest.raises(AssistantQuotaError) as refused:
         ask()
     assert "quota" in str(refused.value).lower()
@@ -2908,9 +3053,13 @@ def test_display_names_never_become_an_identity():
 
 
 def test_identity_prefers_the_unique_key_over_any_label():
-    assert audit.principal({"username": "alice", "name": "Alice Liddell"}) == "alice"
-    assert audit.principal(SimpleNamespace(user_id=7, name="Alice")) == "7"
-    assert audit.principal(SimpleNamespace(get_id=lambda: "u-9", name="Alice")) == "u-9"
+    assert audit.principal({"username": "alice", "name": "Alice Liddell"}) == (
+        "username:alice"
+    )
+    assert audit.principal(SimpleNamespace(user_id=7, name="Alice")) == "user_id:7"
+    assert audit.principal(SimpleNamespace(get_id=lambda: "u-9", name="Alice")) == (
+        "get_id:u-9"
+    )
 
 
 def test_a_user_with_only_a_label_is_not_identified():
@@ -2954,7 +3103,7 @@ def test_a_quota_still_binds_when_the_provider_reports_no_usage(reports_root):
         )
 
     assert ask().answer
-    assert runtime.limits.spent_today("alice") > 0
+    assert runtime.limits.spent_today("username:alice") > 0
     for _ in range(20):
         try:
             ask()
@@ -2985,7 +3134,7 @@ def test_an_estimate_never_overrides_what_the_provider_reported(reports_root):
         query=AssistantQuery(question="What failed?"),
     )
 
-    assert runtime.limits.spent_today("alice") == 50
+    assert runtime.limits.spent_today("username:alice") == 50
 
 
 def test_a_misconfigured_assistant_is_told_apart_from_a_switched_off_one(monkeypatch):
@@ -3845,13 +3994,24 @@ def test_the_prompt_names_the_help_page_by_its_real_path():
     assert "/help" in SYSTEM_PROMPT
 
 
-def test_documentation_is_off_until_an_operator_supplies_it(monkeypatch):
+def test_documentation_is_the_shipped_manual_until_an_operator_supplies_one(
+    monkeypatch,
+):
+    """It used to be off until configured, and an empty corpus reads as a broken feature.
+
+    "How do I run my first test?" is asked on the first day, by someone who has not yet
+    written any documentation of their own -- so the manual that answers it ships.
+    """
+    from airflow_pytest_plugin.assistant.docs import builtin_paths
+
     monkeypatch.setenv(PROVIDER_ENV, "fake")
     monkeypatch.delenv(DOCS_ENV, raising=False)
+    monkeypatch.delenv("AIRFLOW_PYTEST_ASSISTANT_DOCS_BUILTIN", raising=False)
 
     settings = AssistantSettings.from_env()
 
-    assert settings.docs_paths == ()
+    assert settings.docs_paths == builtin_paths()
+    assert settings.docs_paths, "the manual should be packaged with the plugin"
 
 
 def test_documentation_paths_are_split_on_the_usual_separators(monkeypatch):
@@ -4113,3 +4273,202 @@ def test_a_bare_command_leaves_the_model_a_question_it_can_answer(reports_root):
     # The skill itself tells it what to do with a request too vague to write against.
     assert "ask one specific question" in " ".join(system.split())
     assert "suggest clearing" not in " ".join(prompt.split())
+
+
+def _duration_reports(root):
+    """Two runs where the slowest test is one that passed."""
+    xml = """<?xml version="1.0" encoding="utf-8"?>
+<testsuites><testsuite name="pytest" tests="3" failures="1" errors="0" skipped="0" time="12">
+  <testcase classname="tests.test_auth" name="test_login" time="1.1">
+    <failure message="AssertionError: assert 401 == 200">boom</failure>
+  </testcase>
+  <testcase classname="tests.test_billing" name="test_invoice" time="9.8"/>
+  <testcase classname="tests.test_billing" name="test_refund" time="0.4"/>
+</testsuite></testsuites>
+"""
+    write_report_xml(
+        root,
+        ReportRef("checkout", "run_a", "pytest", 1),
+        xml,
+        summary={
+            "total": 3,
+            "passed": 2,
+            "failed": 1,
+            "skipped": 0,
+            "errors": 0,
+            "duration": 11.3,
+            "exit_code": 1,
+            "success": False,
+            "failed_node_ids": ["tests/test_auth.py::test_login"],
+        },
+    )
+
+
+def test_a_question_about_duration_can_see_the_tests_that_passed(reports_root):
+    """Only failures carry per-test detail, and the slowest test usually passes.
+
+    Asked which test was slowest, the assistant could see 1.1 s for the one failure and
+    nothing else, so it answered with the slowest *failure* -- a true sentence about the
+    evidence and a wrong answer to the question.
+    """
+    _duration_reports(reports_root)
+    builder = ReportContextBuilder(max_context_bytes=16_384)
+
+    context = builder.build(
+        source=FileSystemReportSource(report_root=reports_root),
+        can_read=lambda dag, user: True,
+        user=None,
+        query=AssistantQuery(question="какой тест самый медленный?"),
+    )
+
+    assert "test_invoice" in context.text
+    assert "9.8" in context.text
+
+
+def test_a_question_about_anything_else_pays_nothing_for_durations(reports_root):
+    """It is a few hundred bytes on every request otherwise, for everyone, forever."""
+    _duration_reports(reports_root)
+    builder = ReportContextBuilder(max_context_bytes=16_384)
+
+    context = builder.build(
+        source=FileSystemReportSource(report_root=reports_root),
+        can_read=lambda dag, user: True,
+        user=None,
+        query=AssistantQuery(question="почему упал test_login?"),
+    )
+
+    assert "test_invoice" not in context.text
+    assert "test_login" in context.text
+
+
+def test_the_slowest_block_is_asked_for_in_both_languages(reports_root):
+    _duration_reports(reports_root)
+    builder = ReportContextBuilder(max_context_bytes=16_384)
+    source = FileSystemReportSource(report_root=reports_root)
+
+    for question in (
+        "which test is the slowest?",
+        "какой тест дольше всех идёт?",
+        "покажи длительность тестов",
+        "what takes the most time?",
+    ):
+        context = builder.build(
+            source=source,
+            can_read=lambda dag, user: True,
+            user=None,
+            query=AssistantQuery(question=question),
+        )
+        assert "test_invoice" in context.text, question
+
+
+def test_asking_about_duration_does_not_push_the_failures_out(reports_root):
+    """Durations are an extra, and an extra must not evict the evidence.
+
+    Five slowest cases per report is five times the number of reports, so on a wide
+    scope the duration lines filled the budget and the failures of later reports never
+    got in -- the question would have been answered with less than it had before.
+    """
+    xml = """<?xml version="1.0" encoding="utf-8"?>
+<testsuites><testsuite name="pytest" tests="6" failures="1" errors="0" skipped="0" time="30">
+  <testcase classname="tests.mod" name="test_fails_{index}" time="0.1">
+    <failure message="AssertionError: run {index}">boom</failure>
+  </testcase>
+  <testcase classname="tests.mod" name="test_a" time="5.1"/>
+  <testcase classname="tests.mod" name="test_b" time="4.2"/>
+  <testcase classname="tests.mod" name="test_c" time="3.3"/>
+  <testcase classname="tests.mod" name="test_d" time="2.4"/>
+  <testcase classname="tests.mod" name="test_e" time="1.5"/>
+</testsuite></testsuites>
+"""
+    for index in range(12):
+        write_report_xml(
+            reports_root,
+            ReportRef("checkout", f"run_{index}", "pytest", 1),
+            xml.format(index=index),
+            created_at=f"2026-08-{index + 1:02d}T10:00:00+00:00",
+            summary={
+                "total": 6,
+                "passed": 5,
+                "failed": 1,
+                "skipped": 0,
+                "errors": 0,
+                "duration": 16.6,
+                "exit_code": 1,
+                "success": False,
+                "failed_node_ids": [f"tests/mod.py::test_fails_{index}"],
+            },
+        )
+    builder = ReportContextBuilder(max_context_bytes=8_192)
+    source = FileSystemReportSource(report_root=reports_root)
+
+    plain = builder.build(
+        source=source,
+        can_read=lambda dag, user: True,
+        user=None,
+        query=AssistantQuery(question="почему упали тесты?"),
+    )
+    timed = builder.build(
+        source=source,
+        can_read=lambda dag, user: True,
+        user=None,
+        query=AssistantQuery(question="какой тест самый медленный?"),
+    )
+
+    failures_plain = {
+        f"test_fails_{index}"
+        for index in range(12)
+        if f"test_fails_{index}" in plain.text
+    }
+    failures_timed = {
+        f"test_fails_{index}"
+        for index in range(12)
+        if f"test_fails_{index}" in timed.text
+    }
+
+    assert failures_plain, "the fixture should produce failures in the context"
+    assert failures_timed >= failures_plain, sorted(failures_plain - failures_timed)
+    assert "test_a" in timed.text
+
+
+def test_the_shipped_manual_reaches_the_prompt_with_nothing_configured(
+    reports_root, monkeypatch
+):
+    """The whole point of shipping it: a fresh install answers "how do I start?".
+
+    Built through the real factory rather than by handing the runtime a library, so this
+    also covers the wiring that decides *which* corpus a deployment gets.
+    """
+    monkeypatch.setenv(PROVIDER_ENV, "fake")
+    monkeypatch.delenv(DOCS_ENV, raising=False)
+    monkeypatch.delenv("AIRFLOW_PYTEST_ASSISTANT_DOCS_BUILTIN", raising=False)
+    write_report(reports_root, ReportRef("dag", "run", "task", 1), failed=1)
+
+    runtime = configured_assistant_runtime()
+    reply = runtime.ask(
+        source=FileSystemReportSource(report_root=reports_root),
+        can_read=lambda dag, user: True,
+        user=SimpleNamespace(username="alice"),
+        query=AssistantQuery(question="/docs как запустить первый тест?"),
+    )
+
+    assert reply.prompt_bytes.docs > 0, "no documentation travelled with the question"
+    assert reply.answer
+
+
+def test_a_question_about_runs_pays_nothing_for_the_shipped_manual(
+    reports_root, monkeypatch
+):
+    """It is on every install now, so the common question must not pay for it."""
+    monkeypatch.setenv(PROVIDER_ENV, "fake")
+    monkeypatch.delenv(DOCS_ENV, raising=False)
+    write_report(reports_root, ReportRef("dag", "run", "task", 1), failed=1)
+
+    runtime = configured_assistant_runtime()
+    reply = runtime.ask(
+        source=FileSystemReportSource(report_root=reports_root),
+        can_read=lambda dag, user: True,
+        user=SimpleNamespace(username="alice"),
+        query=AssistantQuery(question="почему упал test_login вчера?"),
+    )
+
+    assert reply.prompt_bytes.docs == 0

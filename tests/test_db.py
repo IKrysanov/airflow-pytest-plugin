@@ -25,6 +25,7 @@ from datetime import datetime, timedelta, timezone
 from types import ModuleType, SimpleNamespace
 
 import pytest
+import sqlalchemy as sa
 
 from airflow_pytest_plugin import db
 from airflow_pytest_plugin.assistant import (
@@ -34,6 +35,7 @@ from airflow_pytest_plugin.assistant import (
     AssistantRuntime,
     AssistantTokenUsage,
     PassthroughReducer,
+    audit,
 )
 from airflow_pytest_plugin.assistant.limits import UserLimits
 from airflow_pytest_plugin.assistant.providers.fake import FakeAssistant
@@ -1880,3 +1882,380 @@ def test_no_history_call_holds_two_connections_at_once(name, call):
     peak = _peak_connections(db.engine(), lambda: call(store))
 
     assert peak <= 1, f"{name} held {peak} connections at once"
+
+
+def test_two_people_get_separate_chats_over_the_whole_http_path(reports_root):
+    """The end the user sees: two accounts, one server, one database.
+
+    The store is filtered by principal, but the principal is derived from the acting
+    user object at the top of the request, so this exercises the join between the two.
+    """
+    from fastapi.testclient import TestClient
+
+    from airflow_pytest_plugin.web.app import create_app
+
+    db.upgrade()
+    write_report(reports_root, ReportRef("dag", "run", "task", 1), failed=1)
+    alice = {"id": 42, "username": "alice"}
+    bob = {"id": 77, "username": "bob"}
+
+    def client_for(user):
+        return TestClient(
+            create_app(
+                FileSystemReportSource(report_root=reports_root),
+                authorizer=lambda dag, u: True,
+                read_authorizer=lambda dag, u: True,
+                user_dependency=lambda: user,
+                assistant=AssistantRuntime(
+                    provider_factory=FakeAssistant,
+                    reducer_factory=PassthroughReducer,
+                    provider_name="fake",
+                    model_name="offline-fake",
+                    context_model_name=None,
+                    max_context_bytes=16_384,
+                    max_output_tokens=256,
+                    max_concurrent=2,
+                    history=db.history_store(),
+                    history_days=30,
+                ),
+            )
+        )
+
+    for user, question, chat in (
+        (alice, "alice asks about test_login", "main"),
+        (alice, "alice second thread", "work"),
+        (bob, "bob asks about test_billing", "main"),
+    ):
+        with client_for(user) as client:
+            assert (
+                client.post(
+                    "/api/assistant/query",
+                    json={"question": question, "conversation": chat},
+                ).status_code
+                == 200
+            )
+
+    with client_for(alice) as client:
+        hers = client.get("/api/assistant/history").json()
+    with client_for(bob) as client:
+        his = client.get("/api/assistant/history").json()
+
+    assert {chat["id"] for chat in hers["conversations"]} == {"main", "work"}
+    assert {chat["id"] for chat in his["conversations"]} == {"main"}
+    assert "bob asks" not in str(hers["messages"])
+    assert "alice" not in str(his["messages"])
+
+
+def test_a_renamed_account_keeps_its_chats_and_a_reissued_name_inherits_none():
+    """Two sides of the same rule: the identity is the key, not the label."""
+    db.upgrade()
+    store = db.history_store()
+    store.append(
+        audit.principal({"id": 42, "username": "ivan"}),
+        "q",
+        "a",
+        [],
+        1,
+        conversation="main",
+    )
+
+    renamed = store.load(
+        audit.principal({"id": 42, "username": "ivan.petrov"}),
+        limit=12,
+        conversation="main",
+    )
+    reissued = store.load(
+        audit.principal({"id": 99, "username": "ivan"}), limit=12, conversation="main"
+    )
+
+    assert len(renamed) == 2
+    assert reissued == []
+
+
+def _fernet_key(monkeypatch):
+    pytest.importorskip("cryptography")
+    from cryptography.fernet import Fernet
+
+    from airflow_pytest_plugin import chatcrypto
+
+    chatcrypto._cached = None
+    monkeypatch.setenv("AIRFLOW__CORE__FERNET_KEY", Fernet.generate_key().decode())
+    return chatcrypto
+
+
+def test_a_stored_chat_is_not_readable_in_the_database(monkeypatch):
+    """Anyone with the metadata database gets the transcript otherwise.
+
+    It is the same class of material Airflow already encrypts in connections -- the
+    questions name failing tests and the answers quote tracebacks -- so it uses the same
+    key.
+    """
+    _fernet_key(monkeypatch)
+    db.upgrade()
+    store = db.history_store()
+    question = "почему упал test_login на проде?"
+    answer = "AssertionError: assert 401 == 200 в tests/test_auth.py:42"
+
+    store.append("id:42", question, answer, [], 7, conversation="main")
+
+    with db.engine().connect() as connection:
+        raw = [
+            row[0]
+            for row in connection.execute(
+                sa.text(f"select content from {db.MESSAGE_TABLE} order by id")
+            )
+        ]
+
+    assert question not in " ".join(raw)
+    assert answer not in " ".join(raw)
+    assert all(value.startswith("gAAAAA") for value in raw), raw
+    restored = store.load("id:42", limit=12, conversation="main")
+    assert [item["content"] for item in restored] == [question, answer]
+
+
+def test_a_chat_title_is_encrypted_too(monkeypatch):
+    """The default title *is* the first question, and a chosen one is still the user's."""
+    _fernet_key(monkeypatch)
+    db.upgrade()
+    store = db.history_store()
+    store.append("id:42", "секретный вопрос", "ответ", [], 1, conversation="main")
+    store.rename("id:42", "main", "мой приватный тред")
+
+    with db.engine().connect() as connection:
+        titles = [
+            row[0]
+            for row in connection.execute(
+                sa.text(f"select title from {db.CONVERSATION_TABLE}")
+            )
+        ]
+
+    assert "приватный" not in " ".join(titles)
+    listed = store.conversations("id:42", limit=10)
+    assert [chat["title"] for chat in listed] == ["мой приватный тред"]
+
+
+def test_a_chat_written_before_encryption_still_opens(monkeypatch):
+    """Existing deployments must not lose their history the day they get a key."""
+    monkeypatch.delenv("AIRFLOW__CORE__FERNET_KEY", raising=False)
+    from airflow_pytest_plugin import chatcrypto
+
+    chatcrypto._cached = None
+    db.upgrade()
+    store = db.history_store()
+    store.append("id:42", "старый вопрос", "старый ответ", [], 1, conversation="main")
+
+    _fernet_key(monkeypatch)
+    store.append("id:42", "новый вопрос", "новый ответ", [], 1, conversation="main")
+
+    restored = [item["content"] for item in store.load("id:42", limit=12)]
+
+    assert restored == ["старый вопрос", "старый ответ", "новый вопрос", "новый ответ"]
+
+
+def test_a_long_title_survives_encryption_on_a_real_column(monkeypatch):
+    """200 characters of title become 356 of Fernet; the column had to grow for it."""
+    _fernet_key(monkeypatch)
+    db.upgrade()
+    store = db.history_store()
+    store.append("id:42", "q", "a", [], 1, conversation="main")
+    title = "т" * db.MAX_TITLE
+
+    assert store.rename("id:42", "main", title) == 1
+    assert store.conversations("id:42", limit=10)[0]["title"] == title
+
+
+def test_migration_five_widens_the_title_on_the_dialects_that_enforce_it():
+    """SQLite ignores the declared width; PostgreSQL and MySQL do not.
+
+    Without this the first encrypted rename on PostgreSQL fails with "value too long
+    for type character varying(200)", and the store swallows it as a warning -- so the
+    rename silently does nothing.
+    """
+    statements: list[str] = []
+
+    class FakeConnection:
+        def __init__(self, dialect: str) -> None:
+            self.engine = SimpleNamespace(dialect=SimpleNamespace(name=dialect))
+
+        def execute(self, statement):
+            statements.append(str(statement))
+
+    db._migrate_to_5(FakeConnection("sqlite"))
+    assert statements == []
+
+    db._migrate_to_5(FakeConnection("postgresql"))
+    db._migrate_to_5(FakeConnection("mysql"))
+
+    assert "ALTER COLUMN title TYPE TEXT" in statements[0]
+    assert "MODIFY title TEXT" in statements[1]
+    assert all(db.CONVERSATION_TABLE in item for item in statements)
+
+
+def test_the_recorded_version_reaches_the_current_schema():
+    """A build whose migrations stop short records a version its tables do not match."""
+    db.upgrade()
+
+    assert db.recorded_version() == db.SCHEMA_VERSION
+    assert set(db._MIGRATIONS) == set(range(3, db.SCHEMA_VERSION + 1))
+
+
+def test_status_says_whether_the_stored_chat_is_encrypted(reports_root, monkeypatch):
+    """An operator asking "who else can read this" gets an answer, not an assumption."""
+    pytest.importorskip("cryptography")
+    from cryptography.fernet import Fernet
+
+    from airflow_pytest_plugin import chatcrypto
+
+    chatcrypto._cached = None
+    monkeypatch.setenv("AIRFLOW__CORE__FERNET_KEY", Fernet.generate_key().decode())
+    db.upgrade()
+    runtime = AssistantRuntime(
+        provider_factory=FakeAssistant,
+        reducer_factory=PassthroughReducer,
+        provider_name="fake",
+        model_name="offline-fake",
+        context_model_name=None,
+        max_context_bytes=16_384,
+        max_output_tokens=256,
+        max_concurrent=1,
+        history=db.history_store(),
+        history_days=30,
+    )
+
+    from fastapi.testclient import TestClient
+
+    from airflow_pytest_plugin.web.app import create_app
+
+    def client():
+        return TestClient(
+            create_app(
+                FileSystemReportSource(report_root=reports_root),
+                authorizer=lambda dag, u: True,
+                read_authorizer=lambda dag, u: True,
+                user_dependency=lambda: {"id": 42},
+                assistant=runtime,
+            )
+        )
+
+    with client() as opened:
+        body = opened.get("/api/assistant/status").json()
+
+    assert body["history_server_side"] is True
+    assert body["history_encrypted"] is True
+
+    monkeypatch.setenv(chatcrypto.ENCRYPT_ENV, "0")
+    with client() as opened:
+        assert opened.get("/api/assistant/status").json()["history_encrypted"] is False
+
+
+def test_one_bad_message_does_not_take_the_store_down_for_everyone():
+    """A lone surrogate is something a browser can send, and it is not an outage.
+
+    The 30-second cooldown exists so a database that is genuinely down is not hammered
+    once per request. Tripping it on the *content* of one message let any user switch
+    off server-side history for every other user by pasting one character.
+    """
+    db.upgrade()
+    store = db.history_store()
+    store.append("id:alice", "нормальный вопрос", "нормальный ответ", [], 1)
+
+    store.append("id:mallory", "\ud800", "ответ", [], 1)
+
+    assert store.available is True
+    assert len(store.load("id:alice", limit=10)) == 2
+
+
+def test_a_message_that_cannot_be_encoded_is_stored_repaired_not_dropped():
+    """The user still asked it, and the answer is still theirs to re-read."""
+    db.upgrade()
+    store = db.history_store()
+
+    store.append("id:alice", "вопрос \ud800 хвост", "ответ", [], 1)
+
+    restored = [item["content"] for item in store.load("id:alice", limit=10)]
+    assert len(restored) == 2
+    assert restored[0].startswith("вопрос ")
+    assert restored[0].endswith(" хвост")
+
+
+def test_a_real_outage_is_still_treated_as_one(monkeypatch):
+    """Narrowing what counts as an outage must not stop counting the real ones."""
+    db.upgrade()
+    store = db.history_store()
+
+    def explode(*args, **kwargs):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(db, "engine", explode)
+    try:
+        store.append("id:alice", "q", "a", [], 1)
+    except OSError:
+        pass
+    monkeypatch.undo()
+
+    store._warn(OSError("connection refused"))
+    assert store.available is False
+
+
+def test_a_finished_answer_is_already_saved_when_the_browser_is_told_it_finished(
+    reports_root,
+):
+    """ "Done" has to mean saved, or the chat list is wrong exactly when it is looked at.
+
+    The transcript was written in the generator's ``finally``, which runs after the last
+    event has been flushed. A browser that opens **Chats** -- or reloads -- in the moment
+    it renders the answer was told the chat did not exist yet.
+    """
+
+    from airflow_pytest_plugin.web.app import create_app
+
+    db.upgrade()
+    write_report(reports_root, ReportRef("dag", "run", "task", 1), failed=1)
+    app = create_app(
+        FileSystemReportSource(report_root=reports_root),
+        authorizer=lambda dag, u: True,
+        read_authorizer=lambda dag, u: True,
+        user_dependency=lambda: {"id": 42},
+        assistant=AssistantRuntime(
+            provider_factory=FakeAssistant,
+            reducer_factory=PassthroughReducer,
+            provider_name="fake",
+            model_name="offline-fake",
+            context_model_name=None,
+            max_context_bytes=16_384,
+            max_output_tokens=256,
+            max_concurrent=2,
+            history=db.history_store(),
+            history_days=30,
+        ),
+    )
+
+    del app  # the ordering lives in the generator, not in the transport
+    runtime = AssistantRuntime(
+        provider_factory=FakeAssistant,
+        reducer_factory=PassthroughReducer,
+        provider_name="fake",
+        model_name="offline-fake",
+        context_model_name=None,
+        max_context_bytes=16_384,
+        max_output_tokens=256,
+        max_concurrent=2,
+        history=db.history_store(),
+        history_days=30,
+    )
+    store = db.history_store()
+    stored_at_done = None
+
+    for name, _ in runtime.stream(
+        source=FileSystemReportSource(report_root=reports_root),
+        can_read=lambda dag, u: True,
+        user={"id": 42},
+        query=AssistantQuery(question="почему упал тест?", conversation="main"),
+    ):
+        if name == "done":
+            # A browser reacts here: it renders the answer and may refetch the chat list
+            # before the generator is ever resumed.
+            stored_at_done = store.load("id:42", limit=10, conversation="main")
+
+    assert stored_at_done is not None, "the stream never reported completion"
+    assert len(stored_at_done) == 2, stored_at_done

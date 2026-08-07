@@ -42,12 +42,98 @@ _HEADING = re.compile(r"^(#{1,4})\s+(.+?)\s*$", re.M)
 _WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_]{2,}|[А-Яа-яЁё]{3,}")
 
 #: Words that appear in every question and would make everything look equally relevant.
+#: The second and third lines are function and quantity words. They carry no subject at
+#: all, yet in a manual of twenty sections a word like "two" or "between" occurs once and
+#: therefore looks *rare* -- which is how "what changed between the last two runs?" came
+#: to be judged a question about the documentation.
 _STOPWORDS = frozenset(
     """
     the and for are with that this what which how why when does can from you your
+    between last next two three both other another same than then there their them
+    these those here also only just very much many more most few own per via about
     как что где для чтобы если это или так тебя ваши какие есть быть
+    этому этот эта эти вчера сегодня сейчас ещё уже очень свой свои него нему тот
     """.split()
 )
+
+
+#: A domain glossary, not a translator. Matching is lexical, so a Russian question and an
+#: English manual -- which is the normal case, since the operator's own documentation is
+#: written in English -- shared no term at all: "как запустить первый тест?" scored zero
+#: against "Running your first test" and the reader was sent to read the manual they had
+#: already been given. Keys are stems, because Russian inflects and the words that matter
+#: here are few enough to list. Used in both directions.
+_GLOSSARY: dict[str, tuple[str, ...]] = {
+    "запуск": ("run", "running", "start", "execute"),
+    "запуст": ("run", "running", "start", "execute"),
+    "старт": ("start", "run"),
+    "тест": ("test", "tests", "pytest"),
+    "параметр": ("parameter", "parameters", "option", "options", "argument"),
+    "аргумент": ("argument", "arguments", "parameter"),
+    "настро": ("configure", "configuration", "setup", "settings"),
+    "установ": ("install", "installation", "setup"),
+    "конфиг": ("config", "configuration"),
+    "перемен": ("environment", "variable", "variables"),
+    "отчет": ("report", "reports"),
+    "отчёт": ("report", "reports"),
+    "ошибк": ("error", "errors"),
+    # "падение" is deliberately absent: what failed is a question for the reports, and
+    # bridging it to "failure" pulled the parameter table into every bug-report request.
+    "хран": ("stored", "storage", "store"),
+    "сохран": ("saved", "save", "stored", "storage"),
+    "чат": ("chat", "chats", "transcript"),
+    "пуст": ("empty",),
+    "удал": ("delete", "deleted", "remove"),
+    "прав": ("permission", "permissions", "access"),
+    "покрыти": ("coverage", "cov"),
+    "пример": ("example", "examples"),
+    "первый": ("first",),
+    "версия": ("version",),
+    "модел": ("model", "models"),
+    "провайдер": ("provider", "providers"),
+    "квота": ("quota", "limit"),
+    "лимит": ("limit", "limits", "quota", "rate"),
+    "токен": ("token", "tokens"),
+    "истори": ("history", "chat"),
+    "шифров": ("encryption", "encrypt", "fernet"),
+    "доступ": ("access", "permission", "permissions", "rbac"),
+    "база": ("database",),
+    "таблиц": ("table", "tables", "database"),
+    "логи": ("log", "logs"),
+    "длительн": ("duration", "time", "slow"),
+    # No "duration": it is a field of a report, not a subject of the manual, and it
+    # made "покажи самые медленные тесты" -- a question about runs -- look specific.
+    "медлен": ("slow", "slowest"),
+    "флак": ("flaky", "flake"),
+    "карантин": ("quarantine", "skip"),
+    "архив": ("archive", "archiving", "archived"),
+    "дашборд": ("dashboard", "viewer"),
+    "оператор": ("operator",),
+    "плагин": ("plugin",),
+}
+
+
+def _reverse_glossary() -> dict[str, tuple[str, ...]]:
+    """Return English term -> the Russian stems that mean it."""
+    reversed_map: dict[str, list[str]] = {}
+    for stem, english in _GLOSSARY.items():
+        for word in english:
+            reversed_map.setdefault(word, []).append(stem)
+    return {word: tuple(stems) for word, stems in reversed_map.items()}
+
+
+_GLOSSARY_EN = _reverse_glossary()
+
+
+def _bridge(terms: frozenset[str]) -> frozenset[str]:
+    """Return ``terms`` plus their counterparts in the other interface language."""
+    extra: set[str] = set()
+    for term in terms:
+        for stem, english in _GLOSSARY.items():
+            if term.startswith(stem):
+                extra.update(english)
+        extra.update(_GLOSSARY_EN.get(term, ()))
+    return terms | extra
 
 
 @dataclass(frozen=True)
@@ -83,12 +169,15 @@ class DocumentationLibrary:
     #: not carried along with a good one.
     RELEVANCE_FLOOR = 0.35
 
-    #: ...and the best match itself has to be informative. A relative floor alone lets a
-    #: question the documentation does not answer through, because 35% of a weak score is
-    #: still weak. A term unique to one section is worth ``log(sections)``, so this asks
-    #: the best match to be most of the way there: below it, the question matched only
-    #: words the whole manual uses. Scaled by library size, because "specific" means
-    #: something different in a three-section file and a forty-section manual.
+    #: ...and the question has to have named something the manual uses *rarely*. The test
+    #: is the best single term it matched, not the sum: a sum grows with the number of
+    #: ordinary words in common, so "which tests failed in the last run?" -- every word of
+    #: which a testing manual uses constantly -- scored as highly as a question naming
+    #: ``coverage_source``. Raising the bar could not separate them, because the leak was
+    #: never a weak match; measured over both sets it only cost real answers. A term
+    #: unique to one section is worth ``log(sections)``, so this asks for one term most of
+    #: the way there. Scaled by library size, because "rare" means something different in
+    #: a three-section file and a forty-section manual.
     MIN_RELEVANCE_SHARE = 0.6
 
     sections: tuple[DocSection, ...] = ()
@@ -120,11 +209,13 @@ class DocumentationLibrary:
         """
         if budget <= 0 or not self.sections:
             return ""
-        wanted = _terms(question)
+        # Bridged across the two interface languages before scoring, so the manual is
+        # found by the words its reader actually typed.
+        wanted = _bridge(_terms(question))
         if not wanted:
             return ""
         total = len(self.sections)
-        scored: list[tuple[float, int, DocSection]] = []
+        scored: list[tuple[float, int, DocSection, float]] = []
         for section in self.sections:
             overlap = wanted & section.terms
             if not overlap:
@@ -132,27 +223,38 @@ class DocumentationLibrary:
             # Smoothed, so the weight stays positive when a term appears in every
             # section: a one-section file would otherwise score every match at zero and
             # send nothing at all.
-            weight = sum(
+            weights = [
                 math.log((total + 1) / (self.frequency.get(term, 1) + 0.5))
                 for term in overlap
-            )
+            ]
+            weight = sum(weights)
             if weight <= 0:
                 continue
             size = max(1, len(section.text))
-            scored.append((weight, size, section))
+            scored.append((weight, size, section, max(weights)))
         if not scored:
             return ""
         scored.sort(key=lambda item: (-item[0], item[1]))
-        specific = 0.0 if forced else math.log(max(2, total)) * self.MIN_RELEVANCE_SHARE
-        if scored[0][0] < specific:
-            # The question shares only common words with the manual: it is about the
-            # user's own runs, or about something the documentation does not cover.
+        # A fraction of the *most* a term could be worth here, not of the library size:
+        # scaled by log(total) instead, a one-section file set a bar no term in it could
+        # clear -- every term appears in every section -- and a small hand-written manual
+        # answered nothing at all.
+        rarest_possible = math.log((total + 1) / 1.5)
+        specific = 0.0 if forced else rarest_possible * self.MIN_RELEVANCE_SHARE
+        # Applied per section rather than once to the best one. A question that clears the
+        # bar somewhere does not thereby earn every section it shares an ordinary word
+        # with: judged globally, "which tests failed in the last run?" arrived with five
+        # sections and 3.4 KiB of manual attached to it.
+        scored = [item for item in scored if item[3] >= specific]
+        if not scored:
+            # Nothing rare was named: the question shares only words the whole manual
+            # uses, so it is about the user's own runs or about something not covered.
             return ""
-        floor = max(scored[0][0] * self.RELEVANCE_FLOOR, specific)
+        floor = scored[0][0] * self.RELEVANCE_FLOOR
 
         chosen: list[str] = []
         spent = 0
-        for weight, _, section in scored:
+        for weight, _, section, _rarest in scored:
             if weight < floor:
                 break
             block = section.text
@@ -162,6 +264,19 @@ class DocumentationLibrary:
             chosen.append(block)
             spent += cost
         return "\n\n".join(chosen)
+
+
+#: Shipped with the package, so `/docs` answers "how do I run my first test?" on a fresh
+#: install. It documents *this* product -- the two packages, the parser's parameters, the
+#: dashboard, retention and the things that go wrong -- which is exactly the part no
+#: deployment can be expected to write and no model should recall from memory.
+#: ``manual`` rather than ``docs``: a package directory beside ``docs.py`` would shadow it.
+BUILTIN_MANUAL = Path(__file__).parent / "manual"
+
+
+def builtin_paths() -> tuple[str, ...]:
+    """Return the shipped manual, or nothing when it is missing from the install."""
+    return (str(BUILTIN_MANUAL),) if BUILTIN_MANUAL.is_dir() else ()
 
 
 def load_documentation(paths: tuple[str, ...]) -> DocumentationLibrary:
