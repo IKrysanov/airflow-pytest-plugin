@@ -228,6 +228,9 @@ runtime. Endpoints (relative to the mount):
 | `GET /api/reports/{report_id}/allure.zip` | raw Allure results as a zip (if any) |
 | `GET /api/assistant/status` | whether report chat is configured; does not load either model |
 | `POST /api/assistant/query` | answer from an RBAC-filtered, bounded report snapshot |
+| `POST /api/assistant/stream` | the same answer as Server-Sent Events, token by token |
+| `GET`/`DELETE`/`PATCH /api/assistant/history` | the caller's stored chats: read, clear, rename (their own only) |
+| `POST /api/assistant/health` | one fixed probe proving the configured models answer (opt-in; billable) |
 | `GET /api/health` | liveness + readiness: `status`, `ready`, `reports_root`(+`_exists`), `auth`, `secure_xml` |
 | `GET /api/version` | `{"name": ..., "version": ...}` from package metadata |
 | `GET /api/metrics` | Prometheus exposition — opt-in, bearer-token (see [Prometheus metrics](#prometheus-metrics)) |
@@ -484,8 +487,10 @@ adds the per-test judgements.
 An **AI assistant** button on the dashboard answers questions about the reports you are
 looking at. Every request repeats Airflow's DAG read checks on the server, so an answer can
 only be built from reports you may already open. Answers stream, cite the runs they used, and
-show exactly what was sent and what it cost. It also knows what this product is, can quote
-documentation you mount for it, and will write pytest when you ask.
+show exactly what was sent and what it cost. Type `/` for commands (`/bug`, `/flaky`,
+`/priority`, `/compare`, `/test`, `/docs`). It ships with a manual of this product, so it can
+answer "how do I run my first test?" out of the box — point it at your own manuals to replace
+that — and it will write pytest when you ask.
 
 It is **off until you configure a provider** — with none set there is no button, no client
 code in the page and no `/api/assistant/*` routes at all.

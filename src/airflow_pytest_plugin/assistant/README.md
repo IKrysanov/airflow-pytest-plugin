@@ -156,14 +156,29 @@ belongs — after the install, before Airflow starts. It is idempotent, so it ca
         condition: service_healthy      # the database must accept connections first
     command: >
       bash -c "
-        pip install -e /opt/airflow-lib/airflow_pytest_plugin[dev,assistant-anthropic] &&
+        pip install -e /opt/airflow-lib/airflow_pytest_plugin[assistant-anthropic] &&
         python -m airflow_pytest_plugin.db upgrade &&
         exec airflow standalone
       "
 ```
 
-Skipping it breaks nothing: the quota falls back to a per-process counter and chats stay in the
-browser. `GET /api/assistant/status` reports `"quota_shared"` so you can tell which you have.
+**Install only the extra you need — never `[dev]` in a running container.** `dev` exists to run
+*this repository's* test suite: it adds pytest, mypy, ruff, coverage, allure-pytest and, more
+expensively, floors on `sqlalchemy`, `cryptography` and `fastapi`. Those three are packages
+Airflow itself pins, so pip has to reconcile the two — 43 packages instead of 18, and a
+resolver that can backtrack for minutes inside an Airflow image on every container start.
+
+If the install is still slow, hand pip the Airflow constraints file for your version, which is
+what turns resolution into a lookup:
+
+```bash
+pip install -e /opt/airflow-lib/airflow_pytest_plugin[assistant-anthropic] \
+  --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-${AIRFLOW_VERSION}/constraints-${PYTHON_VERSION}.txt"
+```
+
+Skipping the table creation breaks nothing: the quota falls back to a per-process counter and
+chats stay in the browser. `GET /api/assistant/status` reports `"quota_shared"` so you can tell
+which you have.
 
 ## What the model is given
 
@@ -174,15 +189,37 @@ Two modes, chosen by whether a local GGUF reducer is configured.
 | Scope read | newest 100 run summaries, then failure detail while the budget lasts | every report and every case in scope |
 | Evidence sent | compact JSON Lines, one strict 48 KiB budget for the whole request | facts merged by an in-process GGUF, then sent |
 | Costs | one provider call | one provider call **plus** API-server RAM, CPU and latency |
-| Fidelity | exact, by construction | lossy — the reducer paraphrases |
+| Fidelity | exact, by construction | lossy for prose, exact for facts — see below |
+
+**There is no way to switch the budget off.** `AIRFLOW_PYTEST_ASSISTANT_CONTEXT_BYTES`
+accepts 4 KiB–256 KiB and anything larger is clamped to 256 KiB; `0` is *not* "unlimited"
+here and falls back to the default, which the API server now says in its log rather than
+doing quietly. The ceiling is deliberate: the provider has its own context limit, and one
+question over a large archive would otherwise cost more than the answer is worth. Raising
+every related knob to its maximum (256 KiB context, 1000 summaries, 64 KiB traceback and
+capture) sends about 254 KiB — roughly 65 000 tokens per question — and a 3.6 MiB archive is
+still marked context-limited, so the setting is not the way to remove that mark. Narrowing
+the scope is: select the runs you are asking about, or filter to one DAG and task, and the
+evidence for that question fits whole. Local mode reads the *entire* tree instead, so
+nothing is skipped for lack of room there.
 
 The 48 KiB is a budget for the *whole request*, not per report. Records are appended whole and
 collection stops when the next one will not fit; the answer is then marked context-limited
 rather than the request failing. Chat history is capped separately (12 messages, 16 KiB) and
-does not consume that budget. To reach older runs, narrow the filter or select rows explicitly.
+does not consume that budget. One question may be up to 4000 characters — the box stops there,
+and the API refuses more. To reach older runs, narrow the filter or select rows explicitly.
 
 Each question makes exactly one final provider call. Local map/reduce passes are in-process and
 are not network requests.
+
+**What the local mode guarantees.** The reducer is asked to extract rather than summarise, and
+a capable model obeys; the small ones that fit beside an API server often do not, and a
+paraphrase is indistinguishable from an archive with nothing in it. So the facts do not depend
+on it: each chunk states its runs and its failures as machine-written records, and when the
+model's output does not name them they are restored from the chunk verbatim — run id, node id,
+outcome and the error line, with the report label attached. Measured against a live provider on
+the same archive, that is the difference between eight and twelve of twelve questions answered
+with a 0.5B reducer. What the model still decides is which *prose* is worth carrying.
 
 <details id="optional-local-context-model">
 <summary><strong>Optional local context model</strong> — full tree, at a real cost</summary>

@@ -5,162 +5,92 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.8.0] - 2026-08-...
 
 ### Added
 
-- **Read-only report assistant.** The **AI assistant** button opens a centered, resizable chat
-  window on the main dashboard and answers from the selected runs or current filters. Its
-  per-user size and same-tab open state survive a refresh. The API server builds a bounded
-  report snapshot,
-  re-checks Airflow read permission for every DAG, and returns clickable `[R1]` evidence
-  links. The current tab retains its bounded history across refreshes in `sessionStorage`;
-  histories are separated by an opaque Airflow-user namespace and nothing is stored on the
-  server. Assistant replies render a safe Markdown subset. Anthropic, OpenAI-compatible,
-  GigaChat and an offline fake provider are supported through new API-server extras and
-  environment settings.
+- **Read-only report assistant.** The **AI assistant** button opens a resizable chat window
+  over the dashboard and answers from the selected runs, or from the current filters when
+  nothing is selected. Every request re-checks Airflow's DAG read permission on the server,
+  so an answer can only be built from reports the asking user may already open, and each
+  answer carries clickable `[R1]` evidence links back to the runs it used. Answers stream
+  token by token and **Send** becomes **Stop** while one is being written: stopping keeps the
+  partial text, marks it incomplete and frees the model slot at once. Each answer shows the
+  exact bytes and provider tokens it cost, and **Context overview** opens the precise
+  evidence block that was sent. Anthropic, OpenAI-compatible, GigaChat and an offline `fake`
+  provider are supported through per-provider extras; with no provider configured there is
+  no button, no client code and no `/api/assistant/*` routes at all.
+- **Slash commands.** Typing `/` offers `/bug`, `/flaky`, `/priority`, `/compare`, `/test`
+  and `/docs`; picking one selects that skill outright instead of guessing from the wording.
+  Each skill is a Markdown file in `assistant/prompts/`, sent only when the question calls
+  for it, so an ordinary question does not pay for instructions it does not need.
+- **A product manual ships with the plugin**, so `/docs` answers "how do I run my first
+  test?" on a fresh install: the first run, every `ArchivingResultParser` parameter, the
+  dashboard, retention and what to do when reports or chats do not appear.
+  `AIRFLOW_PYTEST_ASSISTANT_DOCS` replaces it with your own manuals and
+  `AIRFLOW_PYTEST_ASSISTANT_DOCS_BUILTIN=0` removes it. Only the sections a question matches
+  are sent, and a small domain glossary bridges the two interface languages, so a Russian
+  question finds an English manual.
 - **Optional in-process context reducer.** A GGUF model loaded by `llama-cpp-python` inside
-  the API server now processes the complete authorized tree in bounded chunks: every run
-  summary and every test case, with failure traceback, captured output and triage details.
-  Chunk summaries are merged hierarchically before the final provider call. It is lazy,
-  concurrency-bounded and optional; without it the deterministic bounded context is sent
-  directly.
-- New API methods: `GET /api/assistant/status`, `POST /api/assistant/query` and
-  `POST /api/assistant/stream`.
+  the API server processes the complete authorized tree in bounded chunks — every run
+  summary and test case, with traceback, captured output and triage details — and merges the
+  results hierarchically before the final provider call.
+  `AIRFLOW_PYTEST_ASSISTANT_LOCAL_BUDGET_SECONDS` (default 120) bounds the wall clock one
+  request may spend there; past it the facts already extracted still reach the provider and
+  the answer is marked context-limited. Without a local model the deterministic bounded
+  context is sent directly.
+- **The plugin's own tables, in Airflow's metadata database.**
+  `python -m airflow_pytest_plugin.db upgrade` creates and migrates them, `status` and
+  `doctor` report what is configured and what is wrong. They use the plugin's own SQLAlchemy
+  metadata and a `pytest_assistant_` prefix, so `airflow db` never sees them. The database is
+  chosen in order of explicitness: `AIRFLOW_PYTEST_ASSISTANT_DB_URL`, then
+  `AIRFLOW_PYTEST_ASSISTANT_DB_CONN_ID` (so credentials stay in the secrets backend), then
+  Airflow's own. Everything degrades gracefully: with no database, no SQLAlchemy or tables
+  not yet created, the assistant keeps its in-process behaviour.
+- **Server-side chat history, encrypted at rest.** With the tables in place a completed
+  exchange is stored for the asking user, so a chat survives a closed tab and follows them to
+  another browser; the **Chats** window lists, renames and deletes them. Message text and
+  chat names are encrypted with the same Fernet key Airflow uses for connection passwords,
+  and key rotation works the same way. Only the question, the answer, its evidence links and
+  token usage are written — the evidence block, with its tracebacks and captured output,
+  never is. Every read, write and delete is filtered by the acting principal, which is the
+  account's primary key rather than a username, so renaming a user keeps their chats and
+  re-creating a deleted account under the same name inherits none. Chats expire after
+  `AIRFLOW_PYTEST_ASSISTANT_HISTORY_DAYS` (default 30, `0` stores nothing).
+- **Shared per-principal rate limit and daily token quota.**
+  `AIRFLOW_PYTEST_ASSISTANT_RATE_LIMIT` (default 60/hour) bounds how often one user may ask
+  and `AIRFLOW_PYTEST_ASSISTANT_DAILY_TOKEN_QUOTA` (off by default) bounds what they may
+  spend per UTC day. With the tables both are shared across workers and restarts instead of
+  being per process; `GET /api/assistant/status` reports `quota_shared` and `rate_shared` so
+  you can tell which you have. A refused request answers `429` with `Retry-After` before
+  reaching any model, so it costs nothing.
 - **Provider readiness check.** `POST /api/assistant/health` sends one fixed probe with no
   report data and reports whether the configured provider — and the local GGUF, when one is
   configured — actually answers. Off unless `AIRFLOW_PYTEST_ASSISTANT_HEALTHCHECK` is set,
   since the probe is a billable call; the result is cached for 60 seconds and takes the same
   model slot as a question, so polling cannot multiply cost or race a paying request.
-- **Streamed answers and a Stop button.** The chat consumes `POST /api/assistant/stream` as
-  Server-Sent Events: one `meta` event with the exact provider input, `delta` events as the
-  answer is written, and one `done` event with evidence, token usage and truncation flags.
-  The Anthropic, OpenAI-compatible and GigaChat adapters stream natively; a provider without
-  incremental output still works and delivers its answer as a single delta. While an answer
-  is arriving, **Send** becomes **Stop**: it aborts the request, keeps the partial text,
-  marks it incomplete and releases the model slot immediately. A provider that fails midway
-  keeps its partial answer with the reason beside it instead of replacing it with an error.
-- **The plugin's own tables, in Airflow's metadata database.**
-  `python -m airflow_pytest_plugin.db upgrade` creates them; `status` reports what is
-  configured. They use the plugin's own SQLAlchemy metadata and a `pytest_assistant_` prefix,
-  so they are never registered with Airflow's ORM and `airflow db` never sees them.
-  The database is chosen in order of explicitness: `AIRFLOW_PYTEST_ASSISTANT_DB_URL` (a
-  literal SQLAlchemy URL), then `AIRFLOW_PYTEST_ASSISTANT_DB_CONN_ID` (an Airflow connection,
-  so credentials stay in the configured secrets backend), then Airflow's own metadata
-  database. It may be remote and entirely separate from Airflow's. A connection id that
-  cannot be resolved is reported rather than silently falling back. Everything degrades
-  gracefully: with no database, no SQLAlchemy, or tables not yet created, the assistant keeps
-  working with its previous in-process behaviour.
-- **The daily token quota is now shared across workers and restarts** when those tables
-  exist, via an atomic per-(principal, UTC day) row. In memory it was per process, so N
-  workers meant N times the allowance and a deploy reset it — it was a guard rail, not a
-  budget. `GET /api/assistant/status` reports `quota_shared` so you can tell which you have.
-- **Server-side chat history.** With the plugin's tables in place a completed exchange is
-  stored for the asking user, so the chat survives closing the tab and follows them to
-  another browser; `GET`/`DELETE /api/assistant/history` read and clear it, and **Clear chat**
-  now removes the stored copy too. Only the question, the answer, its `[R1]` evidence links
-  and token usage are written — the `REPORT EVIDENCE` block, with its tracebacks and captured
-  output, never is. Every read, write and delete is filtered by the acting principal, and a
-  principal the auth manager cannot identify gets no server-side history at all, because
-  several real users can collapse onto one unknown identity. Chats expire after
-  `AIRFLOW_PYTEST_ASSISTANT_HISTORY_DAYS` (default 30, `0` stores nothing);
-  `python -m airflow_pytest_plugin.db purge` forces the sweep.
-- **Per-principal rate limit and daily token quota.**
-  `AIRFLOW_PYTEST_ASSISTANT_RATE_LIMIT` (default 60 per hour) bounds how often one Airflow
-  user may ask, and `AIRFLOW_PYTEST_ASSISTANT_DAILY_TOKEN_QUOTA` (off by default) bounds what
-  they may spend per UTC day. The budget is checked before the model slot is taken and
-  charged from provider-reported usage afterwards, so a refused request costs nothing, never
-  displaces a paying one, and answers `429` with `Retry-After`. Enforcement is per
-  API-server process; an ingress limiter is still the right answer for a hard multi-tenant
-  guarantee.
 - **Assistant audit log.** One JSON record per request on the
   `airflow_pytest_plugin.assistant.audit` logger: principal, outcome, mode, provider/model,
-  the DAGs whose report data left the server, token cost and latency. It carries no report
-  content and no question text — the question is identified by a truncated digest. On by
-  default; `AIRFLOW_PYTEST_ASSISTANT_AUDIT_LOG=0` silences it.
-- **Answer-quality regression corpus.** `tests/assistant_quality.py` fixes a set of report
-  trees to the facts an answer needs (node ids, counts, error strings) and gates the
-  deterministic path in CI. `scripts/grade_reducer.py` runs the same corpus through a real
-  GGUF and reports what fraction of those facts survived, which is how a candidate local
-  model can be compared against another — and against direct mode, which scores 100%.
-- **Assistant cost metrics.** When the assistant is configured, `GET /api/metrics` also
-  exposes `airflow_pytest_assistant_requests_total{mode,outcome}`,
+  the DAGs whose report data left the server, token cost and latency. No report content and
+  no question text — the question is identified by a truncated digest. On by default;
+  `AIRFLOW_PYTEST_ASSISTANT_AUDIT_LOG=0` silences it.
+- **Assistant cost metrics** on `GET /api/metrics` when the assistant is configured:
+  `airflow_pytest_assistant_requests_total{mode,outcome}`,
   `airflow_pytest_assistant_provider_tokens_total{kind}`,
   `airflow_pytest_assistant_provider_seconds_total`, the
   `local_reduce_calls`/`reports_considered`/`context_limited`/`output_limited` counters and
-  the `enabled`/`in_flight` gauges. They are per process and carry no question, report or
-  user — only cost and health.
-- `AIRFLOW_PYTEST_ASSISTANT_LOCAL_BUDGET_SECONDS` (default `120`, range 5–3600) bounds the wall
-  clock one request may spend in the local reducer. A synchronous llama.cpp call cannot be
-  interrupted and the request holds the process's only assistant slot, so a large tree could
-  previously monopolize the assistant for as long as it took to map every chunk. Past the
-  budget the remaining chunks are skipped, the already-reduced facts still reach the provider,
-  and the answer is marked as context-limited.
-
-### Changed
-
-- Assistant answer providers now live in `assistant/providers/` — one module per SDK, each
-  importing its vendor library lazily, so one provider extra never drags in another's
-  dependency, and context reducers in `assistant/reducers/` — the split is the difference in
-  role, not vendor: a provider writes the answer a person reads, a reducer only decides which
-  facts are worth sending. `llama_cpp` stays lazily imported, so neither package costs
-  anything on a deployment that did not configure it. Common contracts, exceptions, context collection, prompts, settings and
-  runtime orchestration remain separated as before.
-- API-server assistant extras now depend directly on their provider SDKs. Secret redaction
-  is owned by the assistant package, so only worker-side triage extras install `pytest-triage`.
-- The assistant scope now updates immediately when report or group checkboxes change. It
-  shows a compact selected-run count and opens the full selection in a dedicated list.
-- Assistant controls follow Airflow language changes without reloading the plugin page.
-- Assistant Markdown tables stay inside a horizontally scrollable answer region, and loading
-  is shown as a compact three-dot bubble.
-- Chat context now keeps up to six complete exchanges under one 16 KB budget, and explicit
-  selection accepts up to 100 runs. The direct path keeps the 100-summary and total-byte
-  limits, but no longer drops details at fixed eight-run / 12-failure boundaries; failure
-  details are added newest-first while they fit. The local-model path has no tree-count
-  cut-off for filter-based scopes.
-- Completed answers show provider-reported input, output and total token usage when available.
-  The context-limited warning now means that a report or failure record was actually omitted
-  by the shared budget; clipping one traceback or captured-output field to its documented cap
-  no longer raises that warning.
-- The guide now includes a complete API-server installation example for the local reducer,
-  including downloading a small GGUF file and mounting it in Docker or Kubernetes.
-- A long assistant answer no longer breaks the next question. The browser replays the
-  transcript, so one reply longer than the per-turn prompt clip used to fail schema
-  validation and leave the chat unusable until it was cleared. The browser now trims each
-  replayed turn to the advertised limit, the wire contract accepts a full replayed answer,
-  and `GET /api/assistant/status` publishes `max_history_chars` and `max_history_bytes`.
-- The question bubble's byte breakdown is readable on its own fill: a rule separates it from
-  the question, every value sits in an outlined pill at full text contrast, and **Context
-  overview** is a real bordered button with an icon instead of plain bold text. When a scope
-  has no readable reports, the bubble says that nothing was sent instead of rendering six
-  rows of `0 B`, and the empty-scope reply follows the dashboard language rather than being
-  guessed from the question.
-- The assistant window always names its scope, including the unfiltered default.
-- Secret redaction no longer removes ordinary identifiers. A long alphanumeric run is treated
-  as an opaque credential only when it does not read as concatenated words, so class names
-  such as `TestReportArchiveIntegration` survive in evidence and in the user's own question.
-  Environment-derived secrets are compiled once per request instead of being re-derived for
-  every redacted field, which was ~97% of redaction cost on a full-tree request.
+  the `enabled`/`in_flight` gauges. Per process, and carrying no question, report or user.
+- New API methods: `GET /api/assistant/status`, `POST /api/assistant/query`,
+  `POST /api/assistant/stream`, `GET`/`DELETE`/`PATCH /api/assistant/history` and
+  `POST /api/assistant/health`.
+- **Answer-quality regression corpus.** `tests/assistant_quality.py` fixes a set of report
+  trees to the facts an answer needs (node ids, counts, error strings) and gates the
+  deterministic path in CI. `scripts/grade_reducer.py` runs the same corpus through a real
+  GGUF and reports what fraction of those facts survived, which is how one candidate local
+  model is compared against another — and against direct mode, which scores 100%.
 
 ### Fixed
 
-- The local reducer prompt now extracts rather than summarizes. Graded against the new
-  quality corpus, the summarizing prompt made every model paraphrase away the identifiers
-  and counts the final model has to cite; larger models scored *worse* because they
-  paraphrase more confidently. Rewriting it to "copy identifiers, counts and error strings
-  verbatim" raised fact retention on Qwen2.5-1.5B from 29% to 76% with no other change.
-- `[R<n>]` citations survive local reduction. Small GGUF models routinely ignore the
-  instruction to keep the labels, which left the final provider unable to cite anything and
-  made the evidence buttons fall back to arbitrary reports. When a partial drops every label
-  its chunk contained, the labels are restored deterministically; a model that kept any label
-  is left alone.
-- A local model that cannot summarize is no longer presented as a grounded answer. Measured
-  with Qwen2.5-0.5B-Instruct, which replies to a 9 KiB chunk with one to fifteen bytes
-  (`"4"`); the request completed and that became the whole `REPORT EVIDENCE`. Reductions
-  that mostly produce tiny, citation-free output now mark the answer as context-limited.
-- `mypy` no longer fails when the optional `assistant-local` extra is installed: its
-  `llama-cpp-python`/`numpy` stubs target newer Pythons than this package's floor and are
-  now skipped rather than followed.
 - The request body-limit middleware answered every `receive()` after the buffered body with
   a synthetic `http.disconnect`. Starlette read that as a client that had already gone and
   cancelled any streaming response on a guarded path before its first byte. It now defers to
@@ -168,12 +98,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Report text is treated as untrusted prompt data throughout, and free text archived from a
+  run — a traceback or captured stdout — is fenced line by line where it is embedded in the
+  evidence, so a test that prints something shaped like the evidence format cannot forge a
+  test result that never happened.
 - Assistant answer text can never forge a Server-Sent Event: each payload is JSON on one
   `data:` line, so newlines from a model or a traceback stay inside the string.
 - Assistant requests never bypass report RBAC; they cap request, history, explicit scope,
-  traceback, captured-output and response sizes, redact known secrets, and treat report text
-  as untrusted prompt data. Tracebacks and bounded captured output from failed/errored tests
-  do leave the server when a remote provider is enabled.
+  traceback, captured-output and response sizes, and redact known secrets and values taken
+  from the server environment. Tracebacks and bounded captured output from failed tests do
+  leave the server when a remote provider is enabled.
 
 ## [0.7.0] - 2026-07-31
 

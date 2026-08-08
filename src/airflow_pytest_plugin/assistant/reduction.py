@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from collections.abc import Callable, Generator, Iterable
@@ -36,6 +37,27 @@ _CITATION = re.compile(r"\[R[1-9][0-9]*\]")
 #: paid provider to reason from nothing. A partial that kept a citation is never counted:
 #: the model demonstrably followed the labelling instruction, however terse it was.
 _MIN_USEFUL_PARTIAL_BYTES = 32
+
+#: A raw chunk states each case as one machine-written JSON line, so what a chunk contains
+#: is known exactly rather than inferred. These read it back.
+_CASE_LINE = re.compile(r"^CASE (\{.*\})$", re.M)
+_RUN_LINE = re.compile(r"^RUN (\[R[1-9][0-9]*\]) (\{.*\})$", re.M)
+#: The body is fenced line by line by the chunk producer, so it ends at the first line
+#: that is not fenced -- which no amount of test output can forge.
+_TRACEBACK_BLOCK = re.compile(
+    r"^TRACEBACK (R[1-9][0-9]*:C[0-9]+)\n((?:\| .*\n?)*)",
+    re.M,
+)
+
+#: Restored failures per chunk, and how much of one error message is kept. Enough to name
+#: and group real failures; not so much that a chunk full of them becomes the whole budget.
+_MAX_RESTORED_FAILURES = 40
+_MAX_RESTORED_ERROR_CHARS = 200
+
+#: Below this share of the chunk's failures being named in the model's own output, the
+#: output is treated as a paraphrase and the failures are restored. Not zero: a model that
+#: kept most of them made an editorial choice about the rest, which is what it is for.
+_MIN_NAMED_SHARE = 0.5
 _GROUP_HEADER = (
     "These are partial summaries of disjoint parts of one report tree. Merge them "
     "without answering the user. Preserve useful [R<n>] citations and cross-run trends."
@@ -221,7 +243,8 @@ def _reduce(reducer: ContextReducer, question: str, context: str) -> tuple[str, 
     if not result:
         raise RuntimeError("the local context model returned an empty summary")
     cleaned = redact_text(result)
-    return _keep_citations(cleaned, context), cleaned
+    kept = _keep_runs(_keep_citations(cleaned, context), context)
+    return _keep_failures(kept, context), cleaned
 
 
 def _is_useless(model_output: str) -> bool:
@@ -245,6 +268,102 @@ def _keep_citations(summary: str, context: str) -> str:
     if not labels:
         return summary
     return f"{' '.join(labels)} — facts below come from these reports.\n{summary}"
+
+
+def _chunk_failures(context: str) -> list[tuple[str, str, str, str]]:
+    """Return ``(label, node_id, outcome, error)`` for each failure a raw chunk states."""
+    errors: dict[str, str] = {}
+    for key, body in _TRACEBACK_BLOCK.findall(context):
+        lines = (line[len("| ") :] for line in body.splitlines())
+        first = next((line for line in lines if line.strip()), "")
+        errors[key] = first.strip()
+    failures: list[tuple[str, str, str, str]] = []
+    for raw in _CASE_LINE.findall(context):
+        try:
+            case = json.loads(raw)
+        except ValueError:  # pragma: no cover - a clipped chunk boundary
+            continue
+        if case.get("outcome") not in {"failed", "error"}:
+            continue
+        node_id = str(case.get("node_id") or "").strip()
+        if not node_id:
+            continue
+        failures.append(
+            (
+                f"[{case.get('report', '')}]",
+                node_id,
+                str(case.get("outcome")),
+                errors.get(str(case.get("case")), ""),
+            )
+        )
+    return failures
+
+
+def _chunk_runs(context: str) -> list[tuple[str, str]]:
+    """Return ``(run_id, one-line description)`` for each run a raw chunk states."""
+    runs: list[tuple[str, str]] = []
+    for label, raw in _RUN_LINE.findall(context):
+        try:
+            run = json.loads(raw)
+        except ValueError:  # pragma: no cover - a clipped chunk boundary
+            continue
+        run_id = str(run.get("run_id", "?"))
+        where = f"{run.get('dag_id', '?')}/{run_id}"
+        counts = " ".join(
+            f"{name}={run.get(name, 0)}"
+            for name in ("total", "passed", "failed", "errors", "skipped")
+        )
+        runs.append((run_id, f"{label} {where} {counts}"))
+    return runs
+
+
+def _keep_runs(summary: str, context: str) -> str:
+    """Restore which run each label is when the model's output does not say.
+
+    ``[R1]`` identifies a report to the citation machinery and means nothing to a reader:
+    asked what changed between runs, an answer could contrast R1 with R2 without ever
+    naming ``run_c``, which is the only part anyone can act on. One line per run, and only
+    when the model named none of them.
+    """
+    runs = _chunk_runs(context)
+    if not runs:
+        return summary
+    # Judged on the run id, which is what a reader would recognise -- and on what the
+    # model wrote, not on how this line happens to be formatted.
+    if any(run_id in summary for run_id, _ in runs):
+        return summary
+    return "\n".join([line for _, line in runs[:_MAX_RESTORED_FAILURES]] + [summary])
+
+
+def _keep_failures(summary: str, context: str) -> str:
+    """Restore the failures a chunk stated when the model's output does not name them.
+
+    The reducer prompt asks for extraction and a capable model obeys it. The models small
+    enough to run in-process beside an API server frequently do not: measured on
+    Qwen2.5-0.5B, a chunk naming two failing node ids, their outcomes and their error
+    messages came back as one sentence of prose, and the final answer was then "the
+    evidence contains no data about tests" -- true of what the model produced, false of
+    the archive it was given.
+
+    A summary is only a *loss* when the facts are gone, and the chunk's own CASE lines say
+    exactly what they were, so this is restoration rather than invention. A model that
+    named most of the failures is left alone: choosing which of forty to carry is the work
+    it is there to do.
+    """
+    failures = _chunk_failures(context)
+    if not failures:
+        return summary
+    named = sum(1 for _, node_id, _, _ in failures if node_id in summary)
+    if named >= len(failures) * _MIN_NAMED_SHARE:
+        return summary
+    lines = [
+        f"{label} {node_id} {outcome}"
+        + (f" - {clip_utf8(error, _MAX_RESTORED_ERROR_CHARS)}" if error else "")
+        for label, node_id, outcome, error in failures[:_MAX_RESTORED_FAILURES]
+    ]
+    if len(failures) > _MAX_RESTORED_FAILURES:
+        lines.append(f"...and {len(failures) - _MAX_RESTORED_FAILURES} more failures")
+    return "\n".join([*lines, summary])
 
 
 def _pack_partials(partials: list[str], max_bytes: int) -> tuple[list[str], bool]:

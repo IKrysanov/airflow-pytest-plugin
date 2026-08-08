@@ -132,6 +132,19 @@ _MAX_SLOWEST_CASES = 5
 _MAX_SLOWEST_TOTAL = 20
 
 
+#: Free text is prefixed line by line, so nothing inside it can be read back as one of
+#: this format's own records. A test's stdout is untrusted data that is archived verbatim,
+#: and a test that printed ``CASE {"node_id": ..., "outcome": "failed"}`` otherwise had
+#: that line parsed as a real result -- inventing a failure of a test that never ran and
+#: handing it to the answering model with a report label attached. One byte per line.
+_FENCE = "| "
+
+
+def _fenced(text: str) -> str:
+    """Return free text that cannot be mistaken for a structural line."""
+    return "\n".join(f"{_FENCE}{line}" for line in text.splitlines())
+
+
 def _json(value: dict[str, Any]) -> str:
     """Serialize a record whose string values were already redacted and bounded."""
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
@@ -232,9 +245,9 @@ class _CompleteChunkStream:
                     (traceback_truncated, captured_truncated)
                 )
                 if traceback:
-                    yield f"TRACEBACK {case_key}\n{traceback}"
+                    yield f"TRACEBACK {case_key}\n{_fenced(traceback)}"
                 if captured:
-                    yield f"CAPTURED OUTPUT {case_key}\n{captured}"
+                    yield f"CAPTURED OUTPUT {case_key}\n{_fenced(captured)}"
 
     def _render(self, chunk_number: int, records: list[str]) -> str:
         return f"{self._header}Chunk: {chunk_number}\n\n" + "\n".join(records)

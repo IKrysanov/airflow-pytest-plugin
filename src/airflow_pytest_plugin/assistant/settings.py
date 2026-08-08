@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from dataclasses import dataclass
@@ -39,6 +40,8 @@ RATE_LIMIT_ENV = "AIRFLOW_PYTEST_ASSISTANT_RATE_LIMIT"
 RATE_WINDOW_ENV = "AIRFLOW_PYTEST_ASSISTANT_RATE_WINDOW"
 DAILY_TOKEN_QUOTA_ENV = "AIRFLOW_PYTEST_ASSISTANT_DAILY_TOKEN_QUOTA"
 HISTORY_DAYS_ENV = "AIRFLOW_PYTEST_ASSISTANT_HISTORY_DAYS"
+
+_log = logging.getLogger(__name__)
 
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 _FALSE_VALUES = frozenset({"0", "false", "no", "off"})
@@ -126,8 +129,35 @@ def _bounded_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
     try:
         value = int(raw)
     except ValueError:
+        _log.warning("%s is not a number (%r); using %s", name, raw, default)
         return default
-    return _bound(value, default, minimum, maximum)
+    return _report(
+        name, value, _bound(value, default, minimum, maximum), minimum, maximum
+    )
+
+
+def _report(
+    name: str, asked: _Number, used: _Number, minimum: _Number, maximum: _Number
+) -> _Number:
+    """Say out loud when a setting was not taken at face value.
+
+    These are the knobs an operator reaches for when an answer says its context was
+    limited, and the range is not obvious from the outside. Silence made the worst case
+    invisible: elsewhere in this plugin ``0`` removes a limit -- ``MAX_REPORT_MIB=0``,
+    ``RATE_LIMIT=0`` -- so ``CONTEXT_BYTES=0`` is a reasonable thing to try, and it
+    quietly produced the same 48 KiB and the same truncation as before.
+    """
+    if asked == used:
+        return used
+    _log.warning(
+        "%s=%s is outside its range %s-%s; using %s",
+        name,
+        asked,
+        minimum,
+        maximum,
+        used,
+    )
+    return used
 
 
 def _bound(
@@ -160,10 +190,14 @@ def _bounded_float(
     try:
         value = float(raw)
     except ValueError:
+        _log.warning("%s is not a number (%r); using %s", name, raw, default)
         return default
     if value != value or value in (float("inf"), float("-inf")):
+        _log.warning("%s is not a finite number (%r); using %s", name, raw, default)
         return default
-    return _bound(value, default, minimum, maximum)
+    return _report(
+        name, value, _bound(value, default, minimum, maximum), minimum, maximum
+    )
 
 
 @dataclass(frozen=True)
