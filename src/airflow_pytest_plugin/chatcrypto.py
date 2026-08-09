@@ -68,9 +68,12 @@ UNREADABLE = "[unreadable: encrypted with a Fernet key this server does not have
 
 #: The cache is one (key, fernet) pair rather than two names, so a reader can never see a
 #: fernet paired with the key it was not built from. Every API-server worker encrypts on
-#: the request thread, so this is read concurrently on every stored answer.
+#: the request thread, so this is read concurrently on every stored answer. A key that
+#: could not be built caches ``None`` beside it: the answer for a malformed key is as
+#: stable as the answer for a good one, and rebuilding it per message meant a warning per
+#: message for as long as the mistake lasted.
 _cache_lock = threading.Lock()
-_cached: tuple[str, Any] | None = None
+_cached: tuple[str, Any | None] | None = None
 
 
 def _configured_key() -> str:
@@ -108,9 +111,11 @@ def _fernet() -> Any | None:
         built = MultiFernet([Fernet(part) for part in keys])
     except Exception as error:
         # A malformed key is the operator's to fix, but it must not take the assistant
-        # down: the transcript falls back to plain text and says so in the log.
+        # down: the transcript falls back to plain text and says so in the log. Cached
+        # like a success so the log says it once rather than once per stored message.
         _log.warning("assistant chat encryption is unavailable: %s", error)
-        _cached = None
+        with _cache_lock:
+            _cached = (key, None)
         return None
     with _cache_lock:
         _cached = (key, built)
@@ -151,30 +156,64 @@ def _is_token(value: str) -> bool:
     return len(raw) >= _TOKEN_BYTES and raw[0] == 0x80
 
 
-def decrypt(value: str | None) -> str:
-    """Return the plain text of a stored value, whether or not it was encrypted."""
+def read(value: str | None) -> tuple[str, bool]:
+    """Return the plain text of a stored value, and whether it could really be read.
+
+    The second half cannot be recovered from the first. :data:`UNREADABLE` is a
+    sentence, and a sentence is something a person can type: paste it into the chat to
+    ask what it means and the stored message decrypts to a string equal to it. A caller
+    that compares the returned text to the placeholder therefore cannot tell "this row
+    is lost" from "this row says so" -- and re-keying, which did exactly that, skipped
+    the row. It stayed under the old key while every other row moved across, and died
+    when the operator dropped that key.
+
+    Only the code that attempted the decryption knows which happened, so it says.
+    """
     if not value:
-        return value or ""
+        return value or "", True
     if not _is_token(value):
         # Written before this module existed, written with encryption switched off, or
         # simply a message that happens to start the way a token does.
-        return value
+        return value, True
     fernet = _fernet()
     if fernet is None:
-        return UNREADABLE
+        return UNREADABLE, False
     try:
         plain: bytes = fernet.decrypt(value.encode("ascii"))
-        return plain.decode("utf-8")
+        return plain.decode("utf-8"), True
     except Exception:
         # Either a key that was rotated away, or -- vanishingly unlikely -- a plain
         # string shaped exactly like a token. Neither is worth an exception that would
         # empty the reader's whole chat window.
-        return UNREADABLE
+        return UNREADABLE, False
+
+
+def decrypt(value: str | None) -> str:
+    """Return the plain text of a stored value, whether or not it was encrypted."""
+    return read(value)[0]
 
 
 def status() -> dict[str, Any]:
-    """Describe the current setting for the operator-facing status endpoint."""
-    return {"history_encrypted": enabled(), "fernet_key_configured": bool(_fernet())}
+    """Describe the current setting for the operator-facing status endpoint.
+
+    ``configured`` and ``usable`` are separate answers because they are separate
+    mistakes. A single field reported "is there a working Fernet", so an operator who
+    had set the variable and mistyped it was told the key was not configured -- the one
+    thing they knew they had done.
+    """
+    return {
+        "history_encrypted": enabled(),
+        "fernet_key_configured": bool(_configured_key()),
+        "fernet_key_usable": _fernet() is not None,
+    }
 
 
-__all__ = ["ENCRYPT_ENV", "UNREADABLE", "decrypt", "enabled", "encrypt", "status"]
+__all__ = [
+    "ENCRYPT_ENV",
+    "UNREADABLE",
+    "decrypt",
+    "enabled",
+    "encrypt",
+    "read",
+    "status",
+]

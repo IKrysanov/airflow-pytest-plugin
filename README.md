@@ -492,6 +492,8 @@ show exactly what was sent and what it cost. Type `/` for commands (`/bug`, `/fl
 answer "how do I run my first test?" out of the box — point it at your own manuals to replace
 that — and it will write pytest when you ask.
 
+![Pytest Reports — report assistant](https://raw.githubusercontent.com/IKrysanov/airflow-pytest-plugin/main/docs/screenshots/assistant.png)
+
 It is **off until you configure a provider** — with none set there is no button, no client
 code in the page and no `/api/assistant/*` routes at all.
 

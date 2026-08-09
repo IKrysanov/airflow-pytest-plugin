@@ -3213,3 +3213,38 @@ def test_every_control_stays_tappable_on_a_narrow_screen(assistant_dash, width):
 
     assert small == [], f"{width}px: {small}"
     assert assistant_dash.errors == []
+
+
+def test_the_chat_list_says_when_it_is_showing_only_the_newest(assistant_dash):
+    """Twenty rows and thirty-five chats must not read as "you have twenty chats".
+
+    A reader whose older conversation left the window otherwise cannot tell that from
+    having deleted it, and the summary line asserts the truncated length as the total.
+    """
+    page = assistant_dash.page
+    _server_history(
+        page,
+        {
+            "available": True,
+            "conversation": "c0",
+            "conversations": [
+                {
+                    "id": f"c{index}",
+                    "title": f"чат {index}",
+                    "messages": 2,
+                    "updated_at": "2026-08-06T10:00:00",
+                }
+                for index in range(20)
+            ],
+            "conversations_truncated": True,
+            "messages": [],
+        },
+    )
+    page.locator("#assistant-btn").click()
+    page.locator("#ast-chats").click()
+
+    expect(page.locator("#ast-chats-dialog-summary")).to_contain_text("20")
+    expect(page.locator("#ast-chats-dialog-summary")).not_to_contain_text(
+        "saved on the server"
+    )
+    assert assistant_dash.errors == []

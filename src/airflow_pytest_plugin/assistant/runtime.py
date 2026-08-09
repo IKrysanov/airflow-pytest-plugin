@@ -339,6 +339,7 @@ class AssistantRuntime:
                 "messages": [],
                 "conversation": None,
                 "conversations": [],
+                "conversations_truncated": False,
             }
         from .. import db
 
@@ -350,13 +351,21 @@ class AssistantRuntime:
                 "messages": [],
                 "conversation": None,
                 "conversations": [],
+                "conversations_truncated": False,
             }
-        chats = self._history.conversations(who, limit=db.MAX_CONVERSATIONS)
+        # One more than the window shows, so "there are older ones" is known without a
+        # second query. Past the limit the older chats are still stored and still
+        # readable by id -- they simply leave the list, and a reader whose chat vanished
+        # cannot otherwise tell that from having deleted it.
+        chats = self._history.conversations(who, limit=db.MAX_CONVERSATIONS + 1)
+        truncated = len(chats) > db.MAX_CONVERSATIONS
+        chats = chats[: db.MAX_CONVERSATIONS]
         current = wanted or (chats[0]["id"] if chats else None)
         return {
             "available": True,
             "conversation": current,
             "conversations": chats,
+            "conversations_truncated": truncated,
             "messages": (
                 self._filtered_history(
                     self._history.load(who, limit=limit, conversation=current),
@@ -428,6 +437,37 @@ class AssistantRuntime:
             messages=removed,
         )
         return removed
+
+    def _remember_partial(
+        self, user: Any, question: str, answer: str, conversation: str
+    ) -> None:
+        """Store an exchange whose answer was cut short by Stop or a lost connection.
+
+        No evidence and no token usage: the request never reached the point where either
+        was known. What it does have is the text the reader can see, and storing that is
+        the difference between a chat they can reopen and one that disappears on refresh.
+
+        Shaped exactly like a completed answer -- encodable, clipped, and *not* scrubbed.
+        The scrubber is prose-hostile on purpose, so running it here turned "send a
+        bearer token" into "send a bearer [REDACTED]" and the words changed under the
+        reader on the next reload, which is the one thing this method exists to prevent.
+        Nothing is lost by it: the model only ever saw redacted evidence and a redacted
+        question, so its output has no secret to remove.
+        """
+        if not self.history_enabled:
+            return
+        from .. import db
+
+        with environment_snapshot():
+            stored_question = redact_text(question)
+        self._history.append(
+            audit.principal(user),
+            stored_question,
+            clip_utf8(encodable(answer).strip(), MAX_ANSWER_BYTES),
+            [],
+            0,
+            conversation=db.clean_conversation(conversation),
+        )
 
     def _remember(
         self, user: Any, question: str, reply: AssistantReply, conversation: str
@@ -664,6 +704,10 @@ class AssistantRuntime:
         prepared: _PreparedRequest | None = None
         audit_reply: AssistantReply | None = None
         remembered = False
+        #: Deltas as they are produced. Read in the ``finally`` when the browser pressed
+        #: Stop: the window keeps the part that arrived, and the stored chat must match
+        #: what the reader is looking at.
+        written: list[str] = []
         outcome = "stopped"
         try:
             # Progress is yielded from inside the local phase, which also makes that
@@ -679,7 +723,9 @@ class AssistantRuntime:
             yield "meta", self._stream_meta(prepared)
             provider_started = time.monotonic()
             try:
-                text, usage, stop_reason, cut = yield from self._stream_answer(prepared)
+                text, usage, stop_reason, cut = yield from self._stream_answer(
+                    prepared, written
+                )
             except AssistantError:
                 raise
             except Exception as exc:
@@ -697,7 +743,11 @@ class AssistantRuntime:
             # else about this request can settle afterwards, but the transcript cannot:
             # a reader who opens the chat list -- or reloads -- in the moment the answer
             # appears would be shown a chat that does not have it yet.
-            if outcome == "answered":
+            # Whatever the scope held: an answer the user received is their chat. Keying
+            # this on "answered" meant a question asked with nothing in scope -- a fresh
+            # install, or a filter that matches nothing, which is exactly when someone
+            # asks what the product does -- was replied to and then lost completely.
+            if reply is not None:
                 self._remember(user, raw_question, reply, query.conversation)
                 remembered = True
             yield "done", reply.to_dict()
@@ -715,6 +765,16 @@ class AssistantRuntime:
                 self._record(
                     prepared, outcome, provider_seconds=time.monotonic() - started
                 )
+                # Stopped, or the connection went away, after some of the answer had
+                # been written. The reader still has that text on screen and the server
+                # copy wins on the next reload, so leaving it unstored deletes the
+                # exchange in front of them.
+                partial = "".join(written).strip()
+                if partial and not remembered:
+                    self._remember_partial(
+                        user, raw_question, partial, query.conversation
+                    )
+                    remembered = True
             self._audit(
                 prepared,
                 outcome,
@@ -729,13 +789,18 @@ class AssistantRuntime:
             self._slots.release()
 
     def _stream_answer(
-        self, prepared: _PreparedRequest
+        self, prepared: _PreparedRequest, written: list[str] | None = None
     ) -> Generator[
         tuple[str, dict[str, Any]],
         None,
         tuple[str, AssistantTokenUsage | None, str | None, bool],
     ]:
-        """Yield each ``delta``; return the answer, usage, stop reason and whether it was cut."""
+        """Yield each ``delta``; return the answer, usage, stop reason and whether it was cut.
+
+        ``written`` collects the pieces as they go. A cancelled generator never reaches
+        its ``return``, so without somewhere outside to put them the partial answer the
+        reader is looking at cannot be stored.
+        """
         provider = prepared.provider
         assert provider is not None
         stream = getattr(provider, "stream", None)
@@ -749,6 +814,8 @@ class AssistantRuntime:
             )
             if isinstance(response, AssistantProviderResponse):
                 if response.text:
+                    if written is not None:
+                        written.append(response.text)
                     yield "delta", {"text": encodable(response.text)}
                 return (
                     response.text,
@@ -757,10 +824,12 @@ class AssistantRuntime:
                     False,
                 )
             if response:
+                if written is not None:
+                    written.append(response)
                 yield "delta", {"text": encodable(response)}
             return response, None, None, False
 
-        parts: list[str] = []
+        parts: list[str] = written if written is not None else []
         size = 0
         usage: AssistantTokenUsage | None = None
         stop_reason: str | None = None
@@ -906,7 +975,9 @@ class AssistantRuntime:
         usage = reply.token_usage if reply is not None else None
         if reply is not None:
             self.limits.charge(audit.principal(user), self._billable(prepared, reply))
-        if reply is not None and outcome == "answered" and remember:
+        # A refused request (429, forbidden, provider failure) has no reply and is not a
+        # chat; anything that produced one is.
+        if reply is not None and remember:
             self._remember(user, question, reply, conversation)
         self._sweep()
         context = prepared.context if prepared is not None else None
@@ -1060,11 +1131,21 @@ class AssistantRuntime:
         provider, reducer = self._answer_model() if empty else self._models()
         reduction_truncated = False
         reduction_context_limited = False
+        # Chosen before the evidence block, because whether the manual answers this
+        # question decides what an *empty* scope should be described as.
+        documentation = self.documentation.select(
+            question, budget=self.docs_bytes, forced="docs" in commands
+        )
         if empty:
             # Which "no evidence" this is depends on what was asked: a question about the
-            # user's runs found nothing, while a request to write a test never needed a
-            # report at all and must not be answered with "widen your filters".
-            reduced = no_evidence_text(commands=commands, question=question)
+            # user's runs found nothing, while one the documentation answers -- or a
+            # request to write a test -- never needed a report at all and must not be
+            # answered with "widen your filters".
+            reduced = no_evidence_text(
+                commands=commands,
+                question=question,
+                has_documentation=bool(documentation),
+            )
             reducer = None
         elif self._context_model_name:
             assert reducer is not None
@@ -1097,9 +1178,6 @@ class AssistantRuntime:
                 reduced = redact_text(
                     reducer.reduce(question=question, context=context.text)
                 )
-        documentation = self.documentation.select(
-            question, budget=self.docs_bytes, forced="docs" in commands
-        )
         system = build_system_prompt(
             question, has_documentation=bool(documentation), commands=commands
         )

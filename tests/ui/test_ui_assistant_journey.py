@@ -223,3 +223,233 @@ def test_a_person_uses_the_assistant_end_to_end(live, page):
     assert not any("изменилось" in row for row in stored)
 
     assert errors == [], errors
+
+
+@pytest.mark.ui
+def test_deleting_a_chat_in_one_tab_closes_it_in_the_other(live, context):
+    """Two tabs, one account, one database -- and one of them holding a deleted chat.
+
+    Each tab keeps its own copy of the open transcript, which is what makes a refresh
+    instant. Nothing told the other tab the chat had been deleted, so it went on showing
+    a conversation that no longer existed anywhere, and sending into it silently created
+    it again under the same id.
+    """
+    base, _ = live
+    first = context.new_page()
+    second = context.new_page()
+    console: list[str] = []
+    second.on("pageerror", lambda error: console.append(f"pageerror: {error}"))
+    second.on(
+        "console",
+        lambda message: (
+            console.append(f"{message.type}: {message.text}")
+            if message.type == "error"
+            else None
+        ),
+    )
+    for page in (first, second):
+        page.goto(f"{base}/", wait_until="networkidle")
+        page.wait_for_selector("#assistant-btn:not([hidden])", timeout=20_000)
+        page.locator("#assistant-btn").click()
+        expect(page.locator("#assistant-dialog")).to_be_visible()
+
+    # A chat of its own: this module's other test leaves chats in the same database, and
+    # a reloaded tab opens the newest one.
+    first.locator("#ast-chats").click()
+    expect(first.locator("#ast-chats-dialog")).to_be_visible()
+    first.locator("#ast-chat-new").click()
+    expect(first.locator("#ast-chats-dialog")).to_be_hidden()
+
+    # Tab one asks something, so there is a stored chat to lose.
+    field = first.locator("#ast-question")
+    field.click()
+    field.fill("почему упал test_login?")
+    first.locator("#ast-send").click()
+    expect(first.locator(".ast-msg.assistant .ast-answer").last).to_contain_text(
+        "Offline assistant", timeout=30_000
+    )
+    expect(first.locator("#ast-stop")).to_be_hidden(timeout=30_000)
+
+    # Tab two opens that same chat deliberately -- a reload would restore whichever chat
+    # *it* was last reading, which is the behaviour a refresh is supposed to have.
+    second.reload(wait_until="networkidle")
+    second.wait_for_selector("#assistant-btn:not([hidden])", timeout=20_000)
+    second.locator("#ast-chats").click()
+    expect(second.locator("#ast-chats-dialog")).to_be_visible()
+    second.locator(".ast-chat-item").filter(
+        has_text="почему упал test_login?"
+    ).first.click()
+    expect(second.locator(".ast-msg.user").first).to_contain_text(
+        "почему упал test_login?", timeout=15_000
+    )
+
+    # Tab one deletes it.
+    first.locator("#ast-chats").click()
+    expect(first.locator("#ast-chats-dialog")).to_be_visible()
+    # By title, not by position: this module's other test leaves its own chats in the
+    # same database, and the newest is not necessarily ours.
+    row = (
+        first.locator(".ast-chat-row").filter(has_text="почему упал test_login?").first
+    )
+    row.locator(".ast-chat-delete").click()
+    row.locator(".ast-chat-confirm").click()
+    # Not "no messages": having deleted the chat it was reading, the window moves on to
+    # the next one, which has its own. What must be gone is *this* conversation.
+    expect(
+        first.locator(".ast-msg.user").filter(has_text="почему упал test_login?")
+    ).to_have_count(0, timeout=10_000)
+
+    # ...and the other tab, which was reading the same chat, must not still be showing it.
+    expect(
+        second.locator(".ast-msg.user").filter(has_text="почему упал test_login?")
+    ).to_have_count(0, timeout=10_000)
+    first.close()
+    second.close()
+
+
+@pytest.mark.ui
+def test_deleting_one_chat_leaves_a_tab_reading_another_alone(live, context):
+    """The other half of the cross-tab rule, and the way to get it wrong.
+
+    A notice that says "a chat was deleted" must name which one. Clearing every tab that
+    hears it would trade a stale transcript for a vanishing one, which is worse: the
+    reader loses a conversation that still exists.
+    """
+    base, _ = live
+    first = context.new_page()
+    second = context.new_page()
+    for page in (first, second):
+        page.goto(f"{base}/", wait_until="networkidle")
+        page.wait_for_selector("#assistant-btn:not([hidden])", timeout=20_000)
+        page.locator("#assistant-btn").click()
+        expect(page.locator("#assistant-dialog")).to_be_visible()
+
+    def fresh_chat(page, question):
+        page.locator("#ast-chats").click()
+        expect(page.locator("#ast-chats-dialog")).to_be_visible()
+        page.locator("#ast-chat-new").click()
+        expect(page.locator("#ast-chats-dialog")).to_be_hidden()
+        page.locator("#ast-question").click()
+        page.locator("#ast-question").fill(question)
+        page.locator("#ast-send").click()
+        expect(page.locator(".ast-msg.assistant .ast-answer").last).to_contain_text(
+            "Offline assistant", timeout=30_000
+        )
+        expect(page.locator("#ast-stop")).to_be_hidden(timeout=30_000)
+
+    fresh_chat(first, "вопрос из первой вкладки")
+    fresh_chat(second, "вопрос из второй вкладки")
+
+    row = first.locator(".ast-chat-row").filter(has_text="вопрос из первой вкладки")
+    first.locator("#ast-chats").click()
+    expect(first.locator("#ast-chats-dialog")).to_be_visible()
+    row.first.locator(".ast-chat-delete").click()
+    row.first.locator(".ast-chat-confirm").click()
+
+    expect(
+        first.locator(".ast-msg.user").filter(has_text="вопрос из первой вкладки")
+    ).to_have_count(0, timeout=10_000)
+    # The second tab was reading a different chat and keeps it.
+    expect(
+        second.locator(".ast-msg.user").filter(has_text="вопрос из второй вкладки")
+    ).to_have_count(1, timeout=10_000)
+    first.close()
+    second.close()
+
+
+@pytest.mark.ui
+def test_clearing_a_chat_in_one_tab_clears_it_in_the_other(live, context):
+    """Clear removes the server copy, so a tab still showing it is showing nothing real.
+
+    Same rule as deleting, reached by the other button, and worth its own test because
+    Clear keeps the chat id: the window that missed the notice would go on appending to
+    a conversation whose earlier turns no longer exist.
+    """
+    base, _ = live
+    first = context.new_page()
+    second = context.new_page()
+    for page in (first, second):
+        page.goto(f"{base}/", wait_until="networkidle")
+        page.wait_for_selector("#assistant-btn:not([hidden])", timeout=20_000)
+        page.locator("#assistant-btn").click()
+        expect(page.locator("#assistant-dialog")).to_be_visible()
+
+    first.locator("#ast-chats").click()
+    expect(first.locator("#ast-chats-dialog")).to_be_visible()
+    first.locator("#ast-chat-new").click()
+    expect(first.locator("#ast-chats-dialog")).to_be_hidden()
+    first.locator("#ast-question").click()
+    first.locator("#ast-question").fill("вопрос для очистки")
+    first.locator("#ast-send").click()
+    expect(first.locator(".ast-msg.assistant .ast-answer").last).to_contain_text(
+        "Offline assistant", timeout=30_000
+    )
+    expect(first.locator("#ast-stop")).to_be_hidden(timeout=30_000)
+
+    second.locator("#ast-chats").click()
+    expect(second.locator("#ast-chats-dialog")).to_be_visible()
+    second.locator(".ast-chat-item").filter(has_text="вопрос для очистки").first.click()
+    expect(second.locator(".ast-msg.user").first).to_contain_text("вопрос для очистки")
+
+    first.locator("#ast-clear").click()
+    first.locator("#ast-clear-yes").click()
+
+    expect(
+        first.locator(".ast-msg.user").filter(has_text="вопрос для очистки")
+    ).to_have_count(0, timeout=10_000)
+    expect(
+        second.locator(".ast-msg.user").filter(has_text="вопрос для очистки")
+    ).to_have_count(0, timeout=10_000)
+    first.close()
+    second.close()
+
+
+@pytest.mark.ui
+def test_renaming_a_chat_reaches_a_list_open_in_another_tab(live, context):
+    """The chat list is a shared list; two tabs showing it must not disagree about a name.
+
+    Deleting and clearing tell the other tabs; renaming did not, so a window with the
+    list open kept showing a title that had been changed, and the only way to find out
+    was to reload.
+    """
+    base, _ = live
+    first = context.new_page()
+    second = context.new_page()
+    for page in (first, second):
+        page.goto(f"{base}/", wait_until="networkidle")
+        page.wait_for_selector("#assistant-btn:not([hidden])", timeout=20_000)
+        page.locator("#assistant-btn").click()
+
+    first.locator("#ast-chats").click()
+    expect(first.locator("#ast-chats-dialog")).to_be_visible()
+    first.locator("#ast-chat-new").click()
+    first.locator("#ast-question").click()
+    first.locator("#ast-question").fill("чат под переименование")
+    first.locator("#ast-send").click()
+    expect(first.locator(".ast-msg.assistant .ast-answer").last).to_contain_text(
+        "Offline assistant", timeout=30_000
+    )
+    expect(first.locator("#ast-stop")).to_be_hidden(timeout=30_000)
+
+    # The second tab is looking at the list while the first renames.
+    second.locator("#ast-chats").click()
+    expect(second.locator("#ast-chats-dialog")).to_be_visible()
+    expect(
+        second.locator(".ast-chat-row").filter(has_text="чат под переименование")
+    ).to_have_count(1)
+
+    first.locator("#ast-chats").click()
+    row = first.locator(".ast-chat-row").filter(has_text="чат под переименование").first
+    row.locator(".ast-chat-rename").click()
+    field = first.locator(".ast-chat-name-input")
+    field.fill("новое имя чата")
+    field.press("Enter")
+    expect(
+        first.locator(".ast-chat-row").filter(has_text="новое имя чата")
+    ).to_have_count(1, timeout=10_000)
+
+    expect(
+        second.locator(".ast-chat-row").filter(has_text="новое имя чата")
+    ).to_have_count(1, timeout=10_000)
+    first.close()
+    second.close()

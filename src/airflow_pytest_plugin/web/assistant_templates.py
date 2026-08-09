@@ -681,6 +681,7 @@ _JS = r"""
       thinking: "Reviewing reports…", retry: "Try again", noDetail: "The request failed.",
       chats: "Chats", chatsTitle: "Your chats", chatsClose: "Close chat list",
       chatsSummary: "{n} saved on the server", newChat: "New chat",
+      chatsSummaryTruncated: "newest {n} shown; older ones are still saved",
       chatMeta: "{n} messages · {when}", chatUntitled: "New chat",
       deleteChat: "Delete this chat", chatsEmpty: "No saved chats yet.",
       renameChat: "Rename this chat", renameSave: "Save",
@@ -752,6 +753,7 @@ _JS = r"""
       thinking: "Изучаю отчёты…", retry: "Повторить", noDetail: "Запрос не выполнен.",
       chats: "Чаты", chatsTitle: "Ваши чаты", chatsClose: "Закрыть список чатов",
       chatsSummary: "Сохранено на сервере: {n}", newChat: "Новый чат",
+      chatsSummaryTruncated: "Показаны последние {n}; более старые сохранены",
       chatMeta: "Сообщений: {n} · {when}", chatUntitled: "Новый чат",
       deleteChat: "Удалить этот чат", chatsEmpty: "Сохранённых чатов пока нет.",
       renameChat: "Переименовать чат", renameSave: "Сохранить",
@@ -823,6 +825,11 @@ _JS = r"""
   var AST_WINDOW_PREFIX = "airflow-pytest-plugin:assistant-window:v1:" + location.pathname + ":";
   var AST_STORAGE_KEY = null;
   var AST_WINDOW_PREFS_KEY = null, AST_WINDOW_OPEN_KEY = null, AST_CONTEXT_WRAP_KEY = null;
+  // Cross-tab notice board. The transcript itself lives in sessionStorage, which is what
+  // makes a refresh instant and keeps two tabs independent -- but it also means one tab
+  // cannot see that another has deleted the chat they are both reading, and it went on
+  // showing a conversation that no longer existed anywhere.
+  var AST_SIGNAL_KEY = null;
   var AST_MAX_MESSAGES = 12;
   var AST_MAX_HISTORY_CHARS = 4000;
   var AST_SERVER_HISTORY = false;
@@ -838,6 +845,10 @@ _JS = r"""
   //: is what a freshly opened panel wants. Only meaningful with server-side history.
   var astConversation = "";
   var astConversations = [];
+  // Whether the server had more chats than the list holds. Without this the
+  // summary reports the truncated length as the total, and a reader whose older
+  // chat left the window cannot tell that from having deleted it.
+  var astConversationsTruncated = false;
 
   function astApplyText() {
     document.getElementById("assistant-btn-label").textContent = astT("button");
@@ -1156,6 +1167,8 @@ _JS = r"""
     AST_WINDOW_PREFS_KEY = AST_WINDOW_PREFIX + token;
     AST_WINDOW_OPEN_KEY = AST_WINDOW_PREFS_KEY + ":open";
     AST_CONTEXT_WRAP_KEY = AST_WINDOW_PREFS_KEY + ":context-wrap";
+    // Namespaced like the rest: two accounts sharing a browser must not signal each other.
+    AST_SIGNAL_KEY = AST_WINDOW_PREFS_KEY + ":signal";
     try {
       var savedWrap = localStorage.getItem(AST_CONTEXT_WRAP_KEY);
       astContextWrapped = savedWrap == null ? true : savedWrap === "1";
@@ -1183,6 +1196,7 @@ _JS = r"""
       if (!body || body.available !== true || !Array.isArray(body.messages)) return;
       if (astPending) return;
       astConversations = Array.isArray(body.conversations) ? body.conversations : [];
+      astConversationsTruncated = body.conversations_truncated === true;
       astConversation = typeof body.conversation === "string" ? body.conversation : "";
       astChats.hidden = !AST_SERVER_HISTORY;
       if (astChatsDialog.open) astRenderChatList();
@@ -1248,8 +1262,9 @@ _JS = r"""
   function astRenderChatList() {
     astChatList.textContent = "";
     var chats = astChatsForDisplay();
-    document.getElementById("ast-chats-dialog-summary").textContent =
-      astFmt(astT("chatsSummary"), "n", astConversations.length);
+    document.getElementById("ast-chats-dialog-summary").textContent = astFmt(
+      astT(astConversationsTruncated ? "chatsSummaryTruncated" : "chatsSummary"),
+      "n", astConversations.length);
     if (!chats.length) {
       var empty = document.createElement("li");
       empty.className = "ast-chat-meta";
@@ -1334,7 +1349,13 @@ _JS = r"""
       method: "PATCH", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ title: title })
     }).catch(function () { /* The refresh below reports the real state either way. */ })
-      .then(function () { astLoadChatList(); });
+      .then(function () {
+        astLoadChatList();
+        // The chat list is shared, so a window showing it must not keep a name that has
+        // been changed. "renamed" clears nobody's transcript -- the chat still exists --
+        // it only asks the other tabs to re-read the list they are looking at.
+        astSignal("renamed", "");
+      });
   }
 
   function astAskToDelete(row, chat) {
@@ -1384,6 +1405,7 @@ _JS = r"""
       .then(function (body) {
         if (!body || body.available !== true) return;
         astConversations = Array.isArray(body.conversations) ? body.conversations : [];
+      astConversationsTruncated = body.conversations_truncated === true;
         if (astChatsDialog.open) astRenderChatList();
       }).catch(function () { /* The list is a convenience. */ });
   }
@@ -1415,6 +1437,7 @@ _JS = r"""
       .catch(function () { /* Reported by the refresh below either way. */ })
       .then(function () {
         astLoadChatList();
+        astSignal("deleted", id);
         if (id === astConversation) {
           astConversation = "";
           astTranscript = []; astLastQuestion = ""; astSessionTotalTokens = 0;
@@ -1423,6 +1446,33 @@ _JS = r"""
           astLoadServerHistory("", true);
         }
       });
+  }
+
+  function astSignal(action, conversation) {
+    // localStorage rather than sessionStorage: the `storage` event fires in the *other*
+    // tabs of this origin, which is exactly the audience. Best effort -- a browser with
+    // storage disabled keeps the old behaviour rather than failing the delete.
+    if (!AST_SIGNAL_KEY) return;
+    try {
+      localStorage.setItem(AST_SIGNAL_KEY, JSON.stringify(
+        { action: action, conversation: conversation || "", at: Date.now() }));
+    } catch (error) { /* nothing to do: the delete itself already succeeded */ }
+  }
+
+  function astOnSignal(event) {
+    if (!AST_SIGNAL_KEY || event.key !== AST_SIGNAL_KEY || !event.newValue) return;
+    var notice;
+    try { notice = JSON.parse(event.newValue); } catch (error) { return; }
+    var known = { deleted: 1, cleared: 1, renamed: 1 };
+    if (!notice || !known[notice.action]) return;
+    if (astChatsDialog.open) astLoadChatList();
+    if (!notice.conversation || notice.conversation !== astConversation) return;
+    // The chat this tab is reading is gone. Sending into it would silently recreate it
+    // under the same id, so the transcript goes and the window returns to its empty state.
+    if (astPending) astStopStream();
+    astTranscript = []; astLastQuestion = ""; astSessionTotalTokens = 0;
+    astPersistTranscript(); astRenderSessionTokens();
+    astClear.hidden = true; astEmpty();
   }
 
   function astNewConversationId() {
@@ -1737,9 +1787,10 @@ _JS = r"""
       // all of them would be a trap. The list has a delete of its own per chat.
       var url = API + "assistant/history";
       if (astConversation) url += "?conversation=" + encodeURIComponent(astConversation);
+      var cleared = astConversation;
       fetch(url, { method: "DELETE" })
         .catch(function () { /* Local clear still happens below. */ })
-        .then(function () { astLoadChatList(); });
+        .then(function () { astLoadChatList(); astSignal("cleared", cleared); });
     }
     astTranscript = []; astLastQuestion = ""; astSessionTotalTokens = 0;
     try { if (AST_STORAGE_KEY) sessionStorage.removeItem(AST_STORAGE_KEY); } catch (error) {}
@@ -2601,6 +2652,7 @@ _JS = r"""
     }).observe(astDialog);
   }
   window.addEventListener("pagehide", astPersistWindowPrefs);
+  window.addEventListener("storage", astOnSignal);
   document.getElementById("ast-form").addEventListener("submit", function (event) {
     event.preventDefault(); astSendQuestion(astQuestion.value);
   });

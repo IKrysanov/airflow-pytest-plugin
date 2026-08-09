@@ -753,7 +753,11 @@ MAX_TITLE = 200
 #: ones stay readable by id, they simply fall off the list.
 MAX_CONVERSATIONS = 20
 
-_CONVERSATION_SHAPE = re.compile(r"[^A-Za-z0-9._-]")
+#: ``~`` is in the allowed set because this function's own output uses it as the digest
+#: separator. Without it the cleaner was not a fixed point -- it stripped the separator
+#: it had just written and hashed the result again -- so an id that needed normalising
+#: was stored under one form and looked up under another.
+_CONVERSATION_SHAPE = re.compile(r"[^A-Za-z0-9._~-]")
 
 #: Matches the column width.
 _MAX_CONVERSATION = 64
@@ -786,6 +790,11 @@ def clean_conversation(value: str | None) -> str:
     Stripping characters can map two different ids onto one string, which would silently
     merge two chats -- so anything that had to be changed keeps a digest of the original.
     An id that was already safe is returned untouched, which is every id the browser sends.
+
+    Applying this twice must equal applying it once. It is called on the way into the
+    runtime and again inside the store, and the id it returns is handed to the browser to
+    send back, so a form this function will not accept unchanged is a chat nobody can
+    reopen.
     """
     text = (value or "").strip()
     if not text:
@@ -914,7 +923,11 @@ class ChatHistoryStore(_Store):
         table = _table(MESSAGE_TABLE)
         if active is None or table is None or not self.storable(principal):
             return []
-        chat = conversation or self.latest_conversation(principal)
+        chat = (
+            clean_conversation(conversation)
+            if conversation
+            else self.latest_conversation(principal)
+        )
         if chat is None:
             return []
         try:
@@ -1004,7 +1017,7 @@ class ChatHistoryStore(_Store):
             with active.connect() as connection:
                 rows = connection.execute(summary).all()
                 titles = {
-                    row.conversation: chatcrypto.decrypt(row.content)
+                    row.conversation: self._label(chatcrypto.decrypt(row.content))
                     for row in connection.execute(
                         select(table.c.conversation, table.c.content).where(
                             table.c.id.in_([row.first_id for row in rows] or [-1])
@@ -1036,6 +1049,16 @@ class ChatHistoryStore(_Store):
             for row in rows
         ]
 
+    @staticmethod
+    def _label(title: str) -> str:
+        """Return a chat label: one line, bounded, whatever it was derived from.
+
+        A chosen title and one derived from the opening question end up in the same
+        column of the same list, so they are shaped the same way here rather than in
+        two places that drifted apart.
+        """
+        return " ".join(str(title or "").split())[:MAX_TITLE]
+
     def rename(self, principal: str, conversation: str, title: str) -> int:
         """Give one chat a name of the user's own, or clear it back to the default.
 
@@ -1050,7 +1073,7 @@ class ChatHistoryStore(_Store):
         if not self.storable(principal):
             return 0
         chat = clean_conversation(conversation)
-        clean = storable_text(" ".join(str(title or "").split())[:MAX_TITLE])
+        clean = storable_text(self._label(title))
         try:
             from sqlalchemy import delete, func, insert, select, update
 
@@ -1148,6 +1171,11 @@ class ChatHistoryStore(_Store):
         table = _table(MESSAGE_TABLE)
         if active is None or table is None or not principal:
             return 0
+        # Cleaned here as well as on write: `clear` is reached both from the runtime,
+        # which cleans, and directly, which does not. Only a non-empty id is cleaned --
+        # the cleaner maps "" onto the default conversation, which would turn a blank
+        # parameter into "delete this user's main chat".
+        chat = clean_conversation(conversation) if conversation else conversation
         try:
             from sqlalchemy import delete
 
@@ -1158,10 +1186,10 @@ class ChatHistoryStore(_Store):
             titles = None
             if names is not None:
                 titles = delete(names).where(names.c.principal == principal)
-                if conversation is not None:
-                    titles = titles.where(names.c.conversation == conversation)
-            if conversation is not None:
-                statement = statement.where(table.c.conversation == conversation)
+                if chat is not None:
+                    titles = titles.where(names.c.conversation == chat)
+            if chat is not None:
+                statement = statement.where(table.c.conversation == chat)
             with active.begin() as connection:
                 result = connection.execute(statement)
                 if titles is not None and has_names:
@@ -1200,6 +1228,120 @@ def purge_history(*, before: datetime) -> int:
     with active.begin() as connection:
         result = connection.execute(delete(table).where(table.c.created_at < cutoff))
         return int(result.rowcount or 0)
+
+
+def encryption_summary() -> str:
+    """One line describing what encryption is doing right now, for the CLI.
+
+    Written once and printed by both `status` and `doctor`: a mistyped Fernet key used
+    to be visible nowhere but a warning in the API server's log, and the log is not
+    where anyone looks when the question is whether the chat is encrypted.
+    """
+    state = chatcrypto.status()
+    if state["history_encrypted"]:
+        return "on, with the Fernet key Airflow uses for connections"
+    if not state["fernet_key_configured"]:
+        return "off: no Fernet key is configured, so the transcript is stored as plain text"
+    if not state["fernet_key_usable"]:
+        return (
+            "off: a Fernet key is configured but cannot be used (check the value); "
+            "the transcript is stored as plain text"
+        )
+    return (
+        f"off: switched off with {chatcrypto.ENCRYPT_ENV}; the transcript is stored as "
+        "plain text"
+    )
+
+
+#: Rows read and rewritten per transaction while re-keying. The whole table is not held
+#: in memory, and a run interrupted halfway leaves every committed batch already under
+#: the new key -- re-running finishes the job, because a row already re-encrypted simply
+#: decrypts and re-encrypts again.
+_ROTATE_BATCH = 500
+
+
+def rotate_history_key() -> dict[str, int]:
+    """Re-encrypt stored chat with the Fernet key that is configured right now.
+
+    Sharing Airflow's key means inheriting Airflow's rotation procedure -- new key first,
+    ``airflow rotate-fernet-key``, then drop the old key -- and that command re-encrypts
+    Airflow's own connections and variables. It knows nothing about this table, so the
+    last step used to take every transcript with it. Run this while both keys are still
+    listed and the chat moves across with them.
+
+    A row that cannot be read is counted and left exactly as it is. Writing the
+    placeholder back would be the one irreversible thing here: the key it needs may still
+    turn up, and a row that was skipped can still be recovered by listing that key again.
+    """
+    active = engine()
+    messages = _table(MESSAGE_TABLE)
+    conversations = _table(CONVERSATION_TABLE)
+    moved = {"messages": 0, "titles": 0, "unreadable": 0}
+    if active is None or messages is None or not ready():
+        return moved
+    from sqlalchemy import and_, or_, select, update
+
+    def after(keys: tuple[Any, ...], cursor: tuple[Any, ...]) -> Any:
+        """``(k1, k2) > (c1, c2)``, written without a row-value comparison.
+
+        ``tuple_()`` renders one, and the databases Airflow supports do accept it -- but
+        this is the statement that rewrites every stored message, and an unsupported
+        construct here fails an operator halfway through a key rotation. The expanded
+        form is the same predicate in terms every dialect has always had.
+        """
+        return or_(
+            *[
+                and_(
+                    *[keys[before] == cursor[before] for before in range(index)],
+                    keys[index] > cursor[index],
+                )
+                for index in range(len(keys))
+            ]
+        )
+
+    def rekey(table: Any, column: Any, keys: tuple[Any, ...], counter: str) -> None:
+        """Walk one table by its primary key, rewriting a column batch by batch."""
+        cursor: tuple[Any, ...] | None = None
+        while True:
+            with active.begin() as connection:
+                query = select(*keys, column).order_by(*keys).limit(_ROTATE_BATCH)
+                if cursor is not None:
+                    query = query.where(after(keys, cursor))
+                rows = connection.execute(query).all()
+                if not rows:
+                    return
+                cursor = tuple(rows[-1][: len(keys)])
+                for row in rows:
+                    # `read`, not `decrypt`: the placeholder is a sentence somebody can
+                    # type, so the text alone cannot say whether this row is lost or
+                    # merely talking about being lost.
+                    plain, readable = chatcrypto.read(row[-1])
+                    if not readable:
+                        moved["unreadable"] += 1
+                        continue
+                    connection.execute(
+                        update(table)
+                        .where(
+                            *[
+                                key == value
+                                for key, value in zip(
+                                    keys, row[: len(keys)], strict=True
+                                )
+                            ]
+                        )
+                        .values({column.key: chatcrypto.encrypt(plain)})
+                    )
+                    moved[counter] += 1
+
+    rekey(messages, messages.c.content, (messages.c.id,), "messages")
+    if conversations is not None and table_ready(CONVERSATION_TABLE):
+        rekey(
+            conversations,
+            conversations.c.title,
+            (conversations.c.principal, conversations.c.conversation),
+            "titles",
+        )
+    return moved
 
 
 #: The principal the doctor writes its round-trip probe under. Not a real identity, so
@@ -1301,6 +1443,7 @@ def _doctor(state: dict[str, Any]) -> int:
         )
         return 1
     print("5. Write probe       : wrote and read back a message, then removed it")
+    print(f"6. Encryption        : {encryption_summary()}")
     print(
         "\nStorage is working. If chats still do not appear, the acting user is the last "
         "thing to check:\n"
@@ -1324,11 +1467,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "command",
-        choices=("upgrade", "status", "purge", "doctor"),
+        choices=("upgrade", "status", "purge", "doctor", "rotate-key"),
         help=(
             "upgrade: create missing tables. status: report what is configured. "
             "purge: delete stored chat messages past retention. "
-            "doctor: work out why chats are not being saved."
+            "doctor: work out why chats are not being saved. "
+            "rotate-key: re-encrypt stored chat with the current Fernet key."
         ),
     )
     parser.add_argument(
@@ -1404,6 +1548,42 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Deleted {removed} chat message(s) older than {days} day(s).")
         return 0
 
+    if args.command == "rotate-key":
+        if not state["ready"]:
+            print("Nothing to re-encrypt: the tables do not exist yet.")
+            return 1
+        crypto = chatcrypto.status()
+        if crypto["fernet_key_configured"] and not crypto["fernet_key_usable"]:
+            print(
+                "A Fernet key is configured but cannot be used -- check it before "
+                "re-encrypting, or this would store the transcript as plain text."
+            )
+            return 1
+        if not crypto["history_encrypted"]:
+            # Coherent and occasionally wanted -- reading the table during an incident --
+            # but never by accident, so it is said out loud rather than done quietly.
+            print(
+                "Encryption is off, so this will store the transcript as PLAIN TEXT.\n"
+                f"Set a Fernet key (and leave {chatcrypto.ENCRYPT_ENV} unset) to "
+                "re-encrypt instead."
+            )
+        moved = rotate_history_key()
+        # "Re-encrypted" would be a lie in the plain-text mode above, and this line is
+        # the only record of what the command did.
+        verb = (
+            "Re-encrypted" if crypto["history_encrypted"] else "Rewrote in plain text"
+        )
+        print(
+            f"{verb} {moved['messages']} message(s) and {moved['titles']} chat name(s)."
+        )
+        if moved["unreadable"]:
+            print(
+                f"Left {moved['unreadable']} row(s) untouched: their key is not among "
+                "the configured ones. List that key as well and run this again to bring "
+                "them across -- they are still recoverable."
+            )
+        return 0
+
     if args.command == "doctor":
         return _doctor(state)
 
@@ -1433,7 +1613,8 @@ def main(argv: list[str] | None = None) -> int:
 
         days = AssistantSettings.from_env().history_days
         print(
-            f"Chat history: {'stored for ' + str(days) + ' day(s)' if days else 'off'}."
+            f"Chat history: {'stored for ' + str(days) + ' day(s)' if days else 'off'}.\n"
+            f"Encryption: {encryption_summary()}."
         )
         if state["version"] != SCHEMA_VERSION:
             print(f"This build expects version {SCHEMA_VERSION}; run upgrade.")

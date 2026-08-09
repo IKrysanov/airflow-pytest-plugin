@@ -35,7 +35,7 @@ from .common import (
     clip_utf8,
 )
 from .exceptions import AssistantForbiddenError, AssistantRequestError
-from .redaction import redact_text
+from .redaction import redact_text, safe_node_id
 
 _MAX_NODE_ID_BYTES = 1_024
 _MAX_VERDICT_FIELD_BYTES = 600
@@ -48,6 +48,24 @@ _MAX_VERDICT_SEQUENCE_ITEMS = 64
 def _bounded_redacted(text: str | None, limit: int) -> tuple[str, bool]:
     cleaned = redact_text(text or "")
     return clip_utf8(cleaned, limit), len(cleaned.encode("utf-8", "replace")) > limit
+
+
+def _bounded_node_id(node_id: str | None) -> tuple[str, bool]:
+    """Scrub a node id as an identifier rather than as prose.
+
+    The free-text scrubber reads ``<secret-word>:`` as the start of an assignment and
+    deletes the rest of the token, which is right for a log line and wrong for a node
+    id: ``tests.auth::test_login`` arrived as ``tests.auth:[REDACTED]``, and modules
+    called ``auth.py`` or ``token.py`` are ordinary. That deleted the name of the
+    failing test -- the one fact the answer is built to deliver -- from precisely the
+    reports people ask about most. The dynamic part of a node id is its
+    parametrization, and that is what :func:`safe_node_id` scrubs.
+    """
+    cleaned = safe_node_id(node_id or "")
+    return (
+        clip_utf8(cleaned, _MAX_NODE_ID_BYTES),
+        len(cleaned.encode("utf-8", "replace")) > _MAX_NODE_ID_BYTES,
+    )
 
 
 def _safe_mapping(
@@ -119,6 +137,8 @@ def _summary_record(summary: ReportSummary) -> tuple[dict[str, Any], bool]:
 #: failure question needs and a passing test has nothing to say -- but it left the one
 #: question whose answer is usually a test that passed unanswerable: asked which test was
 #: slowest, the assistant could see the durations of failures and nothing else.
+#: Imported by the reduction path too: both modes have to answer the same question the
+#: same way, and having two copies of this is how they came to disagree.
 _DURATION_QUESTION = re.compile(
     r"(?i)(slow|slowest|fastest|duration|how long|takes? the most|elapsed|"
     r"медлен|быстр|длительн|дольше|доль|сколько (?:по )?времени|время выполнен)"
@@ -153,7 +173,7 @@ def _json(value: dict[str, Any]) -> str:
 def _case_values(
     case: CaseView, evidence: AssistantEvidence
 ) -> tuple[dict[str, Any], bool]:
-    node_id, truncated = _bounded_redacted(case.node_id, _MAX_NODE_ID_BYTES)
+    node_id, truncated = _bounded_node_id(case.node_id)
     verdict = case.verdict.to_dict() if case.verdict else None
     safe_verdict, verdict_truncated = _safe_mapping(verdict)
     return (

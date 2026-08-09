@@ -148,6 +148,7 @@ def test_the_status_says_which_of_the_two_it_is(key, monkeypatch):
     assert chatcrypto.status() == {
         "history_encrypted": True,
         "fernet_key_configured": True,
+        "fernet_key_usable": True,
     }
 
     monkeypatch.delenv("AIRFLOW__CORE__FERNET_KEY")
@@ -155,7 +156,42 @@ def test_the_status_says_which_of_the_two_it_is(key, monkeypatch):
     assert chatcrypto.status() == {
         "history_encrypted": False,
         "fernet_key_configured": False,
+        "fernet_key_usable": False,
     }
+
+
+def test_a_broken_key_is_not_reported_as_no_key(monkeypatch):
+    """These are opposite problems and they had the same answer.
+
+    An operator who set the variable and is asking why the transcript is not encrypted
+    was told `fernet_key_configured: false` -- which reads as "you did not set it", the
+    one thing they know they did. The field answered "is there a usable Fernet", so a
+    typo in the key and an empty setting were indistinguishable.
+    """
+    monkeypatch.setenv("AIRFLOW__CORE__FERNET_KEY", "please-encrypt-my-chat")
+    chatcrypto._cached = None
+
+    assert chatcrypto.status() == {
+        "history_encrypted": False,
+        "fernet_key_configured": True,
+        "fernet_key_usable": False,
+    }
+
+
+def test_a_broken_key_is_logged_once_and_not_per_message(monkeypatch, caplog):
+    """The failure was not cached, so every stored message rebuilt it and logged again.
+
+    A busy API server turns one configuration mistake into a warning per request.
+    """
+    monkeypatch.setenv("AIRFLOW__CORE__FERNET_KEY", "please-encrypt-my-chat")
+    chatcrypto._cached = None
+
+    with caplog.at_level("WARNING", logger="airflow_pytest_plugin.chatcrypto"):
+        for _ in range(20):
+            chatcrypto.encrypt(RUSSIAN)
+            chatcrypto.decrypt(RUSSIAN)
+
+    assert len(caplog.records) == 1
 
 
 def test_a_typed_lookalike_is_not_destroyed_on_a_server_with_no_key(monkeypatch):

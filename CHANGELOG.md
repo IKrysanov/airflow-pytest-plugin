@@ -719,7 +719,8 @@ the Airflow 3 web UI.
 - CI/CD: lint, type-check, unit (py3.10–3.13) + Airflow 3 integration matrices,
   CodeQL, OpenSSF Scorecard, DCO, and Trusted-Publishing release workflows.
 
-[Unreleased]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.6.2...v0.7.0
 [0.6.2]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.6.0...v0.6.1

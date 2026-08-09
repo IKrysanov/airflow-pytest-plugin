@@ -31,11 +31,26 @@ python -m airflow_pytest_plugin.db doctor
 ```
 
 It checks the database URL, whether the server answers, whether the tables exist at the
-version this build expects, whether history retention is switched on, and whether the
-database user may actually write. If all five pass and chats still do not appear, open
-`/api/assistant/status` from the signed-in browser: `"history_server_side": true` means
+version this build expects, whether history retention is switched on, whether the database
+user may actually write, and what encryption is doing. If those pass and chats still do not
+appear, open `/api/assistant/status` from the signed-in browser: `"history_server_side": true` means
 that user's chats are being stored, `false` means their auth manager exposes no unique
 account key, so their chat stays in the browser tab instead.
+
+## A message reads "unreadable: encrypted with a Fernet key this server does not have"
+
+Your chat is encrypted in the database with Airflow's Fernet key, and that message was written
+with a key this server no longer has. The text itself is intact in the database -- listing
+the old key again in `AIRFLOW__CORE__FERNET_KEY` (comma-separated, newest leading) brings it
+straight back, and nothing was overwritten.
+
+This is what a key rotation that skipped the plugin looks like. `airflow rotate-fernet-key`
+re-encrypts Airflow's own connections and variables and knows nothing about this table, so
+the chat has to be moved across separately, while both keys are still listed:
+
+```bash
+python -m airflow_pytest_plugin.db rotate-key
+```
 
 ## After upgrading the plugin
 

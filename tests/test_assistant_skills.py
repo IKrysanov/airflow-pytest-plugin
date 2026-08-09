@@ -366,3 +366,54 @@ def test_a_docs_question_is_not_told_to_widen_its_filters():
 
     assert "no report was needed" in text
     assert "no report matched the current scope" not in text
+
+
+def test_a_documentation_answer_is_not_told_to_widen_the_filters():
+    """Asked from the manual, "no report matched" is a non-sequitur.
+
+    The reader asked how to run their first test. Answering that with "no run matched
+    your filters, clear them and try again" is the assistant refusing a question it was
+    about to answer -- and on a fresh install, where there are no runs at all, it is the
+    only kind of question anyone can ask.
+    """
+    text = no_evidence_text(
+        question="как запустить первый тест?", has_documentation=True
+    )
+
+    assert "no report was needed" in text
+    assert "no report matched the current scope" not in text
+
+
+def test_a_question_about_runs_is_still_told_the_scope_was_empty():
+    """Even when a manual happens to be loaded, this is the honest answer."""
+    text = no_evidence_text(question="почему упал test_login?", has_documentation=False)
+
+    assert "no report matched the current scope" in text
+
+
+def test_a_question_about_runs_wins_over_a_manual_that_happens_to_match():
+    """ "какие тесты флакают?" is about their runs, whatever the manual has to say.
+
+    A manual for a testing tool has a section on flaky tests, so retrieval matches -- and
+    treating that as "no report was needed" would answer a question about this week's
+    runs with general advice and never mention that nothing was found.
+    """
+    text = no_evidence_text(question="какие тесты флакают?", has_documentation=True)
+
+    assert "no report matched the current scope" in text
+
+
+def test_the_authoring_skill_writes_rather_than_interviews():
+    """ "Write two tests for login" is a request, not the opening of a requirements chat.
+
+    The skill used to end with "if the request is too vague, ask one specific question",
+    and a live provider took that exit for exactly the request the feature exists to
+    serve -- coming back with "which framework, and what counts as success?" instead of
+    two tests. A stated assumption is worth more than a question here: the reader can
+    correct an assumption in one word, and they cannot use an empty answer at all.
+    """
+    text = " ".join(SKILLS["authoring"].text.split())
+
+    assert "ask one specific question instead" not in text
+    assert "state the assumption" in text
+    assert "write them anyway" in text

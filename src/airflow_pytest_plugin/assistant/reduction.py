@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .common import ContextReducer, clip_utf8
+from .context import _DURATION_QUESTION
 from .redaction import redact_text
 
 _MAX_REDUCTION_PASSES = 12
@@ -48,6 +49,14 @@ _TRACEBACK_BLOCK = re.compile(
     r"^TRACEBACK (R[1-9][0-9]*:C[0-9]+)\n((?:\| .*\n?)*)",
     re.M,
 )
+
+#: Slowest cases carried per chunk when the question is about time. The slowest test is
+#: usually one that *passed*, and a reducer keeps failures at best -- so without this the
+#: same archive answered "which test is slowest?" in direct mode and "the reports contain
+#: no timing data" under compression. Per chunk is the only bound needed here: the
+#: partials are packed into the reduction budget afterwards, which is what caps the
+#: total. (The direct path states its own total because nothing packs it later.)
+_MAX_SLOWEST_PER_CHUNK = 5
 
 #: Restored failures per chunk, and how much of one error message is kept. Enough to name
 #: and group real failures; not so much that a chunk full of them becomes the whole budget.
@@ -244,7 +253,8 @@ def _reduce(reducer: ContextReducer, question: str, context: str) -> tuple[str, 
         raise RuntimeError("the local context model returned an empty summary")
     cleaned = redact_text(result)
     kept = _keep_runs(_keep_citations(cleaned, context), context)
-    return _keep_failures(kept, context), cleaned
+    kept = _keep_failures(kept, context)
+    return _keep_durations(kept, context, question), cleaned
 
 
 def _is_useless(model_output: str) -> bool:
@@ -333,6 +343,45 @@ def _keep_runs(summary: str, context: str) -> str:
     if any(run_id in summary for run_id, _ in runs):
         return summary
     return "\n".join([line for _, line in runs[:_MAX_RESTORED_FAILURES]] + [summary])
+
+
+def _chunk_slowest(context: str) -> list[tuple[float, str]]:
+    """Return the slowest cases a raw chunk states, whatever their outcome."""
+    timed: list[tuple[float, str]] = []
+    for raw in _CASE_LINE.findall(context):
+        try:
+            case = json.loads(raw)
+        except ValueError:  # pragma: no cover - a clipped chunk boundary
+            continue
+        node_id = str(case.get("node_id") or "").strip()
+        duration = case.get("duration")
+        if not node_id or not isinstance(duration, (int, float)):
+            continue
+        timed.append(
+            (
+                float(duration),
+                f"[{case.get('report', '')}] {node_id} {case.get('outcome')} "
+                f"duration={duration}",
+            )
+        )
+    timed.sort(key=lambda item: -item[0])
+    return timed[:_MAX_SLOWEST_PER_CHUNK]
+
+
+def _keep_durations(summary: str, context: str, question: str) -> str:
+    """Add the slowest cases when the question is about how long something took.
+
+    Only then: it is bytes on every other request, and the failures need the room.
+    """
+    if not _DURATION_QUESTION.search(question or ""):
+        return summary
+    slowest = _chunk_slowest(context)
+    if not slowest:
+        return summary
+    lines = [line for _, line in slowest if line.split(" ", 2)[1] not in summary]
+    if not lines:
+        return summary
+    return "\n".join([*lines, summary])
 
 
 def _keep_failures(summary: str, context: str) -> str:

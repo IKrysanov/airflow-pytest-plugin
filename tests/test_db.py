@@ -29,6 +29,7 @@ import sqlalchemy as sa
 
 from airflow_pytest_plugin import db
 from airflow_pytest_plugin.assistant import (
+    AssistantProviderError,
     AssistantProviderResponse,
     AssistantQuery,
     AssistantQuotaError,
@@ -864,6 +865,30 @@ def test_conversations_are_listed_newest_first_with_a_title():
     assert listed[0]["messages"] == 2
 
 
+def test_a_derived_title_is_bounded_like_a_chosen_one():
+    """The chat list is a sidebar of one-line labels, not a copy of the questions.
+
+    A title the user types is normalised and clipped; a title derived from the opening
+    question was neither, so a chat list of long questions came back as 142 KiB of JSON
+    for twenty rows the panel renders forty characters of -- on the endpoint every
+    opened panel and every cross-tab signal hits.
+    """
+    db.upgrade()
+    store = db.history_store()
+    store.append("alice", "почему " * 800, "ответ", [], 1, conversation="long")
+    store.append(
+        "alice", "первая строка\nвторая\tстрока", "ответ", [], 1, conversation="lines"
+    )
+
+    listed = {
+        item["id"]: item["title"] for item in store.conversations("alice", limit=10)
+    }
+
+    assert len(listed["long"]) <= db.MAX_TITLE
+    assert listed["long"].startswith("почему почему")
+    assert listed["lines"] == "первая строка вторая строка"
+
+
 def test_one_user_cannot_read_or_delete_another_conversation():
     """Guessing an id must not be enough: rows are filtered by principal as well."""
     db.upgrade()
@@ -1204,6 +1229,111 @@ def test_doctor_says_when_history_is_switched_off(capsys, monkeypatch):
     printed = capsys.readouterr().out
     assert code == 1
     assert "HISTORY_DAYS" in printed
+
+
+@pytest.mark.parametrize(
+    ("key", "expected"),
+    [
+        (None, "off: no Fernet key"),
+        ("please-encrypt-my-chat", "cannot be used"),
+    ],
+)
+def test_doctor_says_what_encryption_is_doing(key, expected, capsys, monkeypatch):
+    """A mistyped key was invisible in the one command built to explain a broken setup.
+
+    Nothing else surfaces it either: the transcript quietly falls back to plain text and
+    the only trace is one warning in the API server's log, which is not where anyone
+    looks when the question is "is our chat encrypted?".
+    """
+    from airflow_pytest_plugin import chatcrypto
+
+    monkeypatch.delenv("AIRFLOW__CORE__FERNET_KEY", raising=False)
+    monkeypatch.delenv("FERNET_KEY", raising=False)
+    if key is not None:
+        monkeypatch.setenv("AIRFLOW__CORE__FERNET_KEY", key)
+    chatcrypto._cached = None
+    db.upgrade()
+
+    assert db.main(["doctor"]) == 0
+    printed = capsys.readouterr().out
+
+    assert "Encryption" in printed
+    assert expected in printed
+
+
+def test_status_reports_encryption(capsys, monkeypatch):
+    pytest.importorskip("cryptography")
+    from cryptography.fernet import Fernet
+
+    from airflow_pytest_plugin import chatcrypto
+
+    monkeypatch.setenv("AIRFLOW__CORE__FERNET_KEY", Fernet.generate_key().decode())
+    chatcrypto._cached = None
+    db.upgrade()
+
+    db.main(["status"])
+
+    assert "Encryption: on" in capsys.readouterr().out
+
+
+def test_the_cli_rotates_the_key(capsys, monkeypatch):
+    pytest.importorskip("cryptography")
+    from cryptography.fernet import Fernet
+
+    from airflow_pytest_plugin import chatcrypto
+
+    old_key = Fernet.generate_key().decode()
+    new_key = Fernet.generate_key().decode()
+    monkeypatch.setenv("AIRFLOW__CORE__FERNET_KEY", old_key)
+    chatcrypto._cached = None
+    db.upgrade()
+    db.history_store().append("id:1", "вопрос", "ответ", [], 1, conversation="c")
+
+    monkeypatch.setenv("AIRFLOW__CORE__FERNET_KEY", f"{new_key},{old_key}")
+    chatcrypto._cached = None
+    code = db.main(["rotate-key"])
+
+    printed = capsys.readouterr().out
+    assert code == 0, printed
+    assert "Re-encrypted 2 message(s)" in printed
+
+    monkeypatch.setenv("AIRFLOW__CORE__FERNET_KEY", new_key)
+    chatcrypto._cached = None
+    assert [
+        item["content"]
+        for item in db.history_store().load("id:1", limit=5, conversation="c")
+    ] == ["вопрос", "ответ"]
+
+
+def test_the_cli_refuses_to_rotate_onto_an_unusable_key(capsys, monkeypatch):
+    """Rotating with a broken key would silently write the whole table in plain text."""
+    from airflow_pytest_plugin import chatcrypto
+
+    monkeypatch.setenv("AIRFLOW__CORE__FERNET_KEY", "please-encrypt-my-chat")
+    chatcrypto._cached = None
+    db.upgrade()
+
+    code = db.main(["rotate-key"])
+
+    printed = capsys.readouterr().out
+    assert code == 1
+    assert "cannot be used" in printed
+
+
+def test_the_cli_says_out_loud_when_rotation_writes_plain_text(capsys, monkeypatch):
+    from airflow_pytest_plugin import chatcrypto
+
+    monkeypatch.delenv("AIRFLOW__CORE__FERNET_KEY", raising=False)
+    monkeypatch.delenv("FERNET_KEY", raising=False)
+    chatcrypto._cached = None
+    db.upgrade()
+    db.history_store().append("id:1", "вопрос", "ответ", [], 1, conversation="c")
+
+    assert db.main(["rotate-key"]) == 0
+
+    printed = capsys.readouterr().out
+    assert "PLAIN TEXT" in printed
+    assert "Rewrote in plain text 2 message(s)" in printed
 
 
 def test_doctor_leaves_no_probe_rows_behind():
@@ -1983,6 +2113,257 @@ def _fernet_key(monkeypatch):
     return chatcrypto
 
 
+@pytest.mark.parametrize(
+    "given",
+    [
+        "разбор падения",
+        "её чат",
+        "ЧАТ",
+        "chat 1",
+        "a" * 80,
+        "chat/../../etc",
+        "~already-cleaned~",
+    ],
+)
+def test_cleaning_a_conversation_id_twice_changes_nothing(given):
+    """The id is cleaned on the way in and cleaned again in the store; they must agree.
+
+    The cleaned form contains `~`, which the cleaner then stripped on a second pass and
+    re-hashed. So an id that needed normalising at all -- non-ASCII, a space, over 64
+    characters -- was written under `clean(clean(x))` and read under `clean(x)`, and the
+    chat disappeared the moment it was written.
+    """
+    once = db.clean_conversation(given)
+
+    assert db.clean_conversation(once) == once
+    assert len(once) <= 64
+
+
+def test_a_chat_under_a_cyrillic_id_reads_back():
+    db.upgrade()
+    store = db.history_store()
+
+    store.append("id:1", "вопрос", "ответ", [], 1, conversation="разбор падения")
+
+    assert [
+        item["content"]
+        for item in store.load("id:1", limit=9, conversation="разбор падения")
+    ] == ["вопрос", "ответ"]
+    assert store.rename("id:1", "разбор падения", "Имя") == 1
+    listed = store.conversations("id:1", limit=9)
+    assert [item["title"] for item in listed] == ["Имя"]
+    assert store.clear("id:1", conversation="разбор падения") == 2
+
+
+def test_the_id_the_api_hands_back_can_be_used_to_reopen_the_chat():
+    """The browser stores whatever id the list gave it and sends it back next time."""
+    db.upgrade()
+    store = db.history_store()
+    store.append("id:1", "вопрос", "ответ", [], 1, conversation="мой чат")
+
+    listed = store.conversations("id:1", limit=9)[0]["id"]
+
+    assert [
+        item["content"] for item in store.load("id:1", limit=9, conversation=listed)
+    ] == ["вопрос", "ответ"]
+
+
+def test_the_documented_airflow_rotation_does_not_destroy_the_chat(monkeypatch):
+    """Sharing Airflow's key means inheriting Airflow's rotation procedure.
+
+    That procedure is: put the new key first, run `airflow rotate-fernet-key`, drop the
+    old key. The command re-encrypts Airflow's connections and variables and knows
+    nothing about a plugin's table, so step three took every stored transcript with it --
+    an operator following the documentation exactly, losing data silently.
+    """
+    pytest.importorskip("cryptography")
+    from cryptography.fernet import Fernet
+
+    from airflow_pytest_plugin import chatcrypto
+
+    old_key = Fernet.generate_key().decode()
+    new_key = Fernet.generate_key().decode()
+
+    monkeypatch.setenv("AIRFLOW__CORE__FERNET_KEY", old_key)
+    chatcrypto._cached = None
+    db.upgrade()
+    store = db.history_store()
+    store.append("id:1", "вопрос", "ответ", [], 1, conversation="c")
+    store.rename("id:1", "c", "Мой чат")
+
+    # Step one and two: the new key leads, the old one is still there to read with.
+    monkeypatch.setenv("AIRFLOW__CORE__FERNET_KEY", f"{new_key},{old_key}")
+    chatcrypto._cached = None
+    moved = db.rotate_history_key()
+    assert moved["messages"] == 2
+    assert moved["titles"] == 1
+    assert moved["unreadable"] == 0
+
+    # Step three: the old key is gone, as the procedure says.
+    monkeypatch.setenv("AIRFLOW__CORE__FERNET_KEY", new_key)
+    chatcrypto._cached = None
+
+    assert [
+        item["content"] for item in store.load("id:1", limit=9, conversation="c")
+    ] == [
+        "вопрос",
+        "ответ",
+    ]
+    assert store.conversations("id:1", limit=9)[0]["title"] == "Мой чат"
+
+
+def test_rotation_leaves_a_row_it_cannot_read_alone(monkeypatch):
+    """Re-encrypting a placeholder would make the loss permanent.
+
+    A row whose key is already gone reads as the placeholder. Writing that back is the
+    one irreversible thing this command could do -- the original key might still turn up
+    in someone's password manager -- so those rows are counted and skipped.
+    """
+    pytest.importorskip("cryptography")
+    from cryptography.fernet import Fernet
+
+    from airflow_pytest_plugin import chatcrypto
+
+    lost_key = Fernet.generate_key().decode()
+    live_key = Fernet.generate_key().decode()
+
+    monkeypatch.setenv("AIRFLOW__CORE__FERNET_KEY", lost_key)
+    chatcrypto._cached = None
+    db.upgrade()
+    store = db.history_store()
+    store.append(
+        "id:1", "утраченный вопрос", "утраченный ответ", [], 1, conversation="lost"
+    )
+
+    monkeypatch.setenv("AIRFLOW__CORE__FERNET_KEY", live_key)
+    chatcrypto._cached = None
+    store.append("id:1", "живой вопрос", "живой ответ", [], 1, conversation="live")
+
+    moved = db.rotate_history_key()
+
+    assert moved["unreadable"] == 2
+    assert moved["messages"] == 2
+    assert [
+        item["content"] for item in store.load("id:1", limit=9, conversation="live")
+    ] == [
+        "живой вопрос",
+        "живой ответ",
+    ]
+
+    # The lost rows are untouched, so putting the old key back still recovers them.
+    monkeypatch.setenv("AIRFLOW__CORE__FERNET_KEY", f"{live_key},{lost_key}")
+    chatcrypto._cached = None
+    assert [
+        item["content"] for item in store.load("id:1", limit=9, conversation="lost")
+    ] == [
+        "утраченный вопрос",
+        "утраченный ответ",
+    ]
+
+
+def test_rotation_walks_every_batch_on_both_tables(monkeypatch):
+    """The batch loop never ran: the batch is 500 rows and every other test has two.
+
+    Both the paging cursor and the composite key on the names table are only exercised
+    once there is more than one batch, and a cursor that fails to advance re-reads the
+    same rows for ever.
+    """
+    pytest.importorskip("cryptography")
+    from cryptography.fernet import Fernet
+
+    from airflow_pytest_plugin import chatcrypto
+
+    old_key = Fernet.generate_key().decode()
+    new_key = Fernet.generate_key().decode()
+    monkeypatch.setattr(db, "_ROTATE_BATCH", 3)
+    monkeypatch.setenv("AIRFLOW__CORE__FERNET_KEY", old_key)
+    chatcrypto._cached = None
+    db.upgrade()
+    store = db.history_store()
+    for index in range(7):
+        # Two principals, so the names table needs both halves of its key to page.
+        for principal in ("id:1", "id:2"):
+            store.append(
+                principal,
+                f"вопрос {index}",
+                f"ответ {index}",
+                [],
+                1,
+                conversation=f"c{index:02d}",
+            )
+            store.rename(principal, f"c{index:02d}", f"Имя {principal} {index}")
+
+    monkeypatch.setenv("AIRFLOW__CORE__FERNET_KEY", f"{new_key},{old_key}")
+    chatcrypto._cached = None
+    moved = db.rotate_history_key()
+
+    assert moved == {"messages": 28, "titles": 14, "unreadable": 0}
+
+    monkeypatch.setenv("AIRFLOW__CORE__FERNET_KEY", new_key)
+    chatcrypto._cached = None
+    for principal in ("id:1", "id:2"):
+        assert [
+            item["content"]
+            for item in store.load(principal, limit=9, conversation="c03")
+        ] == ["вопрос 3", "ответ 3"]
+        listed = {
+            item["id"]: item["title"]
+            for item in store.conversations(principal, limit=20)
+        }
+        assert len(listed) == 7
+        assert listed["c06"] == f"Имя {principal} 6"
+
+
+def test_clearing_with_an_empty_conversation_deletes_nothing():
+    """`clear` treats None as "everything"; an empty string must not become a chat id.
+
+    Cleaning the id is what makes a direct call agree with the runtime, but the cleaner
+    maps an empty string onto the default conversation -- which would turn a blank
+    parameter into "delete the user's main chat".
+    """
+    db.upgrade()
+    store = db.history_store()
+    store.append("alice", "q", "a", [], 1, conversation=db.DEFAULT_CONVERSATION)
+
+    assert store.clear("alice", conversation="") == 0
+    assert len(store.load("alice", limit=9, conversation=db.DEFAULT_CONVERSATION)) == 2
+
+
+def test_rotation_encrypts_rows_written_before_encryption_existed(monkeypatch):
+    monkeypatch.delenv("AIRFLOW__CORE__FERNET_KEY", raising=False)
+    pytest.importorskip("cryptography")
+    from cryptography.fernet import Fernet
+
+    from airflow_pytest_plugin import chatcrypto
+
+    chatcrypto._cached = None
+    db.upgrade()
+    store = db.history_store()
+    store.append(
+        "id:1", "открытый вопрос", "открытый ответ", [], 1, conversation="plain"
+    )
+
+    monkeypatch.setenv("AIRFLOW__CORE__FERNET_KEY", Fernet.generate_key().decode())
+    chatcrypto._cached = None
+    moved = db.rotate_history_key()
+
+    assert moved["messages"] == 2
+    with db.engine().connect() as connection:
+        raw = [
+            row[0]
+            for row in connection.execute(
+                sa.text(f"select content from {db.MESSAGE_TABLE} order by id")
+            )
+        ]
+    assert all(value.startswith("gAAAAA") for value in raw), raw
+    assert [
+        item["content"] for item in store.load("id:1", limit=9, conversation="plain")
+    ] == [
+        "открытый вопрос",
+        "открытый ответ",
+    ]
+
+
 def test_a_stored_chat_is_not_readable_in_the_database(monkeypatch):
     """Anyone with the metadata database gets the transcript otherwise.
 
@@ -2259,3 +2640,368 @@ def test_a_finished_answer_is_already_saved_when_the_browser_is_told_it_finished
 
     assert stored_at_done is not None, "the stream never reported completion"
     assert len(stored_at_done) == 2, stored_at_done
+
+
+def test_an_answer_over_an_empty_scope_is_still_the_users_chat(reports_root):
+    """A question asked with nothing in scope is still a question they asked.
+
+    Storing only "answered" outcomes meant that on a fresh install -- or with a filter
+    that matches nothing, which is exactly when someone asks what the product does -- the
+    reply appeared, the tab was closed, and the whole exchange was gone. No chat in the
+    list, no row in the database, nothing to reopen in another tab.
+    """
+    db.upgrade()
+    store = db.history_store()
+    runtime = AssistantRuntime(
+        provider_factory=FakeAssistant,
+        reducer_factory=PassthroughReducer,
+        provider_name="fake",
+        model_name="offline-fake",
+        context_model_name=None,
+        max_context_bytes=16_384,
+        max_output_tokens=256,
+        max_concurrent=2,
+        history=store,
+        history_days=30,
+    )
+
+    reply = runtime.ask(
+        source=FileSystemReportSource(report_root=reports_root),
+        can_read=lambda dag, user: True,
+        user={"id": 42},
+        query=AssistantQuery(
+            question="что умеет airflow-pytest-operator?", conversation="main"
+        ),
+    )
+
+    assert reply.answer
+    stored = store.load("id:42", limit=10, conversation="main")
+    assert [item["content"] for item in stored] == [
+        "что умеет airflow-pytest-operator?",
+        reply.answer,
+    ]
+    assert [chat["id"] for chat in store.conversations("id:42", limit=5)] == ["main"]
+
+
+def test_a_streamed_answer_over_an_empty_scope_is_stored_too(reports_root):
+    """The streaming path stores before it says "done"; that must hold here as well."""
+    db.upgrade()
+    store = db.history_store()
+    runtime = AssistantRuntime(
+        provider_factory=FakeAssistant,
+        reducer_factory=PassthroughReducer,
+        provider_name="fake",
+        model_name="offline-fake",
+        context_model_name=None,
+        max_context_bytes=16_384,
+        max_output_tokens=256,
+        max_concurrent=2,
+        history=store,
+        history_days=30,
+    )
+
+    at_done = None
+    for name, _ in runtime.stream(
+        source=FileSystemReportSource(report_root=reports_root),
+        can_read=lambda dag, u: True,
+        user={"id": 43},
+        query=AssistantQuery(question="что это за продукт?", conversation="main"),
+    ):
+        if name == "done":
+            at_done = store.load("id:43", limit=10, conversation="main")
+
+    assert at_done is not None
+    assert len(at_done) == 2, at_done
+
+
+def test_a_refused_request_is_not_stored_as_a_chat(reports_root):
+    """Only a completed exchange is one: a 429 or a permission error is not a message."""
+    db.upgrade()
+    store = db.history_store()
+    write_report(reports_root, ReportRef("dag", "run", "task", 1), failed=1)
+    runtime = AssistantRuntime(
+        provider_factory=FakeAssistant,
+        reducer_factory=PassthroughReducer,
+        provider_name="fake",
+        model_name="offline-fake",
+        context_model_name=None,
+        max_context_bytes=16_384,
+        max_output_tokens=256,
+        max_concurrent=2,
+        history=store,
+        history_days=30,
+        rate_limit=1,
+        rate_window_seconds=3_600.0,
+        rate_store=db.rate_store(),
+    )
+    ask = {
+        "source": FileSystemReportSource(report_root=reports_root),
+        "can_read": lambda dag, user: True,
+        "user": {"id": 44},
+    }
+    runtime.ask(**ask, query=AssistantQuery(question="первый", conversation="main"))
+    with pytest.raises(AssistantQuotaError):
+        runtime.ask(**ask, query=AssistantQuery(question="второй", conversation="main"))
+
+    stored = [item["content"] for item in store.load("id:44", limit=10)]
+    assert "второй" not in stored, stored
+
+
+def test_a_stopped_answer_keeps_what_was_written(reports_root):
+    """Stop keeps the partial text on screen; the server has to keep it too.
+
+    Otherwise the two disagree, and the server wins on reload: the reader stops an
+    answer, sees the part that arrived, refreshes -- and their question and its partial
+    reply are both gone. That is the same loss as an unsaved chat, reached by pressing a
+    button the window offers.
+    """
+    db.upgrade()
+    store = db.history_store()
+    write_report(reports_root, ReportRef("dag", "run", "task", 1), failed=1)
+
+    class SlowStream(FakeAssistant):
+        def stream(self, *, system, prompt, max_tokens):
+            del system, prompt, max_tokens
+            yield "Первая часть. "
+            yield "Вторая часть. "
+            yield "Третья часть."
+
+    runtime = AssistantRuntime(
+        provider_factory=SlowStream,
+        reducer_factory=PassthroughReducer,
+        provider_name="fake",
+        model_name="offline-fake",
+        context_model_name=None,
+        max_context_bytes=16_384,
+        max_output_tokens=256,
+        max_concurrent=2,
+        history=store,
+        history_days=30,
+    )
+
+    events = runtime.stream(
+        source=FileSystemReportSource(report_root=reports_root),
+        can_read=lambda dag, u: True,
+        user={"id": 90},
+        query=AssistantQuery(question="долгий вопрос", conversation="stopped"),
+    )
+    deltas = 0
+    for name, _ in events:
+        if name == "delta":
+            deltas += 1
+            if deltas == 2:
+                events.close()  # the browser pressing Stop
+                break
+
+    rows = [
+        item["content"]
+        for item in store.load("id:90", limit=10, conversation="stopped")
+    ]
+
+    assert len(rows) == 2, rows
+    assert rows[0] == "долгий вопрос"
+    assert "Первая часть." in rows[1], rows[1]
+    assert "Третья часть" not in rows[1], "only what actually arrived"
+
+
+def test_a_stopped_answer_is_stored_exactly_as_the_reader_saw_it(reports_root):
+    """The stored copy wins on reload, so it has to be the same text, character for
+    character.
+
+    A completed answer is stored as the model wrote it. The partial went through the
+    secret scrubber as well, which is prose-hostile by design -- "bearer token" comes out
+    as "bearer [REDACTED]". So the reader stopped an answer, read it, refreshed, and the
+    words changed underneath them: the one thing storing the partial was meant to
+    prevent. Nothing is lost by matching the completed path -- the model only ever saw
+    redacted evidence, so its output has no secret to scrub.
+    """
+    db.upgrade()
+    store = db.history_store()
+    write_report(reports_root, ReportRef("dag", "run", "task", 1), failed=1)
+
+    class Prose(FakeAssistant):
+        def stream(self, *, system, prompt, max_tokens):
+            del system, prompt, max_tokens
+            yield "Send a bearer token in the Authorization: header. "
+            yield "Второй кусок."
+
+    runtime = AssistantRuntime(
+        provider_factory=Prose,
+        reducer_factory=PassthroughReducer,
+        provider_name="fake",
+        model_name="offline-fake",
+        context_model_name=None,
+        max_context_bytes=16_384,
+        max_output_tokens=256,
+        max_concurrent=2,
+        history=store,
+        history_days=30,
+    )
+
+    events = runtime.stream(
+        source=FileSystemReportSource(report_root=reports_root),
+        can_read=lambda dag, u: True,
+        user={"id": 91},
+        query=AssistantQuery(question="как авторизоваться?", conversation="prose"),
+    )
+    shown = []
+    for name, payload in events:
+        if name == "delta":
+            shown.append(payload["text"])
+            events.close()
+            break
+
+    stored = [
+        item["content"] for item in store.load("id:91", limit=10, conversation="prose")
+    ]
+
+    assert stored[1] == "".join(shown).strip()
+    assert "[REDACTED]" not in stored[1]
+
+
+def test_stopping_before_a_single_word_arrives_stores_nothing(reports_root):
+    """There is no exchange to keep if the answer never started."""
+    db.upgrade()
+    store = db.history_store()
+    write_report(reports_root, ReportRef("dag", "run", "task", 1), failed=1)
+
+    class NeverStarts(FakeAssistant):
+        def stream(self, *, system, prompt, max_tokens):
+            del system, prompt, max_tokens
+            return
+            yield  # pragma: no cover - makes this a generator
+
+    runtime = AssistantRuntime(
+        provider_factory=NeverStarts,
+        reducer_factory=PassthroughReducer,
+        provider_name="fake",
+        model_name="offline-fake",
+        context_model_name=None,
+        max_context_bytes=16_384,
+        max_output_tokens=256,
+        max_concurrent=2,
+        history=store,
+        history_days=30,
+    )
+    events = runtime.stream(
+        source=FileSystemReportSource(report_root=reports_root),
+        can_read=lambda dag, u: True,
+        user={"id": 91},
+        query=AssistantQuery(question="ничего не придёт", conversation="nothing"),
+    )
+    for name, _ in events:
+        if name == "meta":
+            events.close()
+            break
+
+    assert store.load("id:91", limit=10, conversation="nothing") == []
+
+
+def test_a_provider_that_dies_mid_answer_keeps_what_arrived(reports_root):
+    """The window shows the partial with the reason beside it; the server agrees.
+
+    Same rule as Stop, reached without the reader doing anything: what they can see must
+    survive a refresh, or the exchange is deleted in front of them by a failure that was
+    not their fault.
+    """
+    db.upgrade()
+    store = db.history_store()
+    write_report(reports_root, ReportRef("dag", "run", "task", 1), failed=1)
+
+    class DyingStream(FakeAssistant):
+        def stream(self, *, system, prompt, max_tokens):
+            del system, prompt, max_tokens
+            yield "Начало ответа. "
+            raise RuntimeError("upstream went away")
+
+    runtime = AssistantRuntime(
+        provider_factory=DyingStream,
+        reducer_factory=PassthroughReducer,
+        provider_name="fake",
+        model_name="offline-fake",
+        context_model_name=None,
+        max_context_bytes=16_384,
+        max_output_tokens=256,
+        max_concurrent=2,
+        history=store,
+        history_days=30,
+    )
+
+    with pytest.raises(AssistantProviderError):
+        for _ in runtime.stream(
+            source=FileSystemReportSource(report_root=reports_root),
+            can_read=lambda dag, u: True,
+            user={"id": 92},
+            query=AssistantQuery(question="оборвётся", conversation="dead"),
+        ):
+            pass
+
+    rows = [
+        item["content"] for item in store.load("id:92", limit=10, conversation="dead")
+    ]
+
+    assert len(rows) == 2, rows
+    assert "Начало ответа" in rows[1]
+
+
+def test_a_user_with_more_chats_than_the_list_holds_is_told_so():
+    """Twenty is the list's limit, not the number of chats somebody has.
+
+    Past it the older ones are still stored, still counted against retention and still
+    readable by id -- but they leave the window with no explanation, and the summary line
+    reports the truncated length as though it were the total. A reader whose chat
+    vanished has no way to tell that from it having been deleted.
+    """
+    db.upgrade()
+    store = db.history_store()
+    for index in range(db.MAX_CONVERSATIONS + 5):
+        store.append(
+            "id:80",
+            f"вопрос {index}",
+            f"ответ {index}",
+            [],
+            1,
+            conversation=f"chat{index:03d}",
+        )
+    runtime = AssistantRuntime(
+        provider_factory=FakeAssistant,
+        reducer_factory=PassthroughReducer,
+        provider_name="fake",
+        model_name="offline-fake",
+        context_model_name=None,
+        max_context_bytes=16_384,
+        max_output_tokens=256,
+        max_concurrent=2,
+        history=store,
+        history_days=30,
+    )
+
+    body = runtime.history({"id": 80})
+
+    assert len(body["conversations"]) == db.MAX_CONVERSATIONS
+    assert body["conversations_truncated"] is True
+    # The oldest is out of the list but has not been lost.
+    assert len(store.load("id:80", limit=10, conversation="chat000")) == 2
+
+
+def test_a_user_within_the_limit_is_not_told_anything():
+    db.upgrade()
+    store = db.history_store()
+    store.append("id:81", "один вопрос", "один ответ", [], 1, conversation="only")
+    runtime = AssistantRuntime(
+        provider_factory=FakeAssistant,
+        reducer_factory=PassthroughReducer,
+        provider_name="fake",
+        model_name="offline-fake",
+        context_model_name=None,
+        max_context_bytes=16_384,
+        max_output_tokens=256,
+        max_concurrent=2,
+        history=store,
+        history_days=30,
+    )
+
+    body = runtime.history({"id": 81})
+
+    assert body["conversations_truncated"] is False
+    assert len(body["conversations"]) == 1

@@ -298,16 +298,31 @@ def selected_skills(question: str, commands: tuple[str, ...] = ()) -> tuple[str,
     return tuple(name for name, skill in SKILLS.items() if skill.wants(question))
 
 
-def no_evidence_text(*, commands: tuple[str, ...] = (), question: str = "") -> str:
+def no_evidence_text(
+    *,
+    commands: tuple[str, ...] = (),
+    question: str = "",
+    has_documentation: bool = False,
+) -> str:
     """Return the evidence block to send when no report was in scope.
 
     Two different situations wear the same empty evidence. A question about the user's
-    runs found nothing and should be told so. A request that never needed a report --
-    writing a test for pasted code -- must not be, because "no report matched, widen your
-    filters" reads as a refusal and competes with the instruction to do the work.
+    runs found nothing and should be told so. A request that never needed a report must
+    not be, because "no report matched, widen your filters" reads as a refusal and
+    competes with the instruction to do the work.
+
+    Documentation having matched is the same signal as ``/docs`` and counts for more than
+    the command does, because most people never type one: asked how to run their first
+    test, on an installation that by definition has no runs yet, the reader was told to
+    clear their dashboard filters.
     """
     wanted = selected_skills(question, commands)
-    if wanted and all(not SKILLS[name].needs_evidence for name in wanted):
+    # A skill that is answered *from* the runs settles it: a manual for a testing tool has
+    # a section about flaky tests, so "какие тесты флакают?" matches documentation while
+    # being entirely a question about this week's runs.
+    if any(SKILLS[name].needs_evidence for name in wanted):
+        return _fragment("no_evidence")
+    if wanted or has_documentation:
         return _fragment("no_evidence_optional")
     return _fragment("no_evidence")
 

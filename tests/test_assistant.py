@@ -63,7 +63,7 @@ from airflow_pytest_plugin.assistant import (
     configured_assistant_runtime,
 )
 from airflow_pytest_plugin.assistant.common import usage_count
-from airflow_pytest_plugin.assistant.docs import load_documentation
+from airflow_pytest_plugin.assistant.docs import builtin_paths, load_documentation
 from airflow_pytest_plugin.assistant.factory import _configuration_problem
 from airflow_pytest_plugin.assistant.limits import UserLimits
 from airflow_pytest_plugin.assistant.prompts import (
@@ -261,6 +261,131 @@ def test_assistant_redacts_environment_values_and_node_parameters(monkeypatch):
     safe = safe_node_id(node_id)
     assert safe.startswith("tests/test_api.py::test_call[")
     assert secret not in safe and "[REDACTED]" in safe
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "почему падает tests.auth::test_login?",
+        "why does tests.token::test_refresh fail?",
+        "The failure in tests.auth::test_login is a 401 from the stub.",
+        "run pytest -k 'auth::test_login'",
+        "tests.authorization::test_header",
+    ],
+)
+def test_a_pytest_selector_is_not_read_as_an_assignment(text):
+    """`::` separates a module from a test; `=` and `:` assign a value.
+
+    Free text is scrubbed on the way in and on the way out, so reading
+    `tests.auth::test_login` as `auth = test_login` deleted the test's name from the
+    question the user typed, from the prompt the model was given, from the stored
+    transcript and from the answer.
+    """
+    assert redact_text(text) == text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "auth: hunter2-the-value",
+        "auth=hunter2-the-value",
+        "token: hunter2-the-value",
+        'password: "hunter2-the-value"',
+        "authorization: Bearer hunter2-the-value",
+    ],
+)
+def test_a_single_colon_assignment_is_still_a_secret(text):
+    assert "hunter2-the-value" not in redact_text(text)
+
+
+@pytest.mark.parametrize(
+    "node_id",
+    [
+        "tests.auth::test_login",
+        "tests.token::test_refresh",
+        "tests.api.key::test_rotate",
+        "tests.session::test_expiry",
+    ],
+)
+def test_a_test_in_an_auth_module_keeps_its_name(node_id, reports_root, monkeypatch):
+    """`tests.auth::test_login` used to reach the model as `tests.auth:[REDACTED]`.
+
+    A node id is one identifier, not a `name: value` pair, but the free-text scrubber
+    reads any `secret-word:` prefix as an assignment and deletes what follows -- and a
+    module called `auth.py`, `token.py` or `session.py` is ordinary. The name of the
+    failing test is the single fact the answer exists to deliver, so this removed the
+    subject of the question from exactly the reports people ask about most.
+    """
+    module, name = node_id.split("::")
+    write_report_xml(
+        str(reports_root),
+        ReportRef("checkout", "run_a", "pytest", 1),
+        '<?xml version="1.0" encoding="utf-8"?><testsuites>'
+        '<testsuite name="p" tests="1" failures="1" errors="0" skipped="0" time="1">'
+        f'<testcase classname="{module}" name="{name}" time="1.0">'
+        '<failure message="AssertionError: assert 401 == 200">boom</failure>'
+        "</testcase></testsuite></testsuites>",
+        summary={
+            "total": 1,
+            "passed": 0,
+            "failed": 1,
+            "skipped": 0,
+            "errors": 0,
+            "duration": 1.0,
+            "exit_code": 1,
+            "success": False,
+            "failed_node_ids": [],
+        },
+    )
+
+    context = ReportContextBuilder(max_context_bytes=32_768).build(
+        source=FileSystemReportSource(report_root=str(reports_root)),
+        can_read=lambda dag_id, user: True,
+        user=None,
+        query=AssistantQuery(question="что упало?"),
+    )
+
+    assert node_id in context.text
+    assert "[REDACTED]" not in context.text
+
+
+def test_a_secret_in_a_parametrized_node_id_is_still_redacted(
+    reports_root, monkeypatch
+):
+    """The part of a node id that can carry a credential is the parametrization."""
+    secret = "s3cr3t-token-value-1234"
+    monkeypatch.setenv("TEST_FIXTURE_SECRET", secret)
+    write_report_xml(
+        str(reports_root),
+        ReportRef("checkout", "run_a", "pytest", 1),
+        '<?xml version="1.0" encoding="utf-8"?><testsuites>'
+        '<testsuite name="p" tests="1" failures="1" errors="0" skipped="0" time="1">'
+        f'<testcase classname="tests.auth" name="test_login[password={secret}]" '
+        'time="1.0"><failure message="boom">boom</failure>'
+        "</testcase></testsuite></testsuites>",
+        summary={
+            "total": 1,
+            "passed": 0,
+            "failed": 1,
+            "skipped": 0,
+            "errors": 0,
+            "duration": 1.0,
+            "exit_code": 1,
+            "success": False,
+            "failed_node_ids": [],
+        },
+    )
+
+    context = ReportContextBuilder(max_context_bytes=32_768).build(
+        source=FileSystemReportSource(report_root=str(reports_root)),
+        can_read=lambda dag_id, user: True,
+        user=None,
+        query=AssistantQuery(question="что упало?"),
+    )
+
+    assert secret not in context.text
+    assert "tests.auth::test_login[" in context.text
+    assert "[REDACTED]" in context.text
 
 
 def test_configuration_values_are_not_mistaken_for_secrets(monkeypatch):
@@ -4272,8 +4397,9 @@ def test_a_bare_command_leaves_the_model_a_question_it_can_answer(reports_root):
 
     system, prompt, _ = provider.calls[0]
     assert "SKILL: writing tests" in system
-    # The skill itself tells it what to do with a request too vague to write against.
-    assert "ask one specific question" in " ".join(system.split())
+    # The skill itself tells it what to do with a request that names no framework: state
+    # the assumption and write the tests, rather than opening a requirements interview.
+    assert "state the assumption" in " ".join(system.split())
     assert "suggest clearing" not in " ".join(prompt.split())
 
 
@@ -4685,3 +4811,188 @@ def test_a_setting_inside_its_range_is_quiet(monkeypatch, caplog):
 
     assert settings.max_context_bytes == 65_536
     assert CONTEXT_BYTES_ENV not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("question", "expect_filters_advice"),
+    [
+        ("/docs как запустить первый тест?", False),
+        ("как запустить первый тест?", False),
+        ("какие параметры у ArchivingResultParser?", False),
+        ("что умеет airflow-pytest-operator?", False),
+        ("/test напиши тест на логин", False),
+        ("почему упал test_login?", True),
+        ("какие тесты флакают?", True),
+        ("что чинить в первую очередь?", True),
+        ("что изменилось между прогонами?", True),
+    ],
+)
+def test_an_empty_dashboard_answers_the_question_it_was_asked(
+    reports_root, question, expect_filters_advice
+):
+    """The state every installation starts in, and the one this is easiest to get wrong.
+
+    With no runs archived yet the only questions anyone *can* ask are about the product,
+    and answering "no run matched your filters, clear them" is a refusal to answer a
+    question that needed no run. A question about their own runs must still be told
+    plainly that nothing was found.
+    """
+    runtime = _runtime(_CapturingProvider(), PassthroughReducer())
+    runtime.documentation = load_documentation(builtin_paths())
+    runtime.docs_bytes = 4_096
+
+    runtime.ask(
+        source=FileSystemReportSource(report_root=reports_root),
+        can_read=lambda dag, user: True,
+        user=SimpleNamespace(username="alice"),
+        query=AssistantQuery(question=question),
+    )
+
+    _, prompt, _ = runtime._provider.calls[0]
+    evidence = prompt.split("REPORT EVIDENCE\n")[1]
+    advises_filters = "no report matched the current scope" in evidence
+
+    assert advises_filters is expect_filters_advice, evidence.splitlines()[0]
+
+
+CHUNK_WITH_DURATIONS = """\
+Scope: all readable reports
+Readable reports in scope: 1
+Chunk: 1
+
+RUN [R1] {"dag_id":"checkout","run_id":"run_a","task_id":"pytest","try_number":1,\
+"total":4,"passed":3,"failed":1,"errors":0,"skipped":0,"duration":14.0,"success":false}
+CASE {"report":"R1","node_id":"tests.test_auth::test_login","outcome":"failed",\
+"duration":1.1,"verdict":null,"case":"R1:C1"}
+TRACEBACK R1:C1
+| AssertionError: assert 401 == 200
+CASE {"report":"R1","node_id":"tests.test_billing::test_invoice","outcome":"passed",\
+"duration":9.8,"verdict":null,"case":"R1:C2"}
+CASE {"report":"R1","node_id":"tests.test_billing::test_refund","outcome":"passed",\
+"duration":0.4,"verdict":null,"case":"R1:C3"}
+CASE {"report":"R1","node_id":"tests.test_cart::test_add","outcome":"passed",\
+"duration":2.5,"verdict":null,"case":"R1:C4"}
+"""
+
+
+def test_a_duration_question_survives_compression():
+    """The slowest test is usually one that passed, and compression dropped every pass.
+
+    Direct mode carries the slowest cases for a question about time; the local path did
+    not, so the same archive answered "which test is slowest?" in one mode and "the
+    reports contain no timing data" in the other. Found by running both against a live
+    provider.
+    """
+    result = reduce_context_tree(
+        question="какой тест самый медленный?",
+        chunks=iter([CHUNK_WITH_DURATIONS]),
+        reducer=_ParaphrasingReducer(),
+        max_bytes=8_192,
+    )
+
+    assert "tests.test_billing::test_invoice" in result.text
+    assert "9.8" in result.text
+
+
+def test_a_question_about_anything_else_carries_no_durations():
+    """It is bytes on every request otherwise, and the failures need the room."""
+    result = reduce_context_tree(
+        question="почему упал test_login?",
+        chunks=iter([CHUNK_WITH_DURATIONS]),
+        reducer=_ParaphrasingReducer(),
+        max_bytes=8_192,
+    )
+
+    assert "tests.test_auth::test_login" in result.text
+    assert "test_invoice" not in result.text
+
+
+def test_a_damaged_archive_still_answers_about_the_runs_that_are_intact(reports_root):
+    """An archive is a directory tree on a shared volume, and volumes get half-written.
+
+    A run interrupted mid-archive leaves a truncated JUnit file or a meta.json that is
+    not JSON. Letting either abort the request would mean one bad directory silences the
+    assistant for the whole dashboard -- so they are skipped and the rest is answered.
+    """
+    good = ReportRef("good", "run_a", "pytest", 1)
+    write_report(reports_root, good, failed=1)
+
+    broken = Path(reports_root) / "broken" / "run_a" / "pytest" / "t1"
+    broken.mkdir(parents=True)
+    (broken / "meta.json").write_text("{not json at all", encoding="utf-8")
+    (broken / "junit.xml").write_text("<testsuites><testsuite", encoding="utf-8")
+
+    # A meta.json with no report file beside it, and an empty directory.
+    orphan = Path(reports_root) / "orphan" / "run_a" / "pytest" / "t1"
+    orphan.mkdir(parents=True)
+    (orphan / "meta.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "dag_id": "orphan",
+                "run_id": "run_a",
+                "task_id": "pytest",
+                "try_number": 1,
+                "created_at": "2026-08-01T10:00:00+00:00",
+                "report_file": "junit.xml",
+                "summary": {
+                    "total": 1,
+                    "passed": 0,
+                    "failed": 1,
+                    "skipped": 0,
+                    "errors": 0,
+                    "duration": 1.0,
+                    "exit_code": 1,
+                    "success": False,
+                    "failed_node_ids": [],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (Path(reports_root) / "empty" / "run_a" / "pytest" / "t1").mkdir(parents=True)
+
+    write_report_xml(
+        reports_root,
+        ReportRef("truncated", "run_a", "pytest", 1),
+        '<?xml version="1.0"?><testsuites><testsuite name="p" tests="1" failures="1" '
+        'errors="0" skipped="0" time="1"><testcase classname="t" name="test_a">'
+        '<failure message="boom">tra',
+        summary={
+            "total": 1,
+            "passed": 0,
+            "failed": 1,
+            "skipped": 0,
+            "errors": 0,
+            "duration": 1.0,
+            "exit_code": 1,
+            "success": False,
+            "failed_node_ids": [],
+        },
+    )
+
+    provider = _CapturingProvider()
+    runtime = _runtime(provider, PassthroughReducer())
+    source = FileSystemReportSource(report_root=reports_root)
+
+    reply = runtime.ask(
+        source=source,
+        can_read=lambda dag, user: True,
+        user=None,
+        query=AssistantQuery(question="что упало во всех прогонах?"),
+    )
+
+    assert reply.answer
+    _, prompt, _ = provider.calls[0]
+    assert "good" in prompt, "the intact run must still reach the model"
+
+    # The local path reads every case rather than a summary, so it meets the damage first.
+    context = ReportContextBuilder(max_context_bytes=32_768).build_complete(
+        source=source,
+        can_read=lambda dag, user: True,
+        user=None,
+        query=AssistantQuery(question="что упало?"),
+    )
+    chunks = "".join(context.chunks)
+
+    assert "good" in chunks

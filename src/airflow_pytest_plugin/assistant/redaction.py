@@ -76,13 +76,21 @@ _JWT = re.compile(r"eyJ[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]*){2,4}")
 _URL_CREDENTIAL = re.compile(
     r"([a-zA-Z][\w+.\-]{0,39}://[^\s:/@]{1,256}:)([^\s@/]{1,256})(@)"
 )
+#: A colon that is not part of ``::``. A double colon separates a module from a test --
+#: ``tests.auth::test_login`` -- and reading that as ``auth = test_login`` deleted the
+#: name of the test from the question, the prompt, the transcript and the answer. An
+#: assignment in a log line or a config dump uses one colon or an equals sign.
+_ASSIGNS = r"(?::(?!:)|=)"
+
 _AUTHORIZATION = re.compile(
-    r"(?i)(authorization[\"']?\s*[:=]\s*[\"']?(?:[A-Za-z]+\s+)?)\S+"
+    r"(?i)(authorization[\"']?\s*" + _ASSIGNS + r"\s*[\"']?(?:[A-Za-z]+\s+)?)\S+"
 )
 _BEARER = re.compile(r"(?i)((?:bearer|basic)\s+)\S+")
 _SECRET_ASSIGNMENT = re.compile(
     r"(?i)(\b(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|"
-    r"client[_-]?secret|private[_-]?key|auth|credential)s?[\"']?\s*[=:]\s*[\"']?)"
+    r"client[_-]?secret|private[_-]?key|auth|credential)s?[\"']?\s*"
+    + _ASSIGNS
+    + r"\s*[\"']?)"
     r"([^\s\"',]+)"
 )
 _AWS_ACCESS_KEY = re.compile(r"\bAKIA[0-9A-Z]{16}\b")

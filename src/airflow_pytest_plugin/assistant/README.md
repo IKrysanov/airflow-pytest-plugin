@@ -14,6 +14,8 @@ viewer, archiving, coverage, alerts and everything else. This file is only the a
 - [Database](#database)
 - [Environment variables](#environment-variables)
 
+![The report assistant](https://raw.githubusercontent.com/IKrysanov/airflow-pytest-plugin/main/docs/screenshots/assistant.png)
+
 ## What it is
 
 The **AI assistant** button opens a chat window over the current report selection and answers
@@ -63,7 +65,8 @@ filtering and secret redaction — so nothing about what left the server is impl
 > tracebacks, saved triage verdicts and up to 2 KiB of captured stdout/stderr per failure.
 > Per-test detail is carried for failures; a question about **how long** something took also
 > carries the twenty slowest cases across the scope, whatever their outcome, since the
-> slowest test is usually one that passed.
+> slowest test is usually one that passed. Both context modes answer that the same way:
+> under compression those cases are restored from the chunk rather than left to the reducer.
 > Known secrets and values from the server environment are redacted first, but redaction is a
 > guard rail, not a proof. Enable the assistant only where sending failure output to your
 > chosen provider is allowed.
@@ -394,6 +397,17 @@ well as the one on screen, so it is never a single click. A refresh returns to w
 the tab was reading. Without the tables the button stays hidden and the panel behaves exactly
 as before — one transcript, kept in the tab.
 
+Every answered question is stored, including one asked with nothing in scope — on a fresh
+install that is the only kind there is, and an answer the reader received is their chat
+whatever the dashboard held. A refused request (rate limit, permission, a provider that
+never answered) produces no reply and is not stored. An answer that *started* is kept with
+whatever arrived -- whether it was stopped from the window or cut off by the provider --
+because the window keeps that text on screen and the server copy wins on the next reload;
+a reader must not lose an exchange they can see. It is stored without evidence links or
+token usage, which the request never got as far as knowing. Deleting or clearing a chat reaches the other tabs of
+the same browser, so a conversation that no longer exists stops being shown in a tab that
+still had it open; a tab reading a *different* chat is left alone.
+
 Ownership is enforced in the query, not in the UI: every read, write and delete is filtered by
 the acting principal. That principal is the account's **primary key** where the auth manager
 exposes one — `id`, then `user_id`, then `username`, recorded with the attribute it came from
@@ -421,12 +435,28 @@ rather than an error that would empty the window. `GET /api/assistant/status` re
 turns it off for new messages while still reading the old ones. With no Fernet key configured
 the transcript is stored as plain text.
 
+**Rotating the key: run one extra command.** Airflow's own procedure is to put the new key
+first, run `airflow rotate-fernet-key`, then drop the old one — and that command re-encrypts
+Airflow's connections and variables. It knows nothing about this plugin's table, so dropping
+the old key would take every stored transcript with it. While both keys are listed, run:
+
+```bash
+python -m airflow_pytest_plugin.db rotate-key
+```
+
+It re-encrypts the stored messages and chat names with whichever key is first, and skips any
+row it cannot read rather than writing the placeholder back — a skipped row is still
+recoverable by listing its key again and re-running. `status` and `doctor` both print what
+encryption is currently doing, including the case a mistyped key used to hide: the transcript
+silently falls back to plain text.
+
 Two more rules follow from the same principle. The stored question is the **redacted** one the
 model saw, so a value scrubbed on its way to a provider does not survive in the metadata
 database instead. And the `[R1]` links in a restored answer are re-checked against your DAG
 read permissions when the transcript is served: an answer written while you had access does
 not keep naming a DAG after that access is withdrawn.
 
+The window lists the twenty most recently used chats and says so when there are more; the rest are still stored and still readable, they simply leave the list.
 Chats expire after `HISTORY_DAYS` (dropped opportunistically, at most hourly per process).
 **Clear chat** deletes the user's stored transcript as well as the local one, so nobody needs
 an administrator to erase their own history.
@@ -434,6 +464,7 @@ an administrator to erase their own history.
 ```bash
 python -m airflow_pytest_plugin.db purge                 # honours HISTORY_DAYS
 python -m airflow_pytest_plugin.db purge --history-days 7
+python -m airflow_pytest_plugin.db rotate-key            # re-encrypt with the current key
 ```
 
 ## Environment variables
