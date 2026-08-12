@@ -5,6 +5,82 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-08-12
+
+### Added
+
+- **Read-only report assistant.** The **AI assistant** button opens a chat window over the
+  dashboard and answers from the selected runs, or from the current filters when nothing is
+  selected. Every request re-checks Airflow's DAG read permission on the server, so an
+  answer can only be built from reports the asking user may already open, and each answer
+  carries clickable `[R1]` evidence links back to the runs it used. Answers stream, **Send**
+  becomes **Stop** while one is being written, and each answer shows the bytes and provider
+  tokens it cost. Anthropic, OpenAI-compatible, GigaChat and an offline `fake` provider are
+  supported through per-provider extras. **With no provider configured there is no button,
+  no client code in the page and no `/api/assistant/*` routes at all.**
+- **Slash commands.** Typing `/` offers `/bug`, `/flaky`, `/priority`, `/compare`, `/test`
+  and `/docs`, each a prompt fragment sent only when the question calls for it.
+- **A product manual ships with the plugin**, so `/docs` answers "how do I run my first
+  test?" on a fresh install. `AIRFLOW_PYTEST_ASSISTANT_DOCS` replaces it with your own
+  manuals; only the sections a question matches are sent, and a domain glossary lets a
+  Russian question find an English manual.
+- **Optional in-process context reducer.** A GGUF model loaded by `llama-cpp-python` reads
+  the complete authorized tree in bounded chunks and merges the results before the final
+  provider call, bounded by `AIRFLOW_PYTEST_ASSISTANT_LOCAL_BUDGET_SECONDS` (default 120).
+  Without a local model the deterministic bounded context is sent directly.
+- **The plugin's own tables, in Airflow's metadata database.**
+  `python -m airflow_pytest_plugin.db upgrade` creates and migrates them; `status` and
+  `doctor` report what is configured and what is wrong. They use their own SQLAlchemy
+  metadata and a `pytest_assistant_` prefix, so `airflow db` never sees them. With no
+  database, no SQLAlchemy or tables not yet created, the assistant keeps its in-process
+  behaviour.
+- **Server-side chat history, encrypted at rest.** A completed exchange is stored for the
+  asking user, so a chat survives a closed tab; the **Chats** window lists, renames and
+  deletes them. Message text and chat names are encrypted with the same Fernet key Airflow
+  uses for connection passwords. Only the question, the answer, its evidence links and token
+  usage are written — never the evidence block itself. Every read, write and delete is
+  filtered by the acting principal, which is the account's primary key rather than a
+  username. Chats expire after `AIRFLOW_PYTEST_ASSISTANT_HISTORY_DAYS` (default 30).
+- **Rotating the Fernet key needs one extra command.** `airflow rotate-fernet-key`
+  re-encrypts Airflow's own connections and variables and knows nothing about this table, so
+  dropping the old key would take every stored transcript with it. Restart every API server
+  on the new key, run `python -m airflow_pytest_plugin.db rotate-key` while both keys are
+  still listed, then drop the old one. Rows it cannot read are skipped rather than
+  overwritten, so they stay recoverable; `status` and `doctor` report what encryption is
+  doing, including a key that is set but unusable.
+- **Shared per-principal rate limit and daily token quota.**
+  `AIRFLOW_PYTEST_ASSISTANT_RATE_LIMIT` (default 60/hour) and
+  `AIRFLOW_PYTEST_ASSISTANT_DAILY_TOKEN_QUOTA` (off by default) are shared across workers
+  and restarts once the tables exist. A refused request answers `429` with `Retry-After`
+  before reaching any model, so it costs nothing.
+- **Provider readiness check.** `POST /api/assistant/health` probes the configured provider.
+  Off unless `AIRFLOW_PYTEST_ASSISTANT_HEALTHCHECK` is set, since the probe is billable.
+- **Assistant audit log and cost metrics.** One JSON record per request on the
+  `airflow_pytest_plugin.assistant.audit` logger — principal, outcome, provider/model, the
+  DAGs whose data left the server, token cost and latency, with no report content and no
+  question text. `GET /api/metrics` gains matching counters when the assistant is configured.
+- New API methods: `GET /api/assistant/status`, `POST /api/assistant/query`,
+  `POST /api/assistant/stream`, `GET`/`DELETE`/`PATCH /api/assistant/history` and
+  `POST /api/assistant/health`.
+
+### Fixed
+
+- The request body-limit middleware reported a synthetic disconnect after the buffered body,
+  which Starlette read as a departed client and used to cancel streaming responses on a
+  guarded path before their first byte.
+
+### Security
+
+- Report text is treated as untrusted prompt data throughout. Free text archived from a run —
+  a traceback or captured stdout — is fenced line by line where it is embedded in the
+  evidence, so a test that prints something shaped like the evidence format cannot forge a
+  result that never happened. Answer text can never forge a Server-Sent Event: each payload
+  is JSON on one `data:` line.
+- Assistant requests never bypass report RBAC; they cap request, history, explicit scope,
+  traceback, captured-output and response sizes, and redact known secrets and values taken
+  from the server environment. Tracebacks and bounded captured output from failed tests do
+  leave the server when a remote provider is enabled.
+
 ## [0.7.0] - 2026-07-31
 
 ### Added
@@ -615,7 +691,8 @@ the Airflow 3 web UI.
 - CI/CD: lint, type-check, unit (py3.10–3.13) + Airflow 3 integration matrices,
   CodeQL, OpenSSF Scorecard, DCO, and Trusted-Publishing release workflows.
 
-[Unreleased]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.6.2...v0.7.0
 [0.6.2]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/IKrysanov/airflow-pytest-plugin/compare/v0.6.0...v0.6.1

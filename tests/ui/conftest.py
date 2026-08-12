@@ -537,6 +537,13 @@ def base_url(tmp_path_factory):
 
 
 @pytest.fixture(scope="session")
+def empty_base_url(tmp_path_factory):
+    """Empty report root -> onboarding state with a direct guide link."""
+    root = tmp_path_factory.mktemp("ui-reports-empty")
+    yield from _boot(str(root))
+
+
+@pytest.fixture(scope="session")
 def large_base_url(tmp_path_factory):
     """Large seed (40 dag·tasks x 80 runs = 3200 runs) -> layout stress at scale."""
     root = tmp_path_factory.mktemp("ui-reports-large")
@@ -550,6 +557,17 @@ def triage_base_url(tmp_path_factory):
     root = tmp_path_factory.mktemp("ui-reports-triage")
     _seed_triage(str(root))
     yield from _boot(str(root))
+
+
+@pytest.fixture(scope="session")
+def assistant_base_url(tmp_path_factory):
+    """SMALL seed with the offline report assistant enabled in the API server."""
+    root = tmp_path_factory.mktemp("ui-reports-assistant")
+    _seed(str(root), _SMALL, _SMALL_NRUNS)
+    yield from _boot(
+        str(root),
+        extra_env={"AIRFLOW_PYTEST_ASSISTANT_PROVIDER": "fake"},
+    )
 
 
 @pytest.fixture(scope="session")
@@ -644,6 +662,12 @@ def large_dash(page, large_base_url) -> Dash:
 def triage_dash(page, triage_base_url) -> Dash:
     """A loaded dashboard whose ``alpha`` runs were AI-triaged (beta/gamma were not)."""
     return _load_dash(page, triage_base_url)
+
+
+@pytest.fixture
+def assistant_dash(page, assistant_base_url) -> Dash:
+    """A dashboard with real assistant status/query calls using the offline provider."""
+    return _load_dash(page, assistant_base_url)
 
 
 @pytest.fixture

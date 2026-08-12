@@ -18,9 +18,11 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
+from ..assistant import AssistantRuntime, configured_assistant_runtime
 from ..compat import (
     airflow_auth_available,
     airflow_available,
@@ -65,6 +67,10 @@ _OPENAPI_TAGS = [
     {
         "name": "flaky",
         "description": "Tests that both pass and fail across recent runs.",
+    },
+    {
+        "name": "assistant",
+        "description": "Read-only, RBAC-scoped questions about archived reports.",
     },
 ]
 
@@ -180,7 +186,13 @@ class _RequestBodyLimitMiddleware:
         iterator = iter(messages)
 
         async def replay() -> Message:
-            return next(iterator, {"type": "http.disconnect"})
+            message = next(iterator, None)
+            if message is not None:
+                return message
+            # Once the buffered body is replayed, defer to the real transport. Answering
+            # with a synthetic ``http.disconnect`` would tell a streaming response that the
+            # client had already gone, and Starlette would cancel it before the first byte.
+            return await receive()
 
         await self.app(scope, replay, send)
 
@@ -247,6 +259,7 @@ def create_app(
     authorizer: Authorizer | None = None,
     read_authorizer: Authorizer | None = None,
     user_dependency: Callable[[], Any] | None = None,
+    assistant: AssistantRuntime | None = None,
 ) -> FastAPI:
     """Build the FastAPI app for ``source`` (defaults to the filesystem source).
 
@@ -257,9 +270,11 @@ def create_app(
     from fastapi import FastAPI
     from fastapi.exceptions import RequestValidationError
 
+    from .routes import assistant as assistant_routes
     from .routes import compare, failures, flaky, monitoring, reports
 
     src = source or FileSystemReportSource()
+    assistant_runtime = assistant or configured_assistant_runtime()
 
     # Said once, at startup, where an operator will see it: the hardened XML parser is an
     # extra, so the default install reads archived reports with the stdlib one. That is fine
@@ -307,6 +322,14 @@ def create_app(
         src=src, read_auth=read_auth, delete_auth=delete_auth, user_dep=user_dep
     )
 
+    @asynccontextmanager
+    async def lifespan(app_: Any) -> AsyncIterator[None]:
+        del app_
+        try:
+            yield
+        finally:
+            assistant_runtime.close()
+
     app = FastAPI(
         title="Airflow Pytest Reports",
         version=__version__,
@@ -315,6 +338,7 @@ def create_app(
         openapi_tags=_OPENAPI_TAGS,
         docs_url="/api/docs",
         openapi_url="/api/openapi.json",
+        lifespan=lifespan,
     )
     app.add_middleware(
         _RequestBodyLimitMiddleware,
@@ -322,6 +346,13 @@ def create_app(
         method="POST",
         max_bytes=MAX_BULK_DELETE_BODY_BYTES,
     )
+    for assistant_path in ("/api/assistant/query", "/api/assistant/stream"):
+        app.add_middleware(
+            _RequestBodyLimitMiddleware,
+            path=assistant_path,
+            method="POST",
+            max_bytes=64 * 1024,
+        )
 
     @app.exception_handler(RequestValidationError)
     async def request_validation_error(
@@ -337,8 +368,15 @@ def create_app(
             content={"detail": _safe_validation_errors(exc.errors())},
         )
 
-    for module in (monitoring, reports, failures, compare, flaky):
+    app.include_router(monitoring.build_router(deps, assistant=assistant_runtime))
+    for module in (reports, failures, compare, flaky):
         app.include_router(module.build_router(deps))
+    # Only when someone asked for the feature. A deployment that never set a provider gets
+    # no assistant surface at all -- not endpoints that refuse, not a schema entry, not a
+    # button -- while one that set a provider and got it wrong keeps the endpoints so the
+    # panel can say what went wrong.
+    if assistant_runtime.configured:
+        app.include_router(assistant_routes.build_router(deps, assistant_runtime))
 
     # Viewer and icons are UI assets, not part of the documented JSON API.
     @app.get("/icon.svg", include_in_schema=False)
@@ -355,7 +393,8 @@ def create_app(
         # served stale -- else a browser/Airflow cache runs old JS after an upgrade.
         # no-store guarantees every load fetches the current build.
         return HTMLResponse(
-            index_html(), headers={"Cache-Control": "no-store, must-revalidate"}
+            index_html(assistant=assistant_runtime.configured),
+            headers={"Cache-Control": "no-store, must-revalidate"},
         )
 
     # Both spellings are served directly. Left to Starlette's redirect_slashes, a

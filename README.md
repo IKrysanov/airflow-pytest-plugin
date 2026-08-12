@@ -49,6 +49,7 @@ Two halves sharing one on-disk layout:
 - [Captured output](#captured-output)
 - [Coverage](#coverage)
 - [AI triage](#ai-triage)
+- [Report assistant](#report-assistant) — [full docs](src/airflow_pytest_plugin/assistant/README.md)
 - [Allure / TestOps export](#allure--testops-export)
 - [Configuration](#configuration)
 - [Prometheus metrics](#prometheus-metrics)
@@ -121,9 +122,12 @@ newest of them.
 | `secure-xml` | reader | `defusedxml`, hardened parsing of untrusted JUnit reports |
 | `triage` | **worker** | `pytest-triage` plus its offline `fake` provider ([AI triage](#ai-triage)) |
 | `triage-anthropic` / `triage-openai` / `triage-gigachat` | **worker** | the same, with that provider's SDK |
+| `assistant` | **API server** | dependency-free report chat with its bundled offline `fake` provider ([Report assistant](#report-assistant)) |
+| `assistant-anthropic` / `assistant-openai` / `assistant-gigachat` | **API server** | report chat plus only that provider's direct SDK; no `pytest-triage` dependency |
+| `assistant-local` | **API server** | `llama-cpp-python` for an optional in-process GGUF context reducer |
 
-The triage extras belong on the **worker**, where the tests run — the reader only reads what
-was archived.
+Triage extras belong on the **worker**, where the tests run. Assistant extras belong in the
+**API-server** image, where questions are answered from the archived reports.
 
 ## Quickstart
 
@@ -222,6 +226,11 @@ runtime. Endpoints (relative to the mount):
 | `DELETE /api/reports/{report_id}` | delete a report (RBAC-gated) |
 | `POST /api/reports/delete` | delete up to 200 reports in one request (RBAC-gated per DAG; partial success is reported per id) |
 | `GET /api/reports/{report_id}/allure.zip` | raw Allure results as a zip (if any) |
+| `GET /api/assistant/status` | whether report chat is configured; does not load either model |
+| `POST /api/assistant/query` | answer from an RBAC-filtered, bounded report snapshot |
+| `POST /api/assistant/stream` | the same answer as Server-Sent Events, token by token |
+| `GET`/`DELETE`/`PATCH /api/assistant/history` | the caller's stored chats: read, clear, rename (their own only) |
+| `POST /api/assistant/health` | one fixed probe proving the configured models answer (opt-in; billable) |
 | `GET /api/health` | liveness + readiness: `status`, `ready`, `reports_root`(+`_exists`), `auth`, `secure_xml` |
 | `GET /api/version` | `{"name": ..., "version": ...}` from package metadata |
 | `GET /api/metrics` | Prometheus exposition — opt-in, bearer-token (see [Prometheus metrics](#prometheus-metrics)) |
@@ -473,6 +482,31 @@ adds the per-test judgements.
 > line, so pytest aborts on unrecognized arguments if it is missing. Nothing else about
 > triage can fail a run: an unreadable report just leaves the archive without an AI section.
 
+## Report assistant
+
+An **AI assistant** button on the dashboard answers questions about the reports you are
+looking at. Every request repeats Airflow's DAG read checks on the server, so an answer can
+only be built from reports you may already open. Answers stream, cite the runs they used, and
+show exactly what was sent and what it cost. Type `/` for commands (`/bug`, `/flaky`,
+`/priority`, `/compare`, `/test`, `/docs`). It ships with a manual of this product, so it can
+answer "how do I run my first test?" out of the box — point it at your own manuals to replace
+that — and it will write pytest when you ask.
+
+![Pytest Reports — report assistant](https://raw.githubusercontent.com/IKrysanov/airflow-pytest-plugin/main/docs/screenshots/assistant.png)
+
+It is **off until you configure a provider** — with none set there is no button, no client
+code in the page and no `/api/assistant/*` routes at all.
+
+```bash
+pip install 'airflow-pytest-plugin[assistant-anthropic]'
+export AIRFLOW_PYTEST_ASSISTANT_PROVIDER=anthropic
+export ANTHROPIC_API_KEY=sk-ant-...
+```
+
+> **[Full assistant documentation →](src/airflow_pytest_plugin/assistant/README.md)**
+> Setup, the two context modes, per-user limits and cost, the database it can use for
+> shared chats, and every environment variable it reads.
+
 ## Configuration
 
 | Setting | Default | Purpose |
@@ -492,6 +526,7 @@ adds the per-test judgements.
 | `AIRFLOW_PYTEST_SLOW_MIN_DELTA` (env/cfg) | `0.5` | minimum absolute slowdown in seconds for a regression to register (filters jittery fast tests) |
 | `AIRFLOW_PYTEST_SUCCESS_THRESHOLD` (env/cfg) | `0.85` | pass-rate (0–1) over executed tests at/above which a run counts as successful (*Passing runs*); `1.0` = strict, zero failures/errors |
 | `AIRFLOW_PYTEST_SUCCESS_COVERAGE` (env/cfg) | `0.85` | line-coverage fraction (0–1) at/above which a run's **coverage** card reads as passing; below it the card turns red. Presentational only — it never fails a run (see [Coverage](#coverage)) |
+| `AIRFLOW_PYTEST_ASSISTANT_DB_CONN_ID` / `_DB_URL` (env) | Airflow's metadata DB | where the assistant's own tables live — shared token quota and server-side chat history (see the [assistant docs](src/airflow_pytest_plugin/assistant/README.md#database)) |
 | `AIRFLOW_PYTEST_METRICS_TOKEN` (env/cfg) | — | bearer token that **enables** the Prometheus `/api/metrics` endpoint; unset = disabled (see [below](#prometheus-metrics)) |
 | `AIRFLOW_PYTEST_ALERTS_EMAIL_TO` (env/cfg) | — | comma-separated alert recipients (empty = alerting stays off; a per-task `email=True` *or* `email_only_fail=True` flag is the on-switch — see [below](#email-alerts)). Validated, case-insensitively deduped, capped at 50 (use a mailing-list address for bigger audiences) |
 | `AIRFLOW_PYTEST_MAX_REPORT_MIB` (env/cfg) | `64` | largest `junit.xml` the **viewer** will parse. Past it the run stays listed but opening it answers `413`; `0` = no limit. Parsing costs up to 5× the file inside the api-server, so this is a guard rail, not a quota — raise it if you really archive more |
@@ -516,6 +551,17 @@ in the Prometheus text format — `airflow_pytest_latest_{passed,failed,errors,s
 tests,pass_ratio,duration_seconds,success,run_timestamp_seconds}{dag_id,task_id}` and
 `airflow_pytest_dagtask_runs{dag_id,task_id}`, plus globals
 `airflow_pytest_{up,runs,dagtasks,latest_failures,series_truncated,build_info}` (all gauges).
+
+When the report assistant is configured, the same scrape also carries what it costs:
+`airflow_pytest_assistant_requests_total{mode,outcome}` (mode `direct`/`local`; outcome
+`answered`, `empty_scope`, `busy`, `error`, `stopped`),
+`airflow_pytest_assistant_provider_tokens_total{kind}` for `input`, `output` and
+`cached_input`, `airflow_pytest_assistant_provider_seconds_total`,
+`airflow_pytest_assistant_{local_reduce_calls,reports_considered,context_limited,output_limited}_total`,
+and the `airflow_pytest_assistant_{enabled,in_flight}` gauges. They are per API-server
+process, reset on restart, and carry no question, report or user — only cost and health.
+Multiply the token counters by your provider's rates to get spend; `busy` and `stopped`
+tell you whether one worker is enough.
 
 It's **disabled by default** and turns on only when you set a scrape token; requests must
 then present it as a bearer token (constant-time compared). The scrape is cheap and
@@ -671,6 +717,8 @@ Mirrors the operator's layering — each piece has one reason to change:
 | `notifications` | pure `evaluate_alerts` decision + `notify_for_run` over any `ReportSource` + a pluggable `Mailer` |
 | `flaky_core` | web-free flaky scoring behind `/api/flaky` |
 | `triage` | the pytest-triage contract in one place: node-id canonicalisation, distillation, the reader's view |
+| `assistant.context` / `assistant.runtime` | bounded RBAC evidence and lazy orchestration |
+| `assistant.{anthropic,openai,gigachat,fake,llama}` | one isolated model adapter per module; `llama` only reduces context |
 | `plugin.PytestReportsPlugin` | register the app with Airflow |
 | `compat` | the only module that imports Airflow |
 | `models` | JSON-serializable view types; the web layer never sees operator types |

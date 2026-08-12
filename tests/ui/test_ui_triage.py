@@ -489,13 +489,8 @@ def _bar(page, *, timeout_ms=3000):
     """Segment opacities, read AFTER the dim transition has settled.
 
     Read immediately, getComputedStyle returns the value mid-interpolation -- still ~1 --
-    and the assertion passes for the wrong reason. A fixed sleep instead of this poll is
-    what made these two tests flaky: it is long enough on an idle machine and not on a busy
-    one, so the read lands mid-fade and the assertion fails on a UI that is behaving.
+    and the assertion passes for the wrong reason.
     """
-    # Let the class land and the .12s fade start before sampling: polling from t=0 settles
-    # on the value from BEFORE the change (two equal reads of a state that has not moved
-    # yet), which is the same wrong answer read too early always gave.
     page.wait_for_timeout(220)
     waited, previous = 0, None
     while True:
@@ -507,6 +502,46 @@ def _bar(page, *, timeout_ms=3000):
         waited += 80
 
 
+def _bar_becomes(page, matches, message, *, timeout_ms=5_000):
+    """Poll the segment opacities until they match, the way ``expect`` does.
+
+    Waiting for the values to stop *changing* has a second wrong answer in it: when the
+    browser is slow to apply the class, the first two samples are both the state from
+    before the transition began, the poll calls that settled, and the assertion fails on
+    a UI that is behaving. Waiting for the state the test is actually asserting cannot
+    settle early -- either it arrives or the deadline does -- which is why this is what
+    the assertions use and ``_bar`` is only for reading a state already known to be
+    stable.
+    """
+    waited = 0
+    while True:
+        current = page.evaluate(BAR_OPACITY)
+        if matches(current):
+            return current
+        if waited >= timeout_ms:
+            raise AssertionError(f"{message}; last read: {current}")
+        page.wait_for_timeout(50)
+        waited += 50
+
+
+def _all_lit(bar):
+    return set(bar.values()) == {"1"}
+
+
+def test_the_bar_poll_fails_rather_than_waiting_out_a_broken_ui(triage_dash):
+    """A poll that waits for a state must still give up on one that never comes.
+
+    Written because the fix for the flake was to stop asserting a sampled value and
+    start waiting for the expected one -- which would hide a real regression if the
+    waiting had no end.
+    """
+    page = triage_dash.page
+    _open_mixed_run(page)
+
+    with pytest.raises(AssertionError, match="never happens"):
+        _bar_becomes(page, lambda bar: False, "never happens", timeout_ms=200)
+
+
 def test_the_mix_bar_dims_to_the_selected_category(triage_dash):
     # The bar and the chips describe the same thing, so they must agree: picking a category
     # lights its segment and dims the rest, exactly as the donut does for an outcome. A bar
@@ -514,20 +549,25 @@ def test_the_mix_bar_dims_to_the_selected_category(triage_dash):
     # shows.
     page = triage_dash.page
     _open_mixed_run(page)
-    assert set(_bar(page).values()) == {"1"}, "nothing is filtered yet"
+    _bar_becomes(page, _all_lit, "nothing is filtered yet")
 
     chip = page.locator(".tri-filters button").nth(1)
     picked = chip.get_attribute("data-tri")
     chip.click()
-    lit = _bar(page)
+    lit = _bar_becomes(
+        page,
+        lambda bar: (
+            bar.get(picked) == "1"
+            and all(float(v) < 1 for k, v in bar.items() if k != picked)
+        ),
+        f"the bar did not dim to {picked}",
+    )
     others = [v for k, v in lit.items() if k != picked]
     assert others, "a single-segment bar proves nothing -- open a run with a mix"
-    assert lit[picked] == "1", lit
-    assert all(float(v) < 1 for v in others), lit
 
     # "All verdicts" restores every segment.
     page.locator('.tri-filters button[data-tri=""]').click()
-    assert set(_bar(page).values()) == {"1"}
+    _bar_becomes(page, _all_lit, "the bar stayed dimmed after clearing the filter")
 
 
 def test_the_mix_bar_relights_when_an_outcome_pill_clears_the_filter(triage_dash):
@@ -537,10 +577,14 @@ def test_the_mix_bar_relights_when_an_outcome_pill_clears_the_filter(triage_dash
     page = triage_dash.page
     _open_mixed_run(page)
     page.locator(".tri-filters button").nth(1).click()
-    assert any(float(v) < 1 for v in _bar(page).values())
+    _bar_becomes(
+        page,
+        lambda bar: any(float(v) < 1 for v in bar.values()),
+        "the category filter did not dim the bar",
+    )
 
     page.click('.pill[data-f="passed"]')
-    assert set(_bar(page).values()) == {"1"}, "the bar stayed dimmed"
+    _bar_becomes(page, _all_lit, "the bar stayed dimmed")
 
 
 def test_a_run_judged_without_a_model_name_is_still_blue(triage_dash):

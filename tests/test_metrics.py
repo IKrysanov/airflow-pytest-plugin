@@ -281,3 +281,65 @@ def test_metrics_endpoint_caps_series(reports_root, monkeypatch):
     assert r.status_code == 200
     assert "airflow_pytest_series_truncated 1" in r.text
     assert r.text.count("airflow_pytest_latest_passed{") == 3
+
+
+# --- assistant cost -----------------------------------------------------------
+def test_metrics_expose_assistant_cost_without_report_content(
+    reports_root, monkeypatch
+):
+    """Operators need spend and health, not questions or report text."""
+    from airflow_pytest_plugin.assistant import (
+        AssistantRuntime,
+        FakeAnswerProvider,
+        PassthroughReducer,
+    )
+
+    monkeypatch.setenv(METRICS_TOKEN_ENV, _TOKEN)
+    write_report(reports_root, ReportRef("dag", "r", "t", 1), passed=3, failed=1)
+    runtime = AssistantRuntime(
+        provider_factory=FakeAnswerProvider,
+        reducer_factory=PassthroughReducer,
+        provider_name="fake",
+        model_name="offline-fake",
+        context_model_name=None,
+        max_context_bytes=16_384,
+        max_output_tokens=256,
+        max_concurrent=1,
+    )
+    client = TestClient(
+        create_app(
+            FileSystemReportSource(report_root=reports_root),
+            authorizer=lambda d, u: True,
+            read_authorizer=lambda d, u: True,
+            user_dependency=lambda: object(),
+            assistant=runtime,
+        )
+    )
+    client.post("/api/assistant/query", json={"question": "secret question text"})
+
+    text = client.get(
+        "/api/metrics", headers={"Authorization": f"Bearer {_TOKEN}"}
+    ).text
+
+    assert "airflow_pytest_assistant_enabled 1" in text
+    assert "airflow_pytest_assistant_in_flight 0" in text
+    assert (
+        'airflow_pytest_assistant_requests_total{mode="direct",outcome="answered"} 1'
+        in text
+    )
+    assert 'airflow_pytest_assistant_provider_tokens_total{kind="input"}' in text
+    assert "airflow_pytest_assistant_provider_seconds_total" in text
+    assert "airflow_pytest_assistant_reports_considered_total 1" in text
+    assert "# TYPE airflow_pytest_assistant_requests_total counter" in text
+    assert "secret question text" not in text
+
+
+def test_metrics_omit_assistant_families_when_no_runtime_is_wired(
+    reports_root, monkeypatch
+):
+    monkeypatch.setenv(METRICS_TOKEN_ENV, _TOKEN)
+    write_report(reports_root, ReportRef("dag", "r", "t", 1), passed=1)
+
+    text = render_metrics([_sum("dag", "t", "r1", passed=1)])
+
+    assert "airflow_pytest_assistant" not in text

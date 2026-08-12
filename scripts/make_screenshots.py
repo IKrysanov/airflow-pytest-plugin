@@ -66,6 +66,70 @@ SPECS = [
     ("smoke_checks", False),
 ]
 NRUNS = 25
+
+#: The exchange the assistant screenshot shows. Written out rather than generated: the
+#: image has to be identical on every machine and must not need a provider key.
+CHAT_QUESTION = "why is test_checkout_total failing?"
+CHAT_ANSWER = (
+    "## Verdict\n\n"
+    "`tests.checkout::test_checkout_total` fails on "
+    "`AssertionError: assert 1042 == 1040` in 3 of the last 5 runs — DAG `etl_daily`, "
+    "task `unit_tests` [R1].\n\n"
+    "```\n"
+    "tests/checkout.py:88: assert order.total == expected\n"
+    "```\n\n"
+    "**Not established:** whether the rounding changed — the reports carry the outcome "
+    "and the traceback, not the code."
+)
+
+#: What the panel header shows. The screenshot is taken against the offline provider so it
+#: needs no key, but the header would then read "fake"; a deployment with a provider
+#: configured shows its real name, which is what the picture is of.
+CHAT_STATUS_PROVIDER = ("anthropic", "claude-sonnet-5")
+
+
+def assistant_status(route):
+    """Answer the status call with a provider named, as a configured install would."""
+    provider, model = CHAT_STATUS_PROVIDER
+    response = route.fetch()
+    body = response.json()
+    body.update(enabled=True, provider=provider, model=model, reason=None)
+    route.fulfill(status=200, content_type="application/json", body=json.dumps(body))
+
+
+def assistant_reply(route):
+    """Answer the chat request with one meta/delta/done stream, as the server would."""
+    meta = {
+        "provider": "anthropic",
+        "model": "claude-sonnet-5",
+        "context_model": None,
+        "reports_considered": 4,
+        "prompt_bytes": {
+            "system": 3934,
+            "user": 52,
+            "context": 6209,
+            "history": 0,
+            "docs": 0,
+            "structure": 268,
+            "total": 10463,
+        },
+        "provider_input_bytes": 10463,
+    }
+    done = dict(
+        meta,
+        answer=CHAT_ANSWER,
+        evidence=[],
+        reports=[],
+        token_usage={"input_tokens": 2764, "output_tokens": 341, "total_tokens": 3105},
+    )
+    body = (
+        "event: meta\ndata: " + json.dumps(meta) + "\n\n"
+        "event: delta\ndata: " + json.dumps({"text": CHAT_ANSWER}) + "\n\n"
+        "event: done\ndata: " + json.dumps(done) + "\n\n"
+    )
+    route.fulfill(status=200, content_type="text/event-stream", body=body)
+
+
 # One verdict per category, cycled over each run's failures: the triage card then shows a
 # real mix rather than five copies of the same judgement.
 TRIAGE_VERDICTS = [
@@ -177,8 +241,15 @@ s = socket.socket()
 s.bind(("127.0.0.1", 0))
 port = s.getsockname()[1]
 s.close()
+
+
 env = dict(os.environ)
 env["PYTHONPATH"] = "src"
+# The assistant shot needs the panel to exist, which means a provider must be named. The
+# offline `fake` one does that; the answer in the picture is served from the canned stream
+# below rather than by a model, so the image needs no key and is the same everywhere.
+env["AIRFLOW_PYTEST_ASSISTANT_PROVIDER"] = "fake"
+env.pop("AIRFLOW_PYTEST_ASSISTANT_CONTEXT_MODEL", None)
 proc = subprocess.Popen(
     [
         sys.executable,
@@ -301,6 +372,27 @@ with sync_playwright() as p:
     pg.wait_for_selector("dialog#unique")
     pg.wait_for_timeout(600)
     shot(pg, "unique", "dialog#unique")
+    pg.keyboard.press("Escape")
+    pg.wait_for_timeout(400)
+
+    # The report assistant. The answer is served from a canned stream so the picture does
+    # not depend on a provider key or on what a model says today; everything around it --
+    # the scope line, the byte breakdown, the evidence button -- is the real UI.
+    pg.route("**/api/assistant/status", assistant_status)
+    pg.route("**/api/assistant/stream", assistant_reply)
+    pg.reload()
+    pg.wait_for_selector("#kpis .kpi")
+    pg.wait_for_selector("#assistant-btn:not([hidden])", timeout=20000)
+    pg.click("#assistant-btn")
+    pg.wait_for_selector("#assistant-dialog[open]")
+    pg.fill("#ast-question", CHAT_QUESTION)
+    pg.click("#ast-send")
+    pg.wait_for_selector(".ast-msg.assistant .ast-answer", timeout=20000)
+    # Back to the top of the exchange: the question and the byte breakdown of what was
+    # actually sent are half the point of the picture.
+    pg.evaluate("document.getElementById('ast-messages').scrollTop = 0")
+    pg.wait_for_timeout(900)
+    shot(pg, "assistant", "dialog#assistant-dialog")
     pg.keyboard.press("Escape")
     b.close()
 proc.terminate()
