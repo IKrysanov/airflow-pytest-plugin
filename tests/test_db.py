@@ -25,7 +25,6 @@ from datetime import datetime, timedelta, timezone
 from types import ModuleType, SimpleNamespace
 
 import pytest
-import sqlalchemy as sa
 
 from airflow_pytest_plugin import db
 from airflow_pytest_plugin.assistant import (
@@ -44,7 +43,12 @@ from airflow_pytest_plugin.models import ReportRef
 from airflow_pytest_plugin.sources import FileSystemReportSource
 from conftest import write_report, write_report_xml
 
+# Imported after the guard, not with the rest: the "no Airflow" CI job installs no
+# SQLAlchemy at all, and a module-level import of it fails at *collection*, before
+# `importorskip` is ever reached. The whole file is then an error rather than a skip.
 pytest.importorskip("sqlalchemy")
+
+import sqlalchemy as sa  # noqa: E402, I001
 
 
 #: Set this to a real PostgreSQL or MySQL URL to run the whole file against that engine.

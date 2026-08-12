@@ -15,7 +15,7 @@ from airflow_pytest_plugin import ArchivingResultParser
 PytestOperator(
     task_id="run_tests",
     test_path="tests/",
-    parser=ArchivingResultParser(),   # was JUnitResultParser()
+    parser=ArchivingResultParser(),  # was JUnitResultParser()
 )
 ```
 

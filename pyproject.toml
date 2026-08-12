@@ -103,6 +103,11 @@ ui-test = [
     "pytest-playwright>=0.5",
     "fastapi>=0.110",
     "uvicorn>=0.23",        # the standalone dev server the UI tests drive
+    # The assistant journey drives a real server with server-side chat: stored,
+    # encrypted, and read back across tabs. Without these the browser sees a panel
+    # that keeps nothing, which is not the feature.
+    "sqlalchemy>=1.4",
+    "cryptography>=42.0",
 ]
 
 [project.urls]
