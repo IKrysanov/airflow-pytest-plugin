@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import base64
 import io
+import threading
 from contextlib import redirect_stdout
 
 import pytest
@@ -450,3 +451,74 @@ def test_rotation_on_an_empty_table_reports_nothing(monkeypatch):
     db.upgrade()
 
     assert db.rotate_history_key() == {"messages": 0, "titles": 0, "unreadable": 0}
+
+
+# =========================================================================================
+# Load -- the command as an operator actually runs it
+# =========================================================================================
+
+
+def test_rotation_runs_while_the_dashboard_is_being_used(monkeypatch):
+    """Nobody rotates a key on a quiet table; they do it on a Tuesday afternoon.
+
+    So rows are being inserted while the batch loop walks the old ones. Once both keys are
+    listed every new row is already written under the first one, which is what makes a
+    single pass enough -- but only if the walk itself survives the concurrent writes.
+    """
+    old_key = Fernet.generate_key().decode()
+    new_key = Fernet.generate_key().decode()
+    key(monkeypatch, old_key)
+    monkeypatch.setattr(db, "_ROTATE_BATCH", 7)
+    db.upgrade()
+    store = db.history_store()
+    for seed in range(20):
+        store.append(
+            "id:seed", f"до {seed}", "ответ", [], 1, conversation=f"seed-{seed:02d}"
+        )
+
+    written: dict[str, list[str]] = {}
+    errors: list[str] = []
+
+    def writer(index: int) -> None:
+        principal = f"id:{index}"
+        mine: list[str] = []
+        try:
+            for turn in range(15):
+                question = f"вопрос {index}-{turn}"
+                store.append(
+                    principal, question, "ответ", [], 1, conversation=f"c{index}"
+                )
+                mine.append(question)
+        except Exception as error:  # noqa: BLE001 - reported, not swallowed
+            errors.append(f"{principal}: {type(error).__name__}: {error}")
+        written[principal] = mine
+
+    threads = [threading.Thread(target=writer, args=(index,)) for index in range(4)]
+    for thread in threads:
+        thread.start()
+    key(monkeypatch, f"{new_key},{old_key}")
+    db.rotate_history_key()
+    for thread in threads:
+        thread.join(timeout=60)
+
+    # A second pass, the way the command tells the operator to confirm.
+    db.rotate_history_key()
+    key(monkeypatch, new_key)
+
+    assert errors == [], errors
+    for principal, questions in written.items():
+        stored = [
+            item["content"]
+            for item in store.load(
+                principal, limit=100, conversation=f"c{principal[3:]}"
+            )
+        ]
+        assert chatcrypto.UNREADABLE not in stored, (
+            f"{principal} lost rows to the rotation"
+        )
+        assert set(questions) <= set(stored), f"{principal} is missing messages"
+    seeded = [
+        item["content"]
+        for item in store.load("id:seed", limit=9, conversation="seed-07")
+    ]
+    assert seeded == ["до 7", "ответ"]

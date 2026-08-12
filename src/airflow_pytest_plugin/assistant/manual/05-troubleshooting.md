@@ -52,6 +52,10 @@ the chat has to be moved across separately, while both keys are still listed:
 python -m airflow_pytest_plugin.db rotate-key
 ```
 
+Restart every API server on the new key before running it: a server still using the old key
+keeps writing rows the pass has already walked past, and those are the ones that go missing
+when the old key is finally removed.
+
 ## After upgrading the plugin
 
 Run `python -m airflow_pytest_plugin.db upgrade` again. A release that adds a column has to

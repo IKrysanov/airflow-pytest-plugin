@@ -636,9 +636,6 @@ class _Store:
             return False
         return table_ready(table)
 
-    def _worked(self) -> None:
-        self._failed_at = 0.0
-
     def _warn(self, error: BaseException) -> None:
         # A statement that fails on the *content* of one row is not an outage, and
         # treating it as one let any user switch server-side history off for everybody
@@ -1576,6 +1573,17 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"{verb} {moved['messages']} message(s) and {moved['titles']} chat name(s)."
         )
+        if crypto["history_encrypted"]:
+            # The one hazard this command cannot see. A server still running on the old
+            # key keeps inserting rows behind the cursor, and those rows read perfectly
+            # until the old key is dropped -- at which point they are the only ones lost,
+            # after a pass that reported success. Nothing in the table tells them apart
+            # from rows already moved, so the rule is stated rather than checked.
+            print(
+                "Every API server must already be restarted with the new key; anything "
+                "a server still using the old key writes after this pass is not covered "
+                "by it. Re-running this is cheap, and is how you confirm."
+            )
         if moved["unreadable"]:
             print(
                 f"Left {moved['unreadable']} row(s) untouched: their key is not among "

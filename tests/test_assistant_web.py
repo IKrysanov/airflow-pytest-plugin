@@ -1059,6 +1059,47 @@ def test_the_assistant_documentation_links_back():
     assert "../../../README.md" in ASSISTANT_DOC.read_text()
 
 
+CHANGELOG = pathlib.Path(__file__).resolve().parents[1] / "CHANGELOG.md"
+
+
+def test_every_database_command_is_documented():
+    """A subcommand nobody documents is a subcommand nobody runs.
+
+    `rotate-key` is the one an operator has to know about *before* they need it -- by the
+    time the transcripts are unreadable, running it no longer helps.
+    """
+    source = (
+        pathlib.Path(__file__).resolve().parents[1] / "src/airflow_pytest_plugin/db.py"
+    ).read_text()
+    choices = set(
+        re.findall(r'"([a-z-]+)"', re.search(r"choices=\(([^)]+)\)", source).group(1))
+    )
+    documented = ASSISTANT_DOC.read_text()
+
+    assert choices, "the CLI choices could not be read -- the scan is broken"
+    missing = {name for name in choices if f"db {name}" not in documented}
+    assert missing == set(), sorted(missing)
+
+
+def test_the_release_notes_do_not_promise_rotation_without_the_command():
+    """Sharing Airflow's Fernet key does not mean sharing Airflow's rotation.
+
+    `airflow rotate-fernet-key` re-encrypts Airflow's own connections and variables and
+    knows nothing about this plugin's table, so "rotation works the same way" is advice
+    that costs the reader every stored transcript at the step where they drop the old
+    key. Wherever the notes raise rotation, the command that actually moves the chat
+    across has to be on the same page.
+    """
+    notes = CHANGELOG.read_text()
+    section = notes[notes.index("## [0.8.0]") :]
+    section = section[: section.index("\n## [0.7.0]")]
+
+    if "rotation" in section or "rotate" in section:
+        assert "rotate-key" in section, (
+            "rotation is promised but the command is missing"
+        )
+
+
 def test_every_published_command_has_a_label_in_both_languages(reports_root):
     """The server owns the names, the browser owns the wording -- both must be complete."""
     from airflow_pytest_plugin.assistant.prompts import command_catalogue

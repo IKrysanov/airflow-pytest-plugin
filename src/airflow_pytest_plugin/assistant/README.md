@@ -427,8 +427,9 @@ own user list — the alternative was an identity that changes when someone is r
 connection passwords (`AIRFLOW__CORE__FERNET_KEY`), because a chat holds the same class of
 material: questions naming failing tests, answers quoting tracebacks. Message text and any
 chat name you chose are encrypted; the principal, timestamps and token counts stay readable so
-an operator can still account for spend. Key rotation works as it does for connections — list
-the keys, the first encrypts and any of them decrypts. Nothing needs migrating: rows written
+an operator can still account for spend. The key list behaves as it does for connections —
+the first key encrypts, any of them decrypts — but rotating it needs one command of its own,
+below. Nothing needs migrating: rows written
 before this existed are read as they are, and a row whose key is gone becomes a placeholder
 rather than an error that would empty the window. `GET /api/assistant/status` reports
 `history_encrypted` so you can see which you have, and `AIRFLOW_PYTEST_ASSISTANT_ENCRYPT_HISTORY=0`
@@ -443,6 +444,12 @@ the old key would take every stored transcript with it. While both keys are list
 ```bash
 python -m airflow_pytest_plugin.db rotate-key
 ```
+
+Order matters, and it is the one thing the command cannot check for you: every API server
+has to be **restarted on the new key first**. A server still writing with the old key keeps
+inserting rows behind the cursor, and those rows read perfectly until you drop the old key —
+so the pass reports success and the loss appears one step later. Re-running the command
+after the restarts is cheap and is how you confirm.
 
 It re-encrypts the stored messages and chat names with whichever key is first, and skips any
 row it cannot read rather than writing the placeholder back — a skipped row is still

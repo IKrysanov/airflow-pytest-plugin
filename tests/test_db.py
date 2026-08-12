@@ -1276,6 +1276,35 @@ def test_status_reports_encryption(capsys, monkeypatch):
     assert "Encryption: on" in capsys.readouterr().out
 
 
+def test_rotate_key_states_the_ordering_that_makes_it_safe(capsys, monkeypatch):
+    """The one hazard the command cannot detect, so it has to name it.
+
+    Run before the API servers restart on the new key and a server still writing with the
+    old one keeps inserting rows behind the walking cursor. Those rows read perfectly
+    while the old key is listed -- so the command cannot tell them from rows it has
+    already moved, and reports a clean pass -- and then die at the step where the
+    operator drops the old key, exactly as the procedure tells them to.
+
+    Nothing in the database distinguishes the two cases, so the output has to carry the
+    rule: restart first, and re-run this afterwards.
+    """
+    pytest.importorskip("cryptography")
+    from cryptography.fernet import Fernet
+
+    from airflow_pytest_plugin import chatcrypto
+
+    monkeypatch.setenv("AIRFLOW__CORE__FERNET_KEY", Fernet.generate_key().decode())
+    chatcrypto._cached = None
+    db.upgrade()
+    db.history_store().append("id:1", "вопрос", "ответ", [], 1, conversation="c")
+
+    assert db.main(["rotate-key"]) == 0
+
+    printed = capsys.readouterr().out
+    assert "restarted with the new key" in printed, printed
+    assert "Re-running" in printed, printed
+
+
 def test_the_cli_rotates_the_key(capsys, monkeypatch):
     pytest.importorskip("cryptography")
     from cryptography.fernet import Fernet
