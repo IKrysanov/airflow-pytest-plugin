@@ -212,7 +212,9 @@ def _safe_detail(exc: AssistantError) -> str:
     inherits none of it. This is the last point before the bytes reach a browser, so the
     guarantee is made here as well, where it is local and can be read in one place.
     """
-    return clip_utf8(redact_text(" ".join(str(exc).split())), _MAX_ERROR_DETAIL)
+    return clip_utf8(
+        redact_text(" ".join(exc.public_detail.split())), _MAX_ERROR_DETAIL
+    )
 
 
 def _http_error(exc: AssistantError) -> HTTPException:

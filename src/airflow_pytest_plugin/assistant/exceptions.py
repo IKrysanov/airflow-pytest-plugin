@@ -16,9 +16,25 @@
 
 
 class AssistantError(Exception):
-    """A safe, expected assistant error suitable for an HTTP response."""
+    """A safe, expected assistant error suitable for an HTTP response.
+
+    Carries two messages on purpose. ``str(error)`` is for the log and the audit record
+    and may hold whatever helps somebody debug; :attr:`public_detail` is what may be
+    shown to whoever asked. They are the same string for almost every error here, because
+    these are written as whole sentences for a reader -- the exception is a failure
+    wrapped from a provider SDK, whose own text is written for the account holder and
+    carries request ids, endpoint URLs and organisation names.
+
+    Keeping the public half a plain attribute, set where the error is raised, is also
+    what stops it being derived from the exception at the point it is written to a
+    response: the decision about what is publishable belongs where the error is made.
+    """
 
     status_code = 502
+
+    def __init__(self, message: str = "", *, public: str | None = None) -> None:
+        super().__init__(message)
+        self.public_detail = public if public is not None else message
 
 
 class AssistantDisabledError(AssistantError):
@@ -38,8 +54,10 @@ class AssistantQuotaError(AssistantError):
 
     status_code = 429
 
-    def __init__(self, message: str, *, retry_after: int = 0) -> None:
-        super().__init__(message)
+    def __init__(
+        self, message: str, *, retry_after: int = 0, public: str | None = None
+    ) -> None:
+        super().__init__(message, public=public)
         self.retry_after = retry_after
 
 

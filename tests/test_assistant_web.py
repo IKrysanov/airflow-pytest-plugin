@@ -1373,3 +1373,62 @@ def test_a_stream_that_only_reports_usage_still_yields_its_text(reports_root):
 
     assert "answer carried on the usage object" in body
     assert '"total_tokens":7' in body.replace(" ", "")
+
+
+def test_a_provider_failure_does_not_publish_the_sdk_message(reports_root, monkeypatch):
+    """Whoever asked gets a sentence; the SDK's own words stay on the server.
+
+    A provider exception is written for whoever holds the account: it carries request
+    ids, endpoint URLs, organisation names and quota specifics. Every reader of the
+    dashboard is not that person. The full text still reaches the log and the audit
+    record, and `/api/assistant/health` remains the place to ask why a provider is
+    unhappy -- it is operator-gated for exactly this reason.
+    """
+    write_report(reports_root, ReportRef("dag", "run", "task", 1), failed=1)
+    sdk_text = "Error code: 401 - org_id=org-4f2a1b endpoint=https://api.internal/v1"
+
+    class Failing(FakeAnswerProvider):
+        def answer(self, *, system, prompt, max_tokens):
+            del system, prompt, max_tokens
+            raise RuntimeError(sdk_text)
+
+        def stream(self, *, system, prompt, max_tokens):
+            del system, prompt, max_tokens
+            raise RuntimeError(sdk_text)
+            yield ""  # pragma: no cover - makes this a generator
+
+    runtime = AssistantRuntime(
+        provider_factory=Failing,
+        reducer_factory=PassthroughReducer,
+        provider_name="fake",
+        model_name="offline-fake",
+        context_model_name=None,
+        max_context_bytes=16_384,
+        max_output_tokens=256,
+        max_concurrent=2,
+    )
+    client = _client(reports_root, runtime=runtime)
+
+    blocking = client.post("/api/assistant/query", json={"question": "what failed?"})
+    assert blocking.status_code == 502
+    assert "org-4f2a1b" not in blocking.text, blocking.text
+    assert "api.internal" not in blocking.text, blocking.text
+    assert blocking.json()["detail"], "the reader still has to be told something"
+
+    with client.stream(
+        "POST", "/api/assistant/stream", json={"question": "what failed?"}
+    ) as response:
+        streamed = "".join(response.iter_text())
+    assert "org-4f2a1b" not in streamed, streamed
+    assert "api.internal" not in streamed, streamed
+    assert "event: error" in streamed
+
+
+def test_our_own_errors_still_say_what_is_wrong(reports_root):
+    """The trade only applies to somebody else's text; ours is written to be read."""
+    response = _client(reports_root).post(
+        "/api/assistant/query", json={"question": " "}
+    )
+
+    assert response.status_code == 400
+    assert "must not be empty" in response.json()["detail"]

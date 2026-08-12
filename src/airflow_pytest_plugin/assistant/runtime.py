@@ -901,10 +901,20 @@ class AssistantRuntime:
         return raw_question
 
     def _provider_failure(self, exc: Exception) -> AssistantProviderError:
+        """Wrap a provider's own failure, keeping its words out of the answer panel.
+
+        The SDK's message is written for whoever holds the account and routinely names
+        endpoints, organisations and request ids. That belongs in the log and the audit
+        record, which this keeps; the panel gets a sentence and somewhere to look.
+        """
         reason = clip_utf8(redact_text(" ".join(str(exc).split())), 300)
         detail = f"{type(exc).__name__}: {reason}" if reason else type(exc).__name__
         return AssistantProviderError(
-            f"The report assistant could not complete the answer: {detail}"
+            f"The report assistant could not complete the answer: {detail}",
+            public=(
+                "The report assistant could not reach the model. The API server log "
+                "has the provider's own message."
+            ),
         )
 
     @property
