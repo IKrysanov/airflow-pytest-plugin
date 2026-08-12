@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import re
 from dataclasses import dataclass
@@ -192,7 +193,7 @@ def _bounded_float(
     except ValueError:
         _log.warning("%s is not a number (%r); using %s", name, raw, default)
         return default
-    if value != value or value in (float("inf"), float("-inf")):
+    if math.isnan(value) or math.isinf(value):
         _log.warning("%s is not a finite number (%r); using %s", name, raw, default)
         return default
     return _report(

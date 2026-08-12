@@ -434,9 +434,8 @@ def _migrate_to_3(connection: Any) -> None:
         pass
 
 
-def _migrate_to_4(connection: Any) -> None:
+def _migrate_to_4(_connection: Any) -> None:
     """Schema 4 let a user name a chat. Only a new table, so nothing to alter."""
-    del connection
 
 
 def _migrate_to_5(connection: Any) -> None:
@@ -1564,7 +1563,14 @@ def main(argv: list[str] | None = None) -> int:
                 f"Set a Fernet key (and leave {chatcrypto.ENCRYPT_ENV} unset) to "
                 "re-encrypt instead."
             )
-        moved = rotate_history_key()
+        try:
+            moved = rotate_history_key()
+        except Exception as error:
+            # Every other statement in this module degrades quietly, but a maintenance
+            # command must not: half a table re-encrypted and a cheerful summary is
+            # worse than a sentence saying where it stopped.
+            print(f"Could not re-encrypt the stored chat: {error}")
+            return 1
         # "Re-encrypted" would be a lie in the plain-text mode above, and this line is
         # the only record of what the command did.
         verb = (

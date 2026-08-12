@@ -24,8 +24,12 @@ import pytest
 from airflow_pytest_plugin.assistant import (
     AssistantProviderResponse,
     AssistantRuntime,
+    AssistantTokenUsage,
     FakeAnswerProvider,
     PassthroughReducer,
+)
+from airflow_pytest_plugin.assistant.exceptions import (
+    AssistantProviderError as _RawError,
 )
 from airflow_pytest_plugin.assistant.providers.fake import FakeAssistant
 from airflow_pytest_plugin.models import ReportRef
@@ -1111,3 +1115,261 @@ def test_every_published_command_has_a_label_in_both_languages(reports_root):
         key = f"command_{command['name']}"
         assert key in locales["en"], key
         assert key in locales["ru"], key
+
+
+def test_an_error_detail_is_scrubbed_and_bounded_on_the_way_out(
+    reports_root, monkeypatch
+):
+    """The last point before the message leaves the server is where it must be safe.
+
+    Assistant errors are built from safe text by convention -- the provider adapter
+    scrubs and clips the SDK's own exception before wrapping it. Convention is not a
+    guarantee: it lives far from the socket, in a different module, and the next error
+    raised from somewhere new inherits none of it. So the sink enforces it too, for both
+    ways out: the JSON error and the `error` event on the stream.
+    """
+    secret = "assistant-outbound-private-value"
+    monkeypatch.setenv("ASSISTANT_OUTBOUND_SECRET", secret)
+    write_report(reports_root, ReportRef("dag", "run", "task", 1), failed=1)
+
+    class Leaky(FakeAnswerProvider):
+        def answer(self, *, system, prompt, max_tokens):
+            del system, prompt, max_tokens
+            raise _RawError(f"upstream said {secret} " + "x" * 5_000)
+
+        def stream(self, *, system, prompt, max_tokens):
+            del system, prompt, max_tokens
+            raise _RawError(f"upstream said {secret} " + "x" * 5_000)
+            yield ""  # pragma: no cover - makes this a generator
+
+    runtime = AssistantRuntime(
+        provider_factory=Leaky,
+        reducer_factory=PassthroughReducer,
+        provider_name="fake",
+        model_name="offline-fake",
+        context_model_name=None,
+        max_context_bytes=16_384,
+        max_output_tokens=256,
+        max_concurrent=2,
+    )
+    client = _client(reports_root, runtime=runtime)
+
+    blocking = client.post("/api/assistant/query", json={"question": "what failed?"})
+    assert secret not in blocking.text, blocking.text[:200]
+    assert len(blocking.json()["detail"]) <= 300
+
+    with client.stream(
+        "POST", "/api/assistant/stream", json={"question": "what failed?"}
+    ) as response:
+        streamed = "".join(response.iter_text())
+    assert secret not in streamed, streamed[:200]
+    for line in streamed.splitlines():
+        if line.startswith("data:") and '"detail"' in line:
+            assert len(json.loads(line[5:])["detail"]) <= 300
+
+
+@pytest.mark.parametrize(
+    ("provider", "expected"),
+    [
+        ("anthropic", "AnthropicAssistant"),
+        ("openai", "OpenAIAssistant"),
+        ("gigachat", "GigaChatAssistant"),
+    ],
+)
+def test_each_provider_name_selects_its_own_adapter(provider, expected, monkeypatch):
+    """The name in the environment picks the adapter, and nothing else does.
+
+    Each branch is one line, which is exactly why a typo in one of them survives review:
+    the deployment that would notice is the one that configured that single provider.
+    """
+    from airflow_pytest_plugin.assistant import factory
+    from airflow_pytest_plugin.assistant import settings as settings_mod
+
+    monkeypatch.setenv(settings_mod.PROVIDER_ENV, provider)
+    built = settings_mod.AssistantSettings.from_env()
+
+    made: dict[str, object] = {}
+
+    class Recorder:
+        def __init__(self, configured):
+            made["settings"] = configured
+
+    monkeypatch.setattr(factory, expected, Recorder)
+
+    assert isinstance(factory._provider_factory(built), Recorder)
+    assert made["settings"] is built
+
+
+def test_an_unknown_provider_name_is_refused_by_name(monkeypatch):
+    from airflow_pytest_plugin.assistant import factory
+    from airflow_pytest_plugin.assistant import settings as settings_mod
+
+    monkeypatch.setenv(settings_mod.PROVIDER_ENV, "fake")
+    built = settings_mod.AssistantSettings.from_env()
+    object.__setattr__(built, "provider", "does-not-exist")
+
+    with pytest.raises(RuntimeError, match="does-not-exist"):
+        factory._provider_factory(built)
+
+
+def test_the_shared_stores_are_only_built_when_their_limit_is_configured(monkeypatch):
+    """Off by default means no table is touched, not a table that stays empty."""
+    from airflow_pytest_plugin.assistant import factory
+    from airflow_pytest_plugin.assistant import settings as settings_mod
+
+    monkeypatch.setenv(settings_mod.PROVIDER_ENV, "fake")
+    monkeypatch.setenv("AIRFLOW_PYTEST_ASSISTANT_DAILY_TOKEN_QUOTA", "0")
+    monkeypatch.setenv("AIRFLOW_PYTEST_ASSISTANT_RATE_LIMIT", "0")
+    monkeypatch.setenv("AIRFLOW_PYTEST_ASSISTANT_HISTORY_DAYS", "0")
+    off = settings_mod.AssistantSettings.from_env()
+
+    assert factory._quota_store(off) is None
+    assert factory._rate_store(off) is None
+    assert factory._history_store(off) is None
+
+    monkeypatch.setenv("AIRFLOW_PYTEST_ASSISTANT_DAILY_TOKEN_QUOTA", "1000")
+    monkeypatch.setenv("AIRFLOW_PYTEST_ASSISTANT_RATE_LIMIT", "60")
+    monkeypatch.setenv("AIRFLOW_PYTEST_ASSISTANT_HISTORY_DAYS", "30")
+    on = settings_mod.AssistantSettings.from_env()
+
+    assert factory._quota_store(on) is not None
+    assert factory._rate_store(on) is not None
+    assert factory._history_store(on) is not None
+
+
+def test_a_provider_without_streaming_still_streams_one_delta(reports_root):
+    """Not every SDK offers incremental output, and the panel is built around it.
+
+    Such a provider gets the whole answer as a single `delta`, so the browser code has
+    one shape to handle rather than two, and the token accounting still arrives.
+    """
+    write_report(reports_root, ReportRef("dag", "run", "task", 1), failed=1)
+
+    class Blocking:
+        """Deliberately no `stream` attribute."""
+
+        name = "fake"
+        model = "offline-fake"
+
+        def close(self) -> None:
+            return None
+
+        def answer(self, *, system, prompt, max_tokens):
+            del system, prompt, max_tokens
+            return AssistantProviderResponse(
+                text="the whole answer at once",
+                token_usage=AssistantTokenUsage(
+                    input_tokens=7, output_tokens=3, total_tokens=10
+                ),
+                stop_reason="end_turn",
+            )
+
+    runtime = AssistantRuntime(
+        provider_factory=Blocking,
+        reducer_factory=PassthroughReducer,
+        provider_name="fake",
+        model_name="offline-fake",
+        context_model_name=None,
+        max_context_bytes=16_384,
+        max_output_tokens=256,
+        max_concurrent=2,
+    )
+    assert not hasattr(Blocking(), "stream")
+
+    with _client(reports_root, runtime=runtime).stream(
+        "POST", "/api/assistant/stream", json={"question": "what failed?"}
+    ) as response:
+        body = "".join(response.iter_text())
+
+    deltas = [
+        json.loads(line[5:])["text"]
+        for line in body.splitlines()
+        if line.startswith("data:") and '"text"' in line
+    ]
+    assert deltas == ["the whole answer at once"]
+    done = [
+        json.loads(line[5:])
+        for line in body.splitlines()
+        if line.startswith("data:") and '"answer"' in line
+    ]
+    assert done and done[-1]["answer"] == "the whole answer at once"
+    assert done[-1]["token_usage"]["total_tokens"] == 10
+
+
+def test_a_provider_returning_bare_text_without_streaming_also_works(reports_root):
+    """The older adapter shape: a plain string, no usage object."""
+    write_report(reports_root, ReportRef("dag", "run", "task", 1), failed=1)
+
+    class BareText:
+        name = "fake"
+        model = "offline-fake"
+
+        def close(self) -> None:
+            return None
+
+        def answer(self, *, system, prompt, max_tokens):
+            del system, prompt, max_tokens
+            return "plain string answer"
+
+    runtime = AssistantRuntime(
+        provider_factory=BareText,
+        reducer_factory=PassthroughReducer,
+        provider_name="fake",
+        model_name="offline-fake",
+        context_model_name=None,
+        max_context_bytes=16_384,
+        max_output_tokens=256,
+        max_concurrent=2,
+    )
+
+    with _client(reports_root, runtime=runtime).stream(
+        "POST", "/api/assistant/stream", json={"question": "what failed?"}
+    ) as response:
+        body = "".join(response.iter_text())
+
+    assert '"plain string answer"' in body
+    assert "event: done" in body
+
+
+def test_a_stream_that_only_reports_usage_still_yields_its_text(reports_root):
+    """Some SDKs deliver the text on the same object that carries the token counts."""
+    write_report(reports_root, ReportRef("dag", "run", "task", 1), failed=1)
+
+    class UsageOnly:
+        name = "fake"
+        model = "offline-fake"
+
+        def close(self) -> None:
+            return None
+
+        def answer(self, *, system, prompt, max_tokens):  # pragma: no cover - unused
+            raise AssertionError("the streaming path should be taken")
+
+        def stream(self, *, system, prompt, max_tokens):
+            del system, prompt, max_tokens
+            yield AssistantProviderResponse(
+                text="answer carried on the usage object",
+                token_usage=AssistantTokenUsage(
+                    input_tokens=5, output_tokens=2, total_tokens=7
+                ),
+                stop_reason="end_turn",
+            )
+
+    runtime = AssistantRuntime(
+        provider_factory=UsageOnly,
+        reducer_factory=PassthroughReducer,
+        provider_name="fake",
+        model_name="offline-fake",
+        context_model_name=None,
+        max_context_bytes=16_384,
+        max_output_tokens=256,
+        max_concurrent=2,
+    )
+
+    with _client(reports_root, runtime=runtime).stream(
+        "POST", "/api/assistant/stream", json={"question": "what failed?"}
+    ) as response:
+        body = "".join(response.iter_text())
+
+    assert "answer carried on the usage object" in body
+    assert '"total_tokens":7' in body.replace(" ", "")

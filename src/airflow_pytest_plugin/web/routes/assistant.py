@@ -40,6 +40,8 @@ from ...assistant import (
     AssistantTurn,
     healthcheck_enabled,
 )
+from ...assistant.common import clip_utf8
+from ...assistant.redaction import redact_text
 from .common import RouteDeps, ok
 
 TAG = "assistant"
@@ -196,11 +198,30 @@ _EX_REPLY = {
 }
 
 
+#: An error message is a sentence, not a transcript. Long enough for the sentence the
+#: panel shows, short enough that a wrapped stack trace cannot ride out on it.
+_MAX_ERROR_DETAIL = 300
+
+
+def _safe_detail(exc: AssistantError) -> str:
+    """Return the message as it may leave the server: one line, scrubbed, bounded.
+
+    Assistant errors are built from safe text by convention -- the provider adapter
+    already scrubs and clips the SDK's own exception before wrapping it. Convention is
+    not a guarantee: it lives in another module, and an error raised from somewhere new
+    inherits none of it. This is the last point before the bytes reach a browser, so the
+    guarantee is made here as well, where it is local and can be read in one place.
+    """
+    return clip_utf8(redact_text(" ".join(str(exc).split())), _MAX_ERROR_DETAIL)
+
+
 def _http_error(exc: AssistantError) -> HTTPException:
     """Map an assistant error to HTTP, telling a throttled caller when to return."""
     retry_after = getattr(exc, "retry_after", 0)
     headers = {"Retry-After": str(retry_after)} if retry_after else None
-    return HTTPException(status_code=exc.status_code, detail=str(exc), headers=headers)
+    return HTTPException(
+        status_code=exc.status_code, detail=_safe_detail(exc), headers=headers
+    )
 
 
 def _next_event(
@@ -437,7 +458,9 @@ def build_router(deps: RouteDeps, runtime: AssistantRuntime) -> APIRouter:
                         return
                     yield _sse(*item)
             except AssistantError as exc:
-                yield _sse("error", {"detail": str(exc), "status": exc.status_code})
+                yield _sse(
+                    "error", {"detail": _safe_detail(exc), "status": exc.status_code}
+                )
             finally:
                 events.close()
 

@@ -463,6 +463,7 @@ def _history_text(history: Sequence[AssistantTurn]) -> str:
 
 
 __all__ = [
+    "NO_EVIDENCE",
     "SYSTEM_PROMPT",
     "ProviderPrompt",
     "build_provider_prompt",

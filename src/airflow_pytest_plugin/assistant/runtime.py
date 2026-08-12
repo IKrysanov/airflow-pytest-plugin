@@ -1307,6 +1307,10 @@ class AssistantRuntime:
                 try:
                     model.close()
                 except Exception:
+                    # Teardown is best-effort by contract: this runs on FastAPI
+                    # shutdown and between test clients, where a provider that fails
+                    # to close must not stop the others from being closed, and there
+                    # is no longer anybody to report it to.
                     pass
             self._provider = None
             self._reducer = None

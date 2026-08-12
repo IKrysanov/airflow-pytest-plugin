@@ -328,7 +328,9 @@ def clip_utf8(text: str, limit: int) -> str:
 
 
 __all__ = [
+    "MAX_ANSWER_BYTES",
     "MAX_CAPTURE_BYTES",
+    "MAX_FAILURE_BYTES",
     "MAX_HISTORY_BYTES",
     "MAX_HISTORY_CHARS",
     "MAX_HISTORY_INPUT_CHARS",
@@ -336,6 +338,7 @@ __all__ = [
     "MAX_QUESTION_CHARS",
     "MAX_SCOPE_CHARS",
     "MAX_SCOPE_REPORTS",
+    "MAX_SUMMARIES",
     "AnswerProvider",
     "AssistantContext",
     "AssistantEvidence",

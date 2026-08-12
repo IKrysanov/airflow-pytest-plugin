@@ -41,6 +41,16 @@ jobs:
           config: |
             paths:
               - src
+            query-filters:
+              # `py/unused-global-variable` is intraprocedural: it flags the module
+              # cache idiom, where a function assigns a global and the *next* call
+              # reads it (chatcrypto's Fernet pair, db's engine and metadata,
+              # redaction's environment matcher). Rewriting those to satisfy the
+              # check would trade a documented atomicity invariant for a tool's
+              # convenience. Genuinely dead module-level names are covered instead
+              # by vulture and by ruff's unused-import and unused-local rules.
+              - exclude:
+                  id: py/unused-global-variable
       - name: Perform CodeQL analysis
         uses: github/codeql-action/analyze@5595ccaf912efad79be6eef63a5619ff05969be3  # v4.37.6
         with:
