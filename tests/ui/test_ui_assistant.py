@@ -22,6 +22,8 @@ import re
 import pytest
 from playwright.sync_api import expect
 
+from airflow_pytest_plugin.assistant.prompts import command_catalogue
+
 pytestmark = pytest.mark.ui
 
 
@@ -2870,7 +2872,10 @@ def test_typing_a_slash_offers_the_commands(assistant_dash):
     menu = page.locator("#ast-commands")
     expect(menu).to_be_visible()
     items = menu.locator(".ast-command")
-    expect(items).to_have_count(6)
+    # From the server's own catalogue, not a literal: the menu exists precisely so the
+    # command list is never written down twice, and a test that hard-codes the count
+    # makes itself the second copy.
+    expect(items).to_have_count(len(command_catalogue()))
     expect(items.first).to_contain_text("/bug")
     expect(menu).to_contain_text("/docs")
     # Each one says what it does, not just its name.
@@ -3248,3 +3253,86 @@ def test_the_chat_list_says_when_it_is_showing_only_the_newest(assistant_dash):
         "saved on the server"
     )
     assert assistant_dash.errors == []
+
+
+def _status_with_quota(route, *, quota: int, spent: int) -> None:
+    """Answer the status call as a deployment that bounds the daily spend would."""
+    response = route.fetch()
+    body = response.json()
+    body.update(daily_token_quota=quota, daily_tokens_spent=spent)
+    route.fulfill(status=200, content_type="application/json", body=json.dumps(body))
+
+
+def test_the_panel_shows_how_much_of_the_daily_budget_is_left(page, assistant_base_url):
+    """A quota nobody can see is a 429 that arrives without warning."""
+    from conftest import _load_dash  # type: ignore[import-not-found]
+
+    page.route(
+        "**/api/assistant/status",
+        lambda route: _status_with_quota(route, quota=10_000, spent=2_500),
+    )
+    _load_dash(page, assistant_base_url)
+    page.click("#assistant-btn")
+    expect(page.locator("#assistant-dialog")).to_be_visible()
+
+    budget = page.locator("#ast-daily-budget")
+    expect(budget).to_be_visible()
+    expect(budget).to_contain_text("2,500")
+    expect(budget).to_contain_text("10,000")
+
+
+def test_an_answer_moves_the_budget_without_asking_the_server_again(
+    page, assistant_base_url
+):
+    """The spend changes with every answer, and the panel already knows by how much.
+
+    Re-fetching the status after each answer would be a second request for a number the
+    stream just delivered, so the figure is seeded from the server and then carried
+    forward locally -- exactly as the session total already is.
+    """
+    from conftest import _load_dash  # type: ignore[import-not-found]
+
+    page.route(
+        "**/api/assistant/status",
+        lambda route: _status_with_quota(route, quota=10_000, spent=1_000),
+    )
+    _load_dash(page, assistant_base_url)
+    page.click("#assistant-btn")
+    expect(page.locator("#ast-daily-budget")).to_contain_text("1,000")
+
+    page.route(
+        "**/api/assistant/stream",
+        lambda route: _fulfil_stream(
+            route,
+            {
+                "answer": "done",
+                "provider": "fake",
+                "model": "offline-fake",
+                "evidence": [],
+                # Every field the server always sends: the browser rejects a partial
+                # usage object outright rather than guessing the missing counts.
+                "token_usage": {
+                    "input_tokens": 200,
+                    "output_tokens": 50,
+                    "total_tokens": 250,
+                    "cached_input_tokens": 0,
+                },
+            },
+        ),
+    )
+    page.locator("#ast-question").fill("What failed?")
+    page.locator("#ast-send").click()
+    expect(page.locator(".ast-msg.assistant .ast-answer").last).to_contain_text("done")
+
+    expect(page.locator("#ast-daily-budget")).to_contain_text("1,250")
+
+
+def test_without_a_quota_the_panel_claims_no_budget(page, assistant_base_url):
+    """Nothing is counted when nothing is bounded, so nothing is shown."""
+    from conftest import _load_dash  # type: ignore[import-not-found]
+
+    _load_dash(page, assistant_base_url)
+    page.click("#assistant-btn")
+    expect(page.locator("#assistant-dialog")).to_be_visible()
+
+    expect(page.locator("#ast-daily-budget")).to_be_hidden()

@@ -4338,11 +4338,13 @@ def test_the_status_endpoint_publishes_the_commands(reports_root):
 
     assert {item["name"] for item in published} == {
         "bug",
+        "compare",
+        "docs",
+        "explain",
         "flaky",
         "priority",
-        "compare",
+        "summary",
         "test",
-        "docs",
     }
 
 

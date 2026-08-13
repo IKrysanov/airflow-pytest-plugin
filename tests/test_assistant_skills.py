@@ -55,6 +55,12 @@ def test_the_always_on_prompt_is_the_core_and_the_product():
         ("что изменилось между прогонами?", "compare"),
         ("напиши тест на эту функцию", "authoring"),
         ("write me three tests for this code", "authoring"),
+        ("explain this traceback to me", "explain"),
+        ("объясни, что означает эта ошибка", "explain"),
+        ("what does AssertionError mean here?", "explain"),
+        ("summarise these runs for standup", "summary"),
+        ("сделай сводку по прогонам", "summary"),
+        ("give me a digest of the selected runs", "summary"),
     ],
 )
 def test_a_question_earns_the_skill_it_needs(question, skill):
@@ -417,3 +423,75 @@ def test_the_authoring_skill_writes_rather_than_interviews():
     assert "ask one specific question instead" not in text
     assert "state the assumption" in text
     assert "write them anyway" in text
+
+
+def test_explaining_a_failure_is_not_the_same_request_as_reporting_it():
+    """`/explain` and `/bug` answer different people.
+
+    A bug report is written for whoever will fix it later; an explanation is for the
+    person looking at a red run right now and not recognising the words in it. Sharing
+    one skill made every explanation come back with headings, a reproduce line and a
+    "Not established" section -- correct for a ticket, useless when somebody asked what
+    `AssertionError: assert 401 == 200` means.
+    """
+    explain = build_system_prompt("/explain", commands=("explain",))
+    report = build_system_prompt("/bug", commands=("bug",))
+
+    assert SKILLS["explain"].text in explain
+    assert SKILLS["bugreport"].text not in explain
+    assert SKILLS["bugreport"].text in report
+    assert SKILLS["explain"].text not in report
+
+
+def test_a_summary_is_answered_from_the_runs():
+    """Unlike `/test` and `/docs`, a digest is meaningless without the reports."""
+    assert SKILLS["summary"].needs_evidence is True
+    assert SKILLS["explain"].needs_evidence is True
+
+
+@pytest.mark.parametrize("command", ["explain", "summary"])
+def test_the_new_commands_are_offered_by_the_menu(command):
+    names = [item["name"] for item in command_catalogue()]
+
+    assert command in names
+
+
+def test_a_bare_command_without_a_locale_still_fixes_a_language():
+    """`/summary` is the one command people type with nothing after it.
+
+    The dashboard always sends its locale, so the panel is fine. An API client that
+    sends neither a locale nor any words has told the model nothing about language at
+    all -- and the core rule, "answer in the language used by the user", has nothing to
+    read. Observed live: a bare `/summary` came back in Japanese.
+
+    Only this exact case gets a default, so nothing a caller did say can be overridden:
+    there is nothing to override.
+    """
+    from airflow_pytest_plugin.assistant.prompts import build_provider_prompt
+
+    bare = build_provider_prompt(question="", history=(), evidence="(none)")
+
+    assert "DASHBOARD LANGUAGE" in bare.text or "LANGUAGE" in bare.text, bare.text[:200]
+    assert "English" in bare.text, bare.text[:200]
+
+
+def test_a_declared_locale_always_wins_over_the_default():
+    from airflow_pytest_plugin.assistant.prompts import build_provider_prompt
+
+    asked = build_provider_prompt(
+        question="", history=(), evidence="(none)", locale="ru-RU"
+    )
+
+    assert "ru-RU" in asked.text
+    assert "English" not in asked.text
+
+
+def test_a_question_with_words_is_left_to_speak_for_itself():
+    """The words are the signal; a default here would fight the question."""
+    from airflow_pytest_plugin.assistant.prompts import build_provider_prompt
+
+    asked = build_provider_prompt(
+        question="почему упал тест?", history=(), evidence="(none)"
+    )
+
+    assert "English" not in asked.text

@@ -509,6 +509,7 @@ _PANEL = r"""
       <span id="ast-scope" class="ast-scope" aria-live="polite"></span>
       <div class="ast-scope-aside">
         <span id="ast-session-tokens" class="ast-session-tokens" aria-live="polite" hidden></span>
+        <span id="ast-daily-budget" class="ast-session-tokens" aria-live="polite" hidden></span>
         <button id="ast-scope-list" class="ast-scope-list" type="button"
                 aria-haspopup="dialog" aria-controls="ast-scope-dialog"
                 aria-expanded="false" hidden>View list</button>
@@ -677,6 +678,7 @@ _JS = r"""
       copyAnswer: "Copy", copied: "Copied", copyFailed: "Copy failed",
       tokens: "LLM tokens: input {input} · output {output} · total {total}",
       sessionTokens: "Session total: {total} tokens",
+      dailyBudget: "Today: {spent} of {quota} tokens",
       intro: "Answers use only reports you may read. This tab keeps the chat after refresh.",
       thinking: "Reviewing reports…", retry: "Try again", noDetail: "The request failed.",
       chats: "Chats", chatsTitle: "Your chats", chatsClose: "Close chat list",
@@ -692,6 +694,8 @@ _JS = r"""
       clearConfirmLocal: "Clear this chat? It is only in this tab, so it cannot come back.",
       clearConfirmYes: "Clear", clearConfirmNo: "Keep",
       command_bug: "Draft a bug report from a failure",
+      command_explain: "Explain a failure in plain words",
+      command_summary: "Summarise the runs in scope",
       command_flaky: "Judge a flaky test, and whether to quarantine it",
       command_priority: "What to fix first, and why",
       command_compare: "What changed between runs",
@@ -749,6 +753,7 @@ _JS = r"""
       copyAnswer: "Копировать", copied: "Скопировано", copyFailed: "Ошибка копирования",
       tokens: "Токены LLM: вход {input} · ответ {output} · всего {total}",
       sessionTokens: "За сессию: {total} токенов",
+      dailyBudget: "Сегодня: {spent} из {quota} токенов",
       intro: "Ответ строится только по доступным вам отчётам. Эта вкладка сохранит чат после обновления.",
       thinking: "Изучаю отчёты…", retry: "Повторить", noDetail: "Запрос не выполнен.",
       chats: "Чаты", chatsTitle: "Ваши чаты", chatsClose: "Закрыть список чатов",
@@ -764,6 +769,8 @@ _JS = r"""
       clearConfirmLocal: "Очистить этот чат? Он есть только в этой вкладке — вернуть будет нельзя.",
       clearConfirmYes: "Очистить", clearConfirmNo: "Оставить",
       command_bug: "Оформить багрепорт по падению",
+      command_explain: "Объяснить падение простыми словами",
+      command_summary: "Сводка по прогонам в области видимости",
       command_flaky: "Разобрать flaky-тест и нужен ли карантин",
       command_priority: "Что чинить в первую очередь и почему",
       command_compare: "Что изменилось между прогонами",
@@ -798,6 +805,12 @@ _JS = r"""
   var astDialog = document.getElementById("assistant-dialog");
   var astMessages = document.getElementById("ast-messages");
   var astSessionTokens = document.getElementById("ast-session-tokens");
+  var astDailyBudget = document.getElementById("ast-daily-budget");
+  //: Seeded from the status call and then carried forward locally, because the stream
+  //: already delivers what each answer cost -- asking the server again after every
+  //: answer would be a second request for a number we were just handed.
+  var astDailyQuota = 0;
+  var astDailySpent = 0;
   var astQuestion = document.getElementById("ast-question");
   var astSend = document.getElementById("ast-send");
   var astStop = document.getElementById("ast-stop");
@@ -909,6 +922,18 @@ _JS = r"""
     var parts = [astStatus.provider, astStatus.model].filter(Boolean);
     parts.push(astStatus.context_model || astT("direct"));
     document.getElementById("ast-provider").textContent = parts.join(" · ");
+    astApplyDailyBudget();
+  }
+
+  function astApplyDailyBudget() {
+    if (!astStatus) return;
+    var quota = astStatus.daily_token_quota;
+    var spent = astStatus.daily_tokens_spent;
+    // The server sends `null` for a spend it will not claim: no quota is configured, or
+    // this caller has no identity of their own and shares the anonymous bucket.
+    astDailyQuota = Number.isFinite(quota) && quota > 0 ? quota : 0;
+    astDailySpent = Number.isFinite(spent) && spent >= 0 ? spent : 0;
+    astRenderDailyBudget();
   }
 
   //: What the field offers to finish. The starters the panel already shows, plus the
@@ -1554,12 +1579,40 @@ _JS = r"""
     astSessionTokens.hidden = false;
   }
 
+  function astRenderDailyBudget() {
+    astDailyBudget.textContent = "";
+    if (astDailyQuota <= 0) { astDailyBudget.hidden = true; return; }
+    var locale = LOCALE === "ru" ? "ru-RU" : "en-US";
+    var text = astFmt(
+      astFmt(astT("dailyBudget"), "spent", "\u0000"), "quota", "\u0001"
+    );
+    var head = text.split("\u0000");
+    var spent = document.createElement("b");
+    spent.textContent = astDailySpent.toLocaleString(locale);
+    astDailyBudget.appendChild(document.createTextNode(head[0]));
+    astDailyBudget.appendChild(spent);
+    var rest = (head[1] || "").split("\u0001");
+    astDailyBudget.appendChild(document.createTextNode(rest[0]));
+    var quota = document.createElement("b");
+    quota.textContent = astDailyQuota.toLocaleString(locale);
+    astDailyBudget.appendChild(quota);
+    if (rest.length > 1) {
+      astDailyBudget.appendChild(document.createTextNode(rest[1]));
+    }
+    astDailyBudget.title = astDailyBudget.textContent;
+    astDailyBudget.hidden = false;
+  }
+
   function astAddSessionTokens(usage) {
     if (!usage) return;
     astSessionTotalTokens = astBoundSessionTokens(
       astSessionTotalTokens + usage.total_tokens
     );
     astRenderSessionTokens();
+    if (astDailyQuota > 0 && Number.isFinite(usage.total_tokens)) {
+      astDailySpent = Math.max(0, astDailySpent + usage.total_tokens);
+      astRenderDailyBudget();
+    }
   }
 
   function astLoadTranscript() {

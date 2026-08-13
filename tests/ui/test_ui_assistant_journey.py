@@ -14,6 +14,8 @@ from pathlib import Path
 import pytest
 from playwright.sync_api import expect
 
+from airflow_pytest_plugin.assistant.prompts import command_catalogue
+
 FAILING = """<?xml version="1.0" encoding="utf-8"?>
 <testsuites><testsuite name="pytest" tests="4" failures="2" errors="0" skipped="0" time="12">
   <testcase classname="tests.test_auth" name="test_login" time="1.1">
@@ -147,7 +149,10 @@ def test_a_person_uses_the_assistant_end_to_end(live, page):
     field.click()
     field.type("/")
     expect(page.locator("#ast-commands")).to_be_visible()
-    expect(page.locator("#ast-commands .ast-command")).to_have_count(6)
+    # From the server's catalogue: the menu exists so the list is never written twice.
+    expect(page.locator("#ast-commands .ast-command")).to_have_count(
+        len(command_catalogue())
+    )
     page.keyboard.press("ArrowDown")  # /compare
     page.keyboard.press("Enter")
     expect(field).to_have_value("/compare ")

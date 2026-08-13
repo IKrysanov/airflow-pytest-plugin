@@ -302,6 +302,7 @@ def reset_engine() -> None:
         _engine_ready = False
         _metadata = None
         _resolution_error = None
+        _forget_probe()
         _engine_error = None
         _tables.clear()
 
@@ -344,7 +345,34 @@ def recorded_version() -> int | None:
     return _probe()[0]
 
 
+#: How long a schema-version answer is reused. The value changes only when somebody runs
+#: `upgrade`, while the question is asked by every readiness check -- several times in a
+#: single request. A few seconds collapses those into one round trip and still lets a
+#: worker notice a fresh upgrade without being restarted. Kept short deliberately: the
+#: staleness that would hurt is the negative one, a feature staying switched off after
+#: the operator has already fixed it.
+_PROBE_TTL_SECONDS = 5.0
+_probe_cache: tuple[float, tuple[int | None, bool, str | None]] | None = None
+
+
+def _forget_probe() -> None:
+    """Drop the cached schema-version answer, so the next caller asks the database."""
+    global _probe_cache
+    _probe_cache = None
+
+
 def _probe() -> tuple[int | None, bool, str | None]:
+    global _probe_cache
+    cached = _probe_cache
+    if cached is not None and time.monotonic() < cached[0]:
+        return cached[1]
+    answer = _probe_uncached()
+    with _lock:
+        _probe_cache = (time.monotonic() + _PROBE_TTL_SECONDS, answer)
+    return answer
+
+
+def _probe_uncached() -> tuple[int | None, bool, str | None]:
     """Return ``(version, reachable, error)``.
 
     A missing table and an unreachable server both leave the version unknown, but they need
@@ -565,6 +593,10 @@ def upgrade() -> dict[str, Any]:
                 .where(schema.c.version == current)
                 .values(version=SCHEMA_VERSION)
             )
+    # Every readiness check reads this number, and they read it from a cache. An operator
+    # who has just fixed a deployment must not be told for another few seconds that the
+    # tables are still missing.
+    _forget_probe()
     return {"created": not existed, "version": SCHEMA_VERSION}
 
 

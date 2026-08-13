@@ -279,6 +279,8 @@ server which rules to send, it is not part of what you asked.
 | Command | Ask it to… | It will… |
 |:--|:--|:--|
 | `/bug` | **draft a bug report** — "оформи багрепорт по этому падению", "write this up as an issue" | produce summary, where, when, test, what happened, how to reproduce, and an explicit list of what the evidence does *not* establish — without inventing a cause, severity or owner |
+| `/explain` | **explain a failure in plain words** — "что значит эта ошибка?", "explain this traceback" | translate the error rather than restate it, point at the frame inside your project, and say which parts are read off the evidence and which are inferred from the shape of the error — no headings, no ticket structure |
+| `/summary` | **summarise the runs in scope** — "сделай сводку по прогонам", "summarise these runs for standup" | say how many runs, how many green, what is broken grouped by cause rather than listed by test, what changed status inside the scope, and in one line what the runs cannot tell you |
 | `/flaky` | **judge a flaky test** — "should I quarantine this?", "стоит ли скипнуть?" | separate a test that alternates from one that broke and stayed broken, show the pass/fail split, and weigh `@pytest.mark.flaky`, `skip` and this dashboard's quarantine — saying what each one hides |
 | `/priority` | **prioritise** — "что чинить в первую очередь?" | rank by runs blocked, determinism, shared failure signature and duration cost, stating the rule it ranked by, and that this orders symptoms rather than causes |
 | `/compare` | **compare runs** — "what changed since yesterday?" | list outcome changes, tests present on one side only, totals and durations — and refuse to narrate a cause the evidence does not contain |
@@ -288,6 +290,10 @@ server which rules to send, it is not part of what you asked.
 The instructions live in [`prompts/`](prompts) as one Markdown file per subject, next to the
 code. Reading them is the fastest way to know exactly what your assistant is told; changing
 one is editing a file.
+
+`/explain` and `/bug` look adjacent and are not: a bug report is written for whoever fixes
+it next week, an explanation for the person looking at a red run right now. Sharing one set
+of rules made every explanation arrive with headings and a "Not established" section.
 
 Two of these — `/test` and `/docs` — are not questions about your runs, so on an empty
 dashboard they are answered instead of being met with "no report matched, widen your
@@ -504,7 +510,7 @@ cap are fixed abuse-safety contracts, not tuning knobs.
 | `AIRFLOW_PYTEST_ASSISTANT_AUDIT_LOG` | on | one JSON audit record per request; `0` silences it |
 | `AIRFLOW_PYTEST_ASSISTANT_RATE_LIMIT` | `60` | questions one principal may ask per window; `0` disables |
 | `AIRFLOW_PYTEST_ASSISTANT_RATE_WINDOW` | `3600` | sliding window in seconds (1–86400) |
-| `AIRFLOW_PYTEST_ASSISTANT_DAILY_TOKEN_QUOTA` | `0` | provider tokens one principal may spend per UTC day; `0` = unlimited |
+| `AIRFLOW_PYTEST_ASSISTANT_DAILY_TOKEN_QUOTA` | `0` | provider tokens one principal may spend per UTC day; `0` = unlimited. Set it and the panel shows the reader how much of today's budget they have used, so the `429` is not the first they hear of it |
 | `AIRFLOW_PYTEST_ASSISTANT_DB_CONN_ID` | — | Airflow connection naming the database for the plugin's tables |
 | `AIRFLOW_PYTEST_ASSISTANT_DB_URL` | Airflow's metadata DB | literal SQLAlchemy URL; wins over the connection id |
 | `AIRFLOW_PYTEST_ASSISTANT_DOCS_BUILTIN` | on | set to `0` to ship no manual at all, so product questions are answered only from the short PRODUCT block |

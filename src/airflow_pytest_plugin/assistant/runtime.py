@@ -291,6 +291,7 @@ class AssistantRuntime:
             "rate_limit": self.limits.rate_limit,
             "rate_window_seconds": self.limits.rate_window_seconds,
             "daily_token_quota": self.limits.daily_token_quota,
+            "daily_tokens_spent": self._spent_today(user),
             "quota_shared": self.limits.shared,
             "rate_shared": self.limits.rate_shared,
             "commands": command_catalogue(),
@@ -302,6 +303,24 @@ class AssistantRuntime:
             # assumed.
             "history_encrypted": (chatcrypto.enabled() if stored_for_caller else None),
         }
+
+    def _spent_today(self, user: Any) -> int | None:
+        """Return what this caller has spent today, or ``None`` when that is meaningless.
+
+        A quota nobody can see is a 429 that arrives without warning, and the ceiling was
+        published from the first release while the spend was not. ``None`` where there is
+        no quota (nothing is counted, so nothing may be claimed) and where the caller has
+        no identity of their own: unidentifiable viewers share one bucket, and showing
+        somebody a number that other people are also spending would be a lie.
+        """
+        from .. import db
+
+        if not self.limits.daily_token_quota or user is _NO_USER:
+            return None
+        who = audit.principal(user)
+        if who in db.UNOWNED_PRINCIPALS:
+            return None
+        return self.limits.spent_today(who)
 
     def _can_own_history(self, user: Any) -> bool:
         """Whether this identity may own stored rows at all."""

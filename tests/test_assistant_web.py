@@ -1432,3 +1432,76 @@ def test_our_own_errors_still_say_what_is_wrong(reports_root):
 
     assert response.status_code == 400
     assert "must not be empty" in response.json()["detail"]
+
+
+def _quota_runtime(quota: int) -> AssistantRuntime:
+    return AssistantRuntime(
+        provider_factory=FakeAnswerProvider,
+        reducer_factory=PassthroughReducer,
+        provider_name="fake",
+        model_name="offline-fake",
+        context_model_name=None,
+        max_context_bytes=16_384,
+        max_output_tokens=256,
+        max_concurrent=2,
+        daily_token_quota=quota,
+    )
+
+
+def test_the_status_tells_a_reader_what_is_left_of_their_budget(reports_root):
+    """A quota nobody can see is a 429 that arrives without warning.
+
+    The limit was published from the start and the spend was not, so the panel could say
+    what the ceiling was but never how close somebody stood to it. `spent_today` already
+    existed for exactly this and had no caller outside the tests.
+    """
+    runtime = _quota_runtime(10_000)
+    alice = SimpleNamespace(username="alice")
+    runtime.limits.charge("username:alice", 2_500)
+
+    body = (
+        _client(reports_root, runtime=runtime, user=alice)
+        .get("/api/assistant/status")
+        .json()
+    )
+
+    assert body["daily_token_quota"] == 10_000
+    assert body["daily_tokens_spent"] == 2_500
+
+
+def test_one_reader_is_not_shown_another_reader_s_spend(reports_root):
+    runtime = _quota_runtime(10_000)
+    runtime.limits.charge("username:alice", 4_000)
+
+    bob = (
+        _client(reports_root, runtime=runtime, user=SimpleNamespace(username="bob"))
+        .get("/api/assistant/status")
+        .json()
+    )
+
+    assert bob["daily_tokens_spent"] == 0
+
+
+def test_no_quota_means_no_spend_to_report(reports_root):
+    """Nothing is counted when nothing is bounded, so nothing is claimed."""
+    body = (
+        _client(
+            reports_root, runtime=_quota_runtime(0), user=SimpleNamespace(username="a")
+        )
+        .get("/api/assistant/status")
+        .json()
+    )
+
+    assert body["daily_token_quota"] == 0
+    assert body["daily_tokens_spent"] is None
+
+
+def test_a_viewer_with_no_identity_is_told_no_spend(reports_root):
+    """An unidentifiable caller shares the anonymous bucket; publishing it would be a lie."""
+    body = (
+        _client(reports_root, runtime=_quota_runtime(10_000), user=object())
+        .get("/api/assistant/status")
+        .json()
+    )
+
+    assert body["daily_tokens_spent"] is None

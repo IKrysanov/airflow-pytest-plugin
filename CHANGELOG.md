@@ -5,6 +5,23 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`/explain`.** Asks for a failure in plain words rather than a bug report: the error
+  translated instead of restated, the frame inside your project named, and a line saying
+  which parts are read off the evidence and which are inferred from the shape of the error.
+  `/bug` is still there for the write-up somebody will act on later.
+- **`/summary`.** A digest of the runs in scope, the way it would be said at a standup:
+  how many ran, how many were green, what is broken grouped by cause rather than listed by
+  test, what changed status inside the scope, and what the runs cannot tell you.
+- **The daily budget is visible.** Where `AIRFLOW_PYTEST_ASSISTANT_DAILY_TOKEN_QUOTA` is
+  set, the panel shows how much of today's allowance the reader has spent, so a `429` is
+  not the first they hear of it. `GET /api/assistant/status` reports it as
+  `daily_tokens_spent` — `null` where no quota is configured, and where the caller has no
+  identity of their own, because unidentifiable viewers share one counter.
+
 ## [0.8.0] - 2026-08-12
 
 ### Added

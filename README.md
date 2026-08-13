@@ -487,8 +487,8 @@ adds the per-test judgements.
 An **AI assistant** button on the dashboard answers questions about the reports you are
 looking at. Every request repeats Airflow's DAG read checks on the server, so an answer can
 only be built from reports you may already open. Answers stream, cite the runs they used, and
-show exactly what was sent and what it cost. Type `/` for commands (`/bug`, `/flaky`,
-`/priority`, `/compare`, `/test`, `/docs`). It ships with a manual of this product, so it can
+show exactly what was sent and what it cost. Type `/` for commands (`/explain`, `/bug`,
+`/flaky`, `/priority`, `/compare`, `/summary`, `/test`, `/docs`). It ships with a manual of this product, so it can
 answer "how do I run my first test?" out of the box — point it at your own manuals to replace
 that — and it will write pytest when you ask.
 

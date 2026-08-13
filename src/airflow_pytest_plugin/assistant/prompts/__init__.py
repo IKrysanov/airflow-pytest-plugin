@@ -143,6 +143,47 @@ SKILLS: dict[str, Skill] = {
             "оформи",
         ),
     ),
+    "explain": _skill(
+        "explain",
+        "explaining a failure in plain words",
+        "explain",
+        (
+            "explain",
+            "in plain words",
+            "in plain english",
+            "объясни",
+            "поясни",
+            "разъясни",
+            "что значит",
+            "что означает",
+            "простыми словами",
+            "не понимаю",
+        ),
+        # "what does X mean" asks for this; "what does the operator do" is a question
+        # about the product, and a bare "what does" swallowed both.
+        pairs=(("what", "mean"), ("что", "значит")),
+    ),
+    "summary": _skill(
+        "summary",
+        "a digest of the runs in scope",
+        "summary",
+        (
+            "summarise",
+            "summarize",
+            "summary",
+            "digest",
+            "standup",
+            "stand-up",
+            "overview of",
+            "сводк",
+            "кратко о",
+            "дайджест",
+            "обзор прогон",
+        ),
+        # "итог" alone is inside "в итоге тест упал", which is somebody describing a
+        # failure rather than asking for a digest.
+        pairs=(("подведи", "итог"),),
+    ),
     "flaky": _skill(
         "flaky",
         "flaky tests and quarantine",
@@ -353,15 +394,28 @@ class ProviderPrompt:
 _LOCALE_TAG = re.compile(r"^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})?$")
 
 
-def language_line(locale: str) -> str:
-    """Return the dashboard-language instruction, or nothing for an API client."""
+#: Where nothing at all indicates a language. The always-on rules say to answer in the
+#: language the user used, which reads a question that here has no words: `/summary` is
+#: typed bare, and an API client need not send a locale. Observed live, a bare `/summary`
+#: came back in Japanese. English is the language this product is written in, so it is
+#: the answer to "nobody said" -- and it can override nothing, because nothing was said.
+_DEFAULT_LANGUAGE = "English"
+
+
+def language_line(locale: str, question: str = "") -> str:
+    """Return the language instruction, or nothing when the question speaks for itself."""
     tag = (locale or "").strip()
-    if not tag or not _LOCALE_TAG.match(tag):
-        return ""
-    return (
-        f"DASHBOARD LANGUAGE\n{tag}\nAnswer in this language unless the question is "
-        "clearly written in another one.\n\n"
-    )
+    if tag and _LOCALE_TAG.match(tag):
+        return (
+            f"DASHBOARD LANGUAGE\n{tag}\nAnswer in this language unless the question is "
+            "clearly written in another one.\n\n"
+        )
+    if not (question or "").strip():
+        return (
+            f"DASHBOARD LANGUAGE\n{_DEFAULT_LANGUAGE}\nNothing in this request indicates "
+            "a language, so answer in this one.\n\n"
+        )
+    return ""
 
 
 def build_provider_prompt(
@@ -380,7 +434,7 @@ def build_provider_prompt(
         else ""
     )
     text = (
-        f"{language_line(locale)}"
+        f"{language_line(locale, question)}"
         f"USER QUESTION\n{question}\n\n"
         f"RECENT CHAT (untrusted conversational context)\n{history_text}\n\n"
         f"{docs_block}"

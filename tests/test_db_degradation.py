@@ -213,3 +213,70 @@ def test_doctor_reports_a_write_it_cannot_perform(monkeypatch):
 
     assert code == 1
     assert "Write probe" in printed
+
+
+# =========================================================================================
+# What one request costs the metadata database
+# =========================================================================================
+
+
+def _count_statements(matching: str):
+    """Record every statement this engine runs that contains ``matching``."""
+    seen: list[str] = []
+
+    def note(conn, cursor, statement, *rest):
+        flat = " ".join(statement.split())
+        if matching in flat:
+            seen.append(flat)
+
+    sa.event.listen(db.engine(), "before_cursor_execute", note)
+    return seen, lambda: sa.event.remove(db.engine(), "before_cursor_execute", note)
+
+
+def test_the_status_endpoint_probes_the_schema_version_once():
+    """Every opened panel hits this, on Airflow's own metadata database.
+
+    The probe answers "which version is in the database" -- something that changes only
+    when somebody runs `upgrade` -- and it is not cached, so each readiness check pays a
+    round trip. Reporting the daily spend added two more of them to a call that used to
+    cost one.
+    """
+    from airflow_pytest_plugin.assistant import AssistantRuntime, PassthroughReducer
+    from airflow_pytest_plugin.assistant.providers.fake import FakeAssistant
+
+    db.upgrade()
+    runtime = AssistantRuntime(
+        provider_factory=FakeAssistant,
+        reducer_factory=PassthroughReducer,
+        provider_name="fake",
+        model_name="offline-fake",
+        context_model_name=None,
+        max_context_bytes=8_192,
+        max_output_tokens=64,
+        max_concurrent=2,
+        history=db.history_store(),
+        history_days=30,
+        quota_store=db.quota_store(),
+        daily_token_quota=100_000,
+    )
+    seen, stop = _count_statements("pytest_assistant_schema.version")
+    try:
+        runtime.status({"id": 1})
+    finally:
+        stop()
+
+    assert len(seen) <= 1, f"{len(seen)} version probes for one status call"
+
+
+def test_a_fresh_upgrade_is_seen_at_once():
+    """Caching the probe must not leave a feature switched off after it was fixed.
+
+    The dangerous staleness is the negative one: an operator runs `upgrade` and the
+    workers keep answering "no tables" from a cached answer.
+    """
+    assert db.recorded_version() is None
+
+    db.upgrade()
+
+    assert db.recorded_version() == db.SCHEMA_VERSION
+    assert db.table_ready(db.MESSAGE_TABLE) is True
