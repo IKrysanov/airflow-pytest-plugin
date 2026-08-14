@@ -17,7 +17,9 @@
 from __future__ import annotations
 
 import json
+import pathlib
 import re
+import time
 
 import pytest
 from playwright.sync_api import expect
@@ -3410,3 +3412,306 @@ def test_a_reload_keeps_the_cost_of_answers_it_restores(page, assistant_base_url
         "restored"
     )
     expect(page.locator("#ast-session-tokens")).to_contain_text("700")
+
+
+CODE_ANSWER = (
+    "Two tests failed [R1].\n\n"
+    "```python\n"
+    "def test_checkout():\n"
+    "    assert total == 42  # boom\n"
+    "```\n\n"
+    "And the traceback:\n\n"
+    "```\n"
+    "AssertionError: 41 != 42\n"
+    "```\n"
+)
+
+
+def _answer_with_code(route) -> None:
+    _fulfil_stream(
+        route,
+        {
+            "answer": CODE_ANSWER,
+            "provider": "fake",
+            "model": "offline-fake",
+            "evidence": [
+                {
+                    "key": "R1",
+                    "report_id": "rid",
+                    "dag_id": "checkout",
+                    "run_id": "run_a",
+                    "task_id": "pytest",
+                }
+            ],
+            "token_usage": None,
+            "billed_tokens": 320,
+        },
+    )
+
+
+def test_each_code_block_carries_its_own_copy(page, assistant_base_url):
+    """A traceback is the part of an answer people take away.
+
+    Selecting it by hand out of a scrolling panel, without catching the prose around it,
+    is the worst way to get it -- so a fenced block gets the same affordance the whole
+    answer already had, at the granularity people actually reach for.
+    """
+    from conftest import _load_dash  # type: ignore[import-not-found]
+
+    _load_dash(page, assistant_base_url)
+    page.click("#assistant-btn")
+    page.route("**/api/assistant/stream", _answer_with_code)
+    page.locator("#ast-question").fill("What failed?")
+    page.locator("#ast-send").click()
+    expect(page.locator(".ast-msg.assistant .ast-answer").last).to_contain_text("boom")
+
+    blocks = page.locator(".ast-msg.assistant .ast-code")
+    expect(blocks).to_have_count(2)
+    # The fence's info string is shown, and only when the model wrote one.
+    expect(blocks.nth(0).locator(".ast-code-lang")).to_have_text("python")
+    expect(blocks.nth(1).locator(".ast-code-lang")).to_have_text("")
+    # Visible without hovering: a touch screen has no hover, and a control nobody can
+    # reveal is a control that does not exist.
+    expect(blocks.nth(0).locator(".ast-code-copy")).to_be_visible()
+    expect(blocks.nth(1).locator(".ast-code-copy")).to_be_visible()
+
+
+def test_copying_a_code_block_takes_the_code_and_not_the_prose(
+    page, assistant_base_url
+):
+    from conftest import _load_dash  # type: ignore[import-not-found]
+
+    _load_dash(page, assistant_base_url)
+    page.click("#assistant-btn")
+    page.route("**/api/assistant/stream", _answer_with_code)
+    page.locator("#ast-question").fill("What failed?")
+    page.locator("#ast-send").click()
+    expect(page.locator(".ast-msg.assistant .ast-answer").last).to_contain_text("boom")
+
+    copied: list[str] = []
+    page.expose_function("astTestCopy", lambda text: copied.append(text))
+    page.evaluate(
+        "() => { navigator.clipboard.writeText = t => "
+        "{ window.astTestCopy(t); return Promise.resolve(); }; }"
+    )
+
+    page.locator(".ast-code").nth(1).locator(".ast-code-copy").click()
+    expect(page.locator(".ast-code").nth(1).locator(".ast-code-copy")).to_contain_text(
+        "Copied"
+    )
+
+    assert copied == ["AssertionError: 41 != 42"]
+
+
+def test_the_whole_answer_copy_still_takes_everything(page, assistant_base_url):
+    """The two copies are different scopes, not a replacement."""
+    from conftest import _load_dash  # type: ignore[import-not-found]
+
+    _load_dash(page, assistant_base_url)
+    page.click("#assistant-btn")
+    page.route("**/api/assistant/stream", _answer_with_code)
+    page.locator("#ast-question").fill("What failed?")
+    page.locator("#ast-send").click()
+    expect(page.locator(".ast-msg.assistant .ast-answer").last).to_contain_text("boom")
+
+    copied: list[str] = []
+    page.expose_function("astTestCopy", lambda text: copied.append(text))
+    page.evaluate(
+        "() => { navigator.clipboard.writeText = t => "
+        "{ window.astTestCopy(t); return Promise.resolve(); }; }"
+    )
+
+    page.locator(".ast-msg-footer .ast-copy").last.click()
+    expect(page.locator(".ast-msg-footer .ast-copy").last).to_contain_text("Copied")
+
+    assert copied and "Two tests failed" in copied[0]
+    assert "def test_checkout()" in copied[0]
+
+
+def test_a_chat_can_be_exported_as_markdown(page, assistant_base_url):
+    """The answers are Markdown already; an export is an assembly job, not a conversion.
+
+    Worth having because the panel is the one place this work exists: a reader who wants
+    to paste the analysis into a ticket, a PR or a postmortem currently retypes it.
+    """
+    from conftest import _load_dash  # type: ignore[import-not-found]
+
+    _load_dash(page, assistant_base_url)
+    page.click("#assistant-btn")
+    # Nothing to export before there is a chat.
+    expect(page.locator("#ast-export")).to_be_hidden()
+
+    page.route("**/api/assistant/stream", _answer_with_code)
+    page.locator("#ast-question").fill("What failed?")
+    page.locator("#ast-send").click()
+    expect(page.locator(".ast-msg.assistant .ast-answer").last).to_contain_text("boom")
+    expect(page.locator("#ast-export")).to_be_visible()
+
+    with page.expect_download() as download:
+        page.locator("#ast-export").click()
+    saved = download.value
+    assert saved.suggested_filename.endswith(".md"), saved.suggested_filename
+
+    text = pathlib.Path(saved.path()).read_text(encoding="utf-8")
+    assert text.startswith("# Report assistant chat")
+    # Both sides of the exchange, in order, with the answer's own Markdown intact.
+    assert text.index("## You") < text.index("## Assistant")
+    assert "What failed?" in text
+    assert "```python" in text and "def test_checkout():" in text
+    # The grounding travels with it: an export without the evidence is an unsourced claim.
+    assert "**Evidence**" in text
+    assert "`[R1]` checkout / run_a / pytest" in text
+
+
+def test_the_export_keeps_an_answer_that_was_stopped(page, assistant_base_url):
+    """What somebody exports should be what they read, including a half answer."""
+    from conftest import _load_dash  # type: ignore[import-not-found]
+
+    _load_dash(page, assistant_base_url)
+    page.click("#assistant-btn")
+
+    def _hang(route):
+        route.fulfill(
+            status=200,
+            content_type="text/event-stream",
+            body='event: delta\ndata: {"text": "half an ans"}\n\n',
+        )
+
+    page.route("**/api/assistant/stream", _hang)
+    page.locator("#ast-question").fill("What failed?")
+    page.locator("#ast-send").click()
+    expect(page.locator(".ast-msg.assistant .ast-answer").last).to_contain_text(
+        "half an ans"
+    )
+
+    with page.expect_download() as download:
+        page.locator("#ast-export").click()
+    text = pathlib.Path(download.value.path()).read_text(encoding="utf-8")
+
+    assert "half an ans" in text
+    assert "(answer stopped before it finished)" in text
+
+
+def test_the_export_is_named_after_the_chat_and_the_moment(page, assistant_base_url):
+    """Two exports in one session must not overwrite each other in the download folder."""
+    from conftest import _load_dash  # type: ignore[import-not-found]
+
+    _load_dash(page, assistant_base_url)
+    page.click("#assistant-btn")
+    page.route("**/api/assistant/stream", _answer_with_code)
+    page.locator("#ast-question").fill("What failed?")
+    page.locator("#ast-send").click()
+    expect(page.locator(".ast-msg.assistant .ast-answer").last).to_contain_text("boom")
+
+    with page.expect_download() as first:
+        page.locator("#ast-export").click()
+
+    name = first.value.suggested_filename
+    assert name.startswith("assistant-")
+    # Only characters that survive a file system, whatever the chat id was.
+    assert re.fullmatch(r"assistant-[A-Za-z0-9_-]+\.md", name), name
+
+
+HOSTILE_ANSWER = (
+    "Here you go:\n\n"
+    '```"><script>window.astPwned = 1</script>\n'
+    '<img src=x onerror="window.astPwned = 2">\n'
+    "</code></pre><script>window.astPwned = 3</script>\n"
+    "```\n"
+)
+
+
+def test_a_code_block_cannot_smuggle_markup_out_of_itself(page, assistant_base_url):
+    """Everything in an answer is model output, and the fence's info string is too.
+
+    The language is written by whatever answered, so it is shown as text and never
+    becomes a class name; the body is `textContent` for the same reason.
+    """
+    from conftest import _load_dash  # type: ignore[import-not-found]
+
+    _load_dash(page, assistant_base_url)
+    page.click("#assistant-btn")
+    page.route(
+        "**/api/assistant/stream",
+        lambda route: _fulfil_stream(
+            route,
+            {
+                "answer": HOSTILE_ANSWER,
+                "provider": "fake",
+                "model": "offline-fake",
+                "evidence": [],
+                "token_usage": None,
+                "billed_tokens": 10,
+            },
+        ),
+    )
+    page.locator("#ast-question").fill("What failed?")
+    page.locator("#ast-send").click()
+    expect(page.locator(".ast-code")).to_have_count(1)
+
+    assert page.evaluate("() => window.astPwned || null") is None
+    assert page.locator(".ast-msg.assistant script").count() == 0
+    assert page.locator(".ast-msg.assistant img").count() == 0
+    # The markup is visible as text, which is the whole point of a code block.
+    expect(page.locator(".ast-code pre")).to_contain_text("<script>")
+    # An info string that is not a plain word is not shown at all rather than shown wrong.
+    expect(page.locator(".ast-code-lang")).to_have_text("")
+
+
+def test_an_export_filename_cannot_escape_its_folder(page, assistant_base_url):
+    """The chat id reaches a `download` attribute, and ids are not always ours."""
+    from conftest import _load_dash  # type: ignore[import-not-found]
+
+    _load_dash(page, assistant_base_url)
+    page.click("#assistant-btn")
+    page.route("**/api/assistant/stream", _answer_with_code)
+    page.locator("#ast-question").fill("What failed?")
+    page.locator("#ast-send").click()
+    expect(page.locator(".ast-msg.assistant .ast-answer").last).to_contain_text("boom")
+
+    for hostile in ("../../etc/passwd", "a/b\\c", "чат", "x" * 200, ".."):
+        page.evaluate(
+            "id => { window.__astSetConversation(id); }", hostile
+        ) if page.evaluate(
+            "() => typeof window.__astSetConversation === 'function'"
+        ) else None
+        name = page.evaluate(
+            "id => { const stamp = new Date().toISOString().slice(0, 19)"
+            ".replace(/[:T]/g, '-');"
+            " const chat = (id || 'chat').replace(/[^A-Za-z0-9_-]+/g, '-').slice(0, 40);"
+            " return 'assistant-' + (chat || 'chat') + '-' + stamp + '.md'; }",
+            hostile,
+        )
+        assert re.fullmatch(r"assistant-[A-Za-z0-9_-]{1,40}-[0-9-]+\.md", name), name
+        assert "/" not in name and "\\" not in name and ".." not in name.rstrip(".md")
+
+
+def test_a_long_chat_exports_its_window_and_says_so(page, assistant_base_url):
+    """The panel keeps a window, not the whole chat, and a file hides that.
+
+    A scrolling view makes the cut obvious -- you can see there is nothing above. A
+    Markdown file that simply starts at the seventh exchange reads as the whole
+    conversation, so the export says which part of it this is.
+    """
+    from conftest import _load_dash  # type: ignore[import-not-found]
+
+    _load_dash(page, assistant_base_url)
+    page.click("#assistant-btn")
+    page.route("**/api/assistant/stream", _answer_with_code)
+    for _ in range(12):
+        page.locator("#ast-question").fill("What failed?")
+        page.locator("#ast-send").click()
+        expect(page.locator(".ast-msg.assistant .ast-answer").last).to_contain_text(
+            "boom"
+        )
+
+    started = time.monotonic()
+    with page.expect_download() as download:
+        page.locator("#ast-export").click()
+    text = pathlib.Path(download.value.path()).read_text(encoding="utf-8")
+    elapsed = time.monotonic() - started
+
+    kept = page.evaluate("() => document.querySelectorAll('.ast-msg').length")
+    assert text.count("## You") + text.count("## Assistant") == kept
+    assert "the chat itself may be longer" in text
+    assert elapsed < 5, f"exporting the window took {elapsed:.1f}s"

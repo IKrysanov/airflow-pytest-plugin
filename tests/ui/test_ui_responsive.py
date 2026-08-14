@@ -197,3 +197,91 @@ def test_the_assistant_context_overview_fits_a_narrow_screen(
     assert _overflow(page) == 0, (
         f"{label} ({width}px): the context overview widens the page. {_offenders(page)}"
     )
+
+
+@pytest.mark.parametrize(
+    ("width", "label"), [(360, "phone"), (414, "large phone"), (768, "tablet")]
+)
+def test_the_header_still_fits_now_that_it_carries_an_export(
+    page, assistant_base_url, width, label
+):
+    """A fourth control in a fixed-height header is how a phone layout breaks.
+
+    Chats, Export, Clear and Close now share one row, and the row cannot grow: the panel
+    is a dialog with its own width.
+    """
+    from conftest import _load_dash  # type: ignore[import-not-found]
+
+    page.set_viewport_size({"width": width, "height": 900})
+    _load_dash(page, assistant_base_url)
+    page.click("#assistant-btn")
+    expect(page.locator("#assistant-dialog")).to_be_visible()
+
+    page.route(
+        "**/api/assistant/stream",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="text/event-stream",
+            body=(
+                'event: done\ndata: {"answer": "```python\\nx = 1\\n```", '
+                '"provider": "fake", "model": "offline-fake", "evidence": [], '
+                '"token_usage": null, "billed_tokens": 12}\n\n'
+            ),
+        ),
+    )
+    page.locator("#ast-question").fill("What failed?")
+    page.locator("#ast-send").click()
+    expect(page.locator("#ast-export")).to_be_visible()
+
+    assert _overflow(page) == 0, (
+        f"{label} ({width}px): the header widens the page. {_offenders(page)}"
+    )
+    for selector in ("#ast-export", "#ast-clear", "#ast-close"):
+        spot = page.locator(selector).bounding_box()
+        assert spot is not None and spot["width"] > 0, f"{selector} has no box"
+        assert spot["x"] >= -1 and spot["x"] + spot["width"] <= width + 1, (
+            f"{selector} runs off a {width}px screen at {spot['x']}..{spot['x'] + spot['width']}"
+        )
+
+
+@pytest.mark.parametrize(("width", "label"), [(360, "phone"), (768, "tablet")])
+def test_a_code_block_scrolls_itself_rather_than_the_panel(
+    page, assistant_base_url, width, label
+):
+    """A long traceback is the widest thing an answer can contain."""
+    from conftest import _load_dash  # type: ignore[import-not-found]
+
+    page.set_viewport_size({"width": width, "height": 900})
+    _load_dash(page, assistant_base_url)
+    page.click("#assistant-btn")
+    long_line = "E   AssertionError: " + "x" * 400
+    page.route(
+        "**/api/assistant/stream",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="text/event-stream",
+            body=(
+                'event: done\ndata: {"answer": "```\\n' + long_line + '\\n```", '
+                '"provider": "fake", "model": "offline-fake", "evidence": [], '
+                '"token_usage": null, "billed_tokens": 12}\n\n'
+            ),
+        ),
+    )
+    page.locator("#ast-question").fill("What failed?")
+    page.locator("#ast-send").click()
+    expect(page.locator(".ast-code")).to_have_count(1)
+
+    assert _overflow(page) == 0, (
+        f"{label} ({width}px): a code block widens the page. {_offenders(page)}"
+    )
+    block = page.locator(".ast-code").bounding_box()
+    assert block is not None
+    assert block["x"] + block["width"] <= width + 1, "the block itself runs off"
+    # It scrolls on its own instead, and its Copy stays reachable.
+    scrolls = page.evaluate(
+        "() => { const p = document.querySelector('.ast-code pre');"
+        " return p.scrollWidth > p.clientWidth; }"
+    )
+    assert scrolls, "a 400-character line did not make the block scrollable"
+    copy = page.locator(".ast-code-copy").bounding_box()
+    assert copy is not None and copy["x"] + copy["width"] <= width + 1

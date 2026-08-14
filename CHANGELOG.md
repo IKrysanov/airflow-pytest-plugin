@@ -22,6 +22,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `daily_tokens_spent` — `null` where no quota is configured, and where the caller has no
   identity of their own, because unidentifiable viewers share one counter.
 
+- **Every code block in an answer has its own Copy.** A traceback or a snippet is the part
+  of an answer people take away, and selecting it by hand out of a scrolling panel — without
+  catching the prose around it — was the only way to get it. The fence's language is shown
+  beside the button when the model wrote one. The whole-answer Copy is unchanged.
+- **Export the chat as Markdown.** **Export .md** in the panel header saves what you are
+  reading: both sides of every exchange, the answers' own Markdown intact, and the `[R1]`
+  evidence each one rests on. The panel keeps a window rather than the whole chat, so the
+  file says which part of the conversation it holds.
+
 ### Fixed
 
 - **Token counters no longer read as zero on providers that report no usage.** Some

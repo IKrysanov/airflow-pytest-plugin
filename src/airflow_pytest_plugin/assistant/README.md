@@ -299,6 +299,26 @@ Two of these — `/test` and `/docs` — are not questions about your runs, so o
 dashboard they are answered instead of being met with "no report matched, widen your
 filters". The rest still say so, because for them it is the answer.
 
+### Taking an answer with you
+
+Answers arrive as Markdown and are rendered as such — headings, lists, tables and fenced
+code. Three ways out of the panel, at the three sizes people actually want:
+
+* **Copy** under an answer takes the whole thing, Markdown and all.
+* **Copy code** on each fenced block takes just that block. A traceback or a snippet is the
+  part people take away, and selecting it by hand out of a scrolling panel — without
+  catching the prose around it — was the only way to get it. The fence's language is shown
+  beside the button when the model wrote one, as text: it is model output, so it never
+  becomes a class name.
+* **Export .md** in the header saves the chat as a Markdown file: both sides of every
+  exchange in order, each answer's own Markdown intact, and the `[R1]` evidence it rests on,
+  because an export without the grounding is an unsourced claim. An answer that was stopped
+  is included, marked as stopped — what you export should be what you read. The panel keeps
+  a window rather than the whole conversation, so a file that holds only that window says so
+  at the end. Nothing leaves the browser: the file is built in the page from the transcript
+  on screen. Airflow's iframe sandbox blocks downloads started inside it, so the click is
+  made from the parent document, the same way the dashboard already saves an Allure archive.
+
 ## Limits, cost and audit
 
 Each principal gets a request rate limit (60/hour by default — far beyond human use, enough to
@@ -417,8 +437,9 @@ whatever the dashboard held. A refused request (rate limit, permission, a provid
 never answered) produces no reply and is not stored. An answer that *started* is kept with
 whatever arrived -- whether it was stopped from the window or cut off by the provider --
 because the window keeps that text on screen and the server copy wins on the next reload;
-a reader must not lose an exchange they can see. It is stored without evidence links or
-token usage, which the request never got as far as knowing. Deleting or clearing a chat reaches the other tabs of
+a reader must not lose an exchange they can see. It is stored without evidence links, which
+the request never got as far as knowing, and with the tokens it was billed — the prompt had
+already been sent. Deleting or clearing a chat reaches the other tabs of
 the same browser, so a conversation that no longer exists stops being shown in a tab that
 still had it open; a tab reading a *different* chat is left alone.
 

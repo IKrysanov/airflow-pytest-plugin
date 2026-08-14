@@ -204,6 +204,20 @@ _CSS = r"""
     overflow-x: auto; border-radius: 7px; background: var(--surface);
     border: 1px solid var(--border); }
   .ast-answer pre code { padding: 0; border: 0; background: transparent; white-space: pre; }
+  /* A fenced block and its own Copy. The bar is always visible rather than shown on
+     hover: on a touch screen there is no hover, and a control nobody can reveal is a
+     control that does not exist. */
+  .ast-code { margin: 8px 0 10px; border: 1px solid var(--border); border-radius: 7px;
+    background: var(--surface); overflow: hidden; }
+  .ast-code-bar { display: flex; align-items: center; justify-content: space-between;
+    gap: 8px; min-height: 30px; padding: 3px 4px 3px 10px;
+    border-bottom: 1px solid var(--border); background: var(--surface-2); }
+  .ast-code-lang { min-width: 0; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; color: var(--muted); font: 11px/1.4 ui-monospace, SFMono-Regular,
+      Menlo, Consolas, monospace; letter-spacing: .02em; }
+  .ast-code-copy { min-height: 22px; padding: 0 6px; font-size: 11px; }
+  .ast-code-copy svg { width: 12px; height: 12px; }
+  .ast-code pre { margin: 0; border: 0; border-radius: 0; background: transparent; }
   .ast-answer blockquote { margin: 8px 0; padding-left: 10px; color: var(--muted);
     border-left: 3px solid var(--border); }
   .ast-answer a { color: var(--primary); text-underline-offset: 2px; }
@@ -495,6 +509,8 @@ _PANEL = r"""
       <button id="ast-chats" class="ast-clear" type="button" hidden
               aria-haspopup="dialog" aria-controls="ast-chats-dialog"
               aria-expanded="false">Chats</button>
+      <button id="ast-export" class="ast-clear" type="button" hidden
+              aria-live="polite">Export .md</button>
       <button id="ast-clear" class="ast-clear" type="button" hidden>Clear chat</button>
       <button id="ast-close" class="btn ast-close" type="button" aria-label="Close assistant">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -676,6 +692,14 @@ _JS = r"""
       contextLocalFormat: "Local reduction · plain text",
       contextNote: "Exact report-evidence block after RBAC filtering. System instructions, your question and chat history are not shown here.",
       copyAnswer: "Copy", copied: "Copied", copyFailed: "Copy failed",
+      copyCode: "Copy code",
+      exportChat: "Export .md", exported: "Saved", exportFailed: "Export failed",
+      exportTitle: "Report assistant chat",
+      exportMeta: "Exported {when} · {provider} · {model}",
+      exportYou: "You", exportAssistant: "Assistant",
+      exportEvidence: "Evidence", exportStopped: "(answer stopped before it finished)",
+      exportTrimmed: "This export holds the last {count} messages the panel was keeping — "
+        + "the chat itself may be longer.",
       tokens: "LLM tokens: input {input} · output {output} · total {total}",
       sessionTokens: "Session total: {total} tokens",
       dailyBudget: "Today: {spent} of {quota} tokens",
@@ -751,6 +775,14 @@ _JS = r"""
       contextLocalFormat: "Локальное сжатие · обычный текст",
       contextNote: "Точный блок данных отчётов после проверки RBAC. Системная инструкция, ваш вопрос и история чата здесь не показаны.",
       copyAnswer: "Копировать", copied: "Скопировано", copyFailed: "Ошибка копирования",
+      copyCode: "Копировать код",
+      exportChat: "Выгрузить .md", exported: "Сохранено", exportFailed: "Не выгрузилось",
+      exportTitle: "Чат с ассистентом по отчётам",
+      exportMeta: "Выгружено {when} · {provider} · {model}",
+      exportYou: "Вы", exportAssistant: "Ассистент",
+      exportEvidence: "Источники", exportStopped: "(ответ был остановлен на середине)",
+      exportTrimmed: "В выгрузке последние {count} сообщений, которые держала панель — "
+        + "сам чат может быть длиннее.",
       tokens: "Токены LLM: вход {input} · ответ {output} · всего {total}",
       sessionTokens: "За сессию: {total} токенов",
       dailyBudget: "Сегодня: {spent} из {quota} токенов",
@@ -815,6 +847,7 @@ _JS = r"""
   var astSend = document.getElementById("ast-send");
   var astStop = document.getElementById("ast-stop");
   var astClear = document.getElementById("ast-clear");
+  var astExport = document.getElementById("ast-export");
   var astChats = document.getElementById("ast-chats");
   var astChatsDialog = document.getElementById("ast-chats-dialog");
   var astChatList = document.getElementById("ast-chat-list");
@@ -869,6 +902,7 @@ _JS = r"""
     document.getElementById("ast-close").setAttribute("aria-label", astT("close"));
     document.getElementById("ast-question-label").textContent = astT("ask");
     astClear.textContent = astT("clear");
+    astExport.textContent = astT("exportChat");
     astQuestion.placeholder = astT("placeholder");
     document.getElementById("ast-hint").textContent = astT("hint");
     document.getElementById("ast-send-label").textContent = astT("send");
@@ -910,7 +944,7 @@ _JS = r"""
     document.getElementById("ast-unavailable").hidden = false;
     astMessages.hidden = true;
     document.getElementById("ast-form").hidden = true;
-    astClear.hidden = true;
+    astShowChatActions(false);
     astChats.hidden = true;
     astContext.hidden = true;
     astApplyProviderText();
@@ -1204,7 +1238,7 @@ _JS = r"""
     astRenderSessionTokens();
     var lastUsers = astTranscript.filter(function (item) { return item.role === "user"; });
     astLastQuestion = lastUsers.length ? lastUsers[lastUsers.length - 1].text : "";
-    astClear.hidden = !astTranscript.length;
+    astShowChatActions(!!astTranscript.length);
     if (astDialog.open) {
       if (astTranscript.length) astRenderTranscript(); else astEmpty();
     }
@@ -1242,7 +1276,7 @@ _JS = r"""
       astTranscript = restored;
       astSessionTotalTokens = 0;
       astPersistTranscript(); astRenderSessionTokens();
-      astClear.hidden = !astTranscript.length;
+      astShowChatActions(!!astTranscript.length);
       if (astDialog.open) {
         if (astTranscript.length) astRenderTranscript(); else astEmpty();
       }
@@ -1452,7 +1486,7 @@ _JS = r"""
     astConversation = astNewConversationId();
     astTranscript = []; astLastQuestion = ""; astSessionTotalTokens = 0;
     astPersistTranscript(); astRenderSessionTokens();
-    astClear.hidden = true; astEmpty(); astQuestion.focus();
+    astShowChatActions(false); astEmpty(); astQuestion.focus();
   }
 
   function astDeleteChat(id) {
@@ -1467,7 +1501,7 @@ _JS = r"""
           astConversation = "";
           astTranscript = []; astLastQuestion = ""; astSessionTotalTokens = 0;
           astPersistTranscript(); astRenderSessionTokens();
-          astClear.hidden = true; astEmpty();
+          astShowChatActions(false); astEmpty();
           astLoadServerHistory("", true);
         }
       });
@@ -1497,7 +1531,7 @@ _JS = r"""
     if (astPending) astStopStream();
     astTranscript = []; astLastQuestion = ""; astSessionTotalTokens = 0;
     astPersistTranscript(); astRenderSessionTokens();
-    astClear.hidden = true; astEmpty();
+    astShowChatActions(false); astEmpty();
   }
 
   function astNewConversationId() {
@@ -1695,7 +1729,7 @@ _JS = r"""
           conversation: astConversation,
           sessionTotalTokens: astSessionTotalTokens }));
     } } catch (error) { /* Storage may be blocked or full; chat still works in memory. */ }
-    astClear.hidden = !astTranscript.length;
+    astShowChatActions(!!astTranscript.length);
   }
 
   function astHistoryPayload() {
@@ -1795,7 +1829,7 @@ _JS = r"""
       // can find the replacement after a re-render instead of pointing at a detached node.
       box.setAttribute("data-ast-index", String(index));
     });
-    astClear.hidden = !astTranscript.length;
+    astShowChatActions(!!astTranscript.length);
   }
 
   function astMessageState(item) {
@@ -1859,7 +1893,7 @@ _JS = r"""
     }
     astTranscript = []; astLastQuestion = ""; astSessionTotalTokens = 0;
     try { if (AST_STORAGE_KEY) sessionStorage.removeItem(AST_STORAGE_KEY); } catch (error) {}
-    astRenderSessionTokens(); astClear.hidden = true; astEmpty();
+    astRenderSessionTokens(); astShowChatActions(false); astEmpty();
     astRenderGhost(); astQuestion.focus();
   }
 
@@ -1980,9 +2014,12 @@ _JS = r"""
       }
       if (/^\s*```/.test(line)) {
         flushParagraph(); closeList(); var codeLines = [];
+        // The info string is whatever the model wrote after the fence. Only a plain word
+        // is kept, and only as text: it is model output, so it never becomes a class name.
+        var info = /^\s*```\s*([A-Za-z0-9_+#.-]{1,20})\s*$/.exec(line);
         while (++i < lines.length && !/^\s*```/.test(lines[i])) codeLines.push(lines[i]);
-        var pre = document.createElement("pre"), code = document.createElement("code");
-        code.textContent = codeLines.join("\n"); pre.appendChild(code); root.appendChild(pre); continue;
+        root.appendChild(astCodeBlock(codeLines.join("\n"), info ? info[1] : ""));
+        continue;
       }
       if (!line.trim()) { flushParagraph(); closeList(); continue; }
       if (heading) {
@@ -2086,7 +2123,117 @@ _JS = r"""
     return astLegacyCopy(text) ? Promise.resolve() : Promise.reject(new Error("clipboard unavailable"));
   }
 
-  function astCopyButton(text) {
+  function astShowChatActions(on) {
+    // Both header actions mean the same thing -- there is a chat here -- so they appear
+    // and disappear together rather than drifting apart across a dozen call sites.
+    astClear.hidden = !on;
+    astExport.hidden = !on;
+  }
+
+  function astExportEvidenceLines(item) {
+    var lines = [];
+    (item.evidence || []).forEach(function (ref) {
+      if (!ref || !ref.key) return;
+      lines.push("- `[" + ref.key + "]` " + [ref.dag_id, ref.run_id, ref.task_id]
+        .filter(Boolean).join(" / "));
+    });
+    return lines;
+  }
+
+  function astExportMarkdown() {
+    // The answers are already Markdown -- the model writes it and the panel renders it --
+    // so an export is an assembly job, not a conversion. It is built from the transcript
+    // on screen rather than re-fetched: what somebody exports should be what they read,
+    // including an answer they stopped.
+    var out = ["# " + astT("exportTitle"), ""];
+    var provider = astStatus && astStatus.provider ? astStatus.provider : "—";
+    var model = astStatus && astStatus.model ? astStatus.model : "—";
+    out.push(astFmt(astFmt(astFmt(astT("exportMeta"), "when", new Date().toISOString()),
+      "provider", provider), "model", model));
+    out.push("");
+    astTranscript.forEach(function (item) {
+      if (!item || !item.text) return;
+      out.push("## " + astT(item.role === "user" ? "exportYou" : "exportAssistant"));
+      out.push("");
+      out.push(item.text);
+      out.push("");
+      if (item.stopped) { out.push(astT("exportStopped")); out.push(""); }
+      var evidence = astExportEvidenceLines(item);
+      if (evidence.length) {
+        out.push("**" + astT("exportEvidence") + "**");
+        out.push("");
+        out.push.apply(out, evidence);
+        out.push("");
+      }
+    });
+    if (astTranscript.length >= AST_MAX_MESSAGES) {
+      // The panel keeps a window, not the whole chat, and a scrolling view makes that
+      // obvious while a file does not: an export that quietly stops at the last dozen
+      // messages reads as the complete conversation.
+      out.push("---", "", astFmt(astT("exportTrimmed"),
+        "count", String(AST_MAX_MESSAGES)), "");
+    }
+    if (astSessionTotalTokens > 0) {
+      out.push("---", "", astFmt(astT("sessionTokens"),
+        "total", String(astSessionTotalTokens)), "");
+    }
+    return out.join("\n");
+  }
+
+  function astExportName() {
+    var stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+    var chat = (astConversation || "chat").replace(/[^A-Za-z0-9_-]+/g, "-").slice(0, 40);
+    return "assistant-" + (chat || "chat") + "-" + stamp + ".md";
+  }
+
+  function astTopDocument() {
+    // Airflow embeds the dashboard in a sandboxed iframe with no allow-downloads, so a
+    // click started in here is dropped. The parent document is same-origin and not
+    // sandboxed, which is where the rest of this plugin already starts its downloads.
+    try {
+      if (window.top !== window.self && window.top.location
+          && window.top.location.origin === window.location.origin) {
+        return window.top.document;
+      }
+    } catch (error) { /* cross-origin parent: nothing to borrow */ }
+    return document;
+  }
+
+  function astSaveMarkdown(text, name) {
+    var url = URL.createObjectURL(new Blob([text], {
+      type: "text/markdown;charset=utf-8"
+    }));
+    try {
+      var doc = astTopDocument();
+      var link = doc.createElement("a");
+      link.href = url; link.download = name; link.rel = "noopener";
+      doc.body.appendChild(link); link.click(); doc.body.removeChild(link);
+    } finally {
+      // Freed on a later turn: revoking it in the same tick can beat the download start.
+      setTimeout(function () { URL.revokeObjectURL(url); }, 30000);
+    }
+  }
+
+  function astCodeBlock(text, language) {
+    // A traceback or a snippet is the part of an answer people actually take away, and
+    // selecting it by hand out of a scrolling panel is the worst way to get it. The whole
+    // answer already has a Copy; this is the same affordance at the granularity people
+    // reach for.
+    var wrap = document.createElement("div"); wrap.className = "ast-code";
+    var bar = document.createElement("div"); bar.className = "ast-code-bar";
+    var tag = document.createElement("span"); tag.className = "ast-code-lang";
+    tag.textContent = language || "";
+    var copy = astCopyButton(text, "copyCode");
+    copy.classList.add("ast-code-copy");
+    bar.appendChild(tag); bar.appendChild(copy);
+    var pre = document.createElement("pre"), code = document.createElement("code");
+    code.textContent = text;
+    pre.appendChild(code); wrap.appendChild(bar); wrap.appendChild(pre);
+    return wrap;
+  }
+
+  function astCopyButton(text, labelKey) {
+    var name = labelKey || "copyAnswer";
     var button = document.createElement("button"); button.type = "button";
     button.className = "ast-copy"; button.setAttribute("aria-live", "polite");
     var icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -2100,7 +2247,7 @@ _JS = r"""
     var back = document.createElementNS("http://www.w3.org/2000/svg", "path");
     back.setAttribute("d", "M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2");
     icon.appendChild(front); icon.appendChild(back);
-    var label = document.createElement("span"); label.textContent = astT("copyAnswer");
+    var label = document.createElement("span"); label.textContent = astT(name);
     button.appendChild(icon); button.appendChild(label);
     button.addEventListener("click", function () {
       button.disabled = true;
@@ -2109,7 +2256,7 @@ _JS = r"""
         .then(function () {
           setTimeout(function () {
             if (!button.isConnected) return;
-            label.textContent = astT("copyAnswer"); button.disabled = false;
+            label.textContent = astT(name); button.disabled = false;
           }, 1500);
         });
     });
@@ -2628,6 +2775,21 @@ _JS = r"""
   astButton.addEventListener("click", function () { astDialog.open ? astClose() : astOpen(); });
   document.getElementById("ast-close").addEventListener("click", astClose);
   astClear.addEventListener("click", astAskToClear);
+  astExport.addEventListener("click", function () {
+    if (!astTranscript.length) return;
+    astExport.disabled = true;
+    var done = astT("exported");
+    try {
+      astSaveMarkdown(astExportMarkdown(), astExportName());
+    } catch (error) {
+      done = astT("exportFailed");
+    }
+    astExport.textContent = done;
+    setTimeout(function () {
+      if (!astExport.isConnected) return;
+      astExport.textContent = astT("exportChat"); astExport.disabled = false;
+    }, 1500);
+  });
   document.getElementById("ast-clear-keep").addEventListener("click", function () {
     astHideClearConfirm(); astQuestion.focus();
   });
@@ -2760,7 +2922,7 @@ _JS = r"""
       if (astDialog.open) astUpdateScope();
     });
   });
-  astClear.hidden = true;
+  astShowChatActions(false);
   astApplyText(); astLoadStatus();
 """
 
