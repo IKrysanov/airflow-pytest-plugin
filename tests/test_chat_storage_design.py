@@ -45,11 +45,13 @@ import pytest
 
 from airflow_pytest_plugin import chatcrypto, db
 from airflow_pytest_plugin.assistant import (
+    AssistantQuery,
     AssistantRuntime,
     PassthroughReducer,
 )
 from airflow_pytest_plugin.assistant.providers.fake import FakeAssistant
 from airflow_pytest_plugin.models import ReportRef
+from airflow_pytest_plugin.sources import FileSystemReportSource
 from conftest import write_report
 
 pytest.importorskip("sqlalchemy")
@@ -522,3 +524,86 @@ def test_rotation_runs_while_the_dashboard_is_being_used(monkeypatch):
         for item in store.load("id:seed", limit=9, conversation="seed-07")
     ]
     assert seeded == ["до 7", "ответ"]
+
+
+def test_a_stored_exchange_records_what_it_cost(reports_root):
+    """A reopened chat must show the same cost the budget was charged.
+
+    The stored figure came straight off `token_usage`, which providers without a `usage`
+    block leave empty -- so every exchange in the saved transcript read as free while the
+    quota it drew on went down. The number the quota moves by is the honest one.
+    """
+    db.upgrade()
+    write_report(reports_root, ReportRef("dag", "run", "task", 1), failed=1)
+    store = db.history_store()
+    runtime = AssistantRuntime(
+        provider_factory=FakeAssistant,  # answers without reporting any usage
+        reducer_factory=PassthroughReducer,
+        provider_name="fake",
+        model_name="offline-fake",
+        context_model_name=None,
+        max_context_bytes=16_384,
+        max_output_tokens=256,
+        max_concurrent=2,
+        history=store,
+        history_days=30,
+    )
+
+    reply = runtime.ask(
+        source=FileSystemReportSource(report_root=reports_root),
+        can_read=lambda dag_id, user: True,
+        user={"id": 1},
+        query=AssistantQuery(question="что упало?", conversation="c"),
+    )
+
+    assert reply.token_usage is None, "this provider is the case under test"
+    stored = store.load("id:1", limit=9, conversation="c")
+    assert stored[1]["total_tokens"] == reply.billed_tokens > 0
+
+
+def test_a_stopped_answer_is_stored_with_what_it_cost(reports_root):
+    """The partial is a real exchange now that it is charged for.
+
+    Storing it with zero would put the transcript back at odds with the ledger, which is
+    the same defect as counting `token_usage` in the panel -- one event, two numbers.
+    """
+    db.upgrade()
+    write_report(reports_root, ReportRef("dag", "run", "task", 1), failed=1)
+    store = db.history_store()
+
+    class Endless(FakeAssistant):
+        def stream(self, *, system, prompt, max_tokens):
+            while True:
+                yield "chunk "
+
+    runtime = AssistantRuntime(
+        provider_factory=Endless,
+        reducer_factory=PassthroughReducer,
+        provider_name="fake",
+        model_name="offline-fake",
+        context_model_name=None,
+        max_context_bytes=16_384,
+        max_output_tokens=256,
+        max_concurrent=2,
+        history=store,
+        history_days=30,
+        quota_store=db.quota_store(),
+        daily_token_quota=500_000,
+    )
+
+    events = runtime.stream(
+        source=FileSystemReportSource(report_root=reports_root),
+        can_read=lambda dag_id, user: True,
+        user={"id": 1},
+        query=AssistantQuery(question="что упало?", conversation="stopped"),
+    )
+    assert next(events)[0] == "meta"
+    assert next(events)[0] == "delta"
+    events.close()
+
+    spent = runtime.limits.spent_today("id:1")
+    stored = store.load("id:1", limit=9, conversation="stopped")
+    assert spent > 0
+    assert [row["total_tokens"] for row in stored if row["role"] == "assistant"] == [
+        spent
+    ]

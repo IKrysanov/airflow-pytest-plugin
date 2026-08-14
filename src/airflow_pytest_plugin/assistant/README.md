@@ -320,15 +320,23 @@ you can reconstruct who sent report data to which provider:
 
 ```json
 {"event":"assistant.query","principal":"alice","outcome":"answered","mode":"direct",
- "provider":"anthropic","model":"claude-sonnet-5","dags":["etl_daily","ml_train"],
- "reports_considered":30,"input_tokens":8240,"output_tokens":312,"total_tokens":8552,
- "latency_ms":4120,"context_limited":false,"question_chars":42,
+ "provider":"anthropic","model":"claude-sonnet-5","context_model":null,
+ "dags":["etl_daily","ml_train"],"reports_considered":30,
+ "input_tokens":8240,"output_tokens":312,"total_tokens":8552,"billed_tokens":8552,
+ "latency_ms":4120,"context_limited":false,"output_limited":false,"question_chars":42,
  "question_sha256":"3f2a1c9d8b7e6f50","scope":"all readable reports","streamed":true}
 ```
 
 It carries **no report content and no question text** — the digest lets you correlate the same
 question across records without storing it. Outcomes include `forbidden` and `rate_limited`, so
 refused attempts are recorded too. Set `..._AUDIT_LOG=0` to silence it.
+
+The first three token fields are the provider's own counts and are zero where it reported
+none. `billed_tokens` is what the request took off its principal's daily quota, so it is the
+one to sum per principal: it equals `total_tokens` when the provider reported usage, and an
+approximation from the bytes on the wire when it did not. A stream the reader abandoned is
+billed for the prompt that was already sent; a request refused before the model, or one the
+provider failed outright, is billed nothing.
 
 `POST /api/assistant/health` proves the configured models actually answer, using one fixed
 16-token probe with no report data. It is **off by default** (`..._HEALTHCHECK=1`) because the

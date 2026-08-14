@@ -561,7 +561,11 @@ When the report assistant is configured, the same scrape also carries what it co
 and the `airflow_pytest_assistant_{enabled,in_flight}` gauges. They are per API-server
 process, reset on restart, and carry no question, report or user — only cost and health.
 Multiply the token counters by your provider's rates to get spend; `busy` and `stopped`
-tell you whether one worker is enough.
+tell you whether one worker is enough. The token counters are exactly what the provider
+reported, so an endpoint that answers without a `usage` block — some gateways, some
+self-hosted OpenAI-compatible servers — leaves them at zero. The daily quota keeps
+applying there (it charges an approximation from the bytes on the wire), and the audit
+log's `billed_tokens` says what each request was charged, per principal.
 
 It's **disabled by default** and turns on only when you set a scrape token; requests must
 then present it as a bearer token (constant-time compared). The scrape is cheap and

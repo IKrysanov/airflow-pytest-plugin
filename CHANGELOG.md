@@ -22,6 +22,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `daily_tokens_spent` — `null` where no quota is configured, and where the caller has no
   identity of their own, because unidentifiable viewers share one counter.
 
+### Fixed
+
+- **Token counters no longer read as zero on providers that report no usage.** Some
+  OpenAI-compatible gateways and self-hosted endpoints answer without a `usage` block. The
+  quota already handled that — it charges an approximation from the bytes on the wire, so a
+  configured cap keeps applying — but the panel and the stored transcript counted the
+  provider's own figure, which on those deployments is nothing. Both meters and every saved
+  exchange now carry what the request was actually billed, reported as `billed_tokens` on
+  `POST /api/assistant/query` and on the `done` event.
+- **The daily quota can no longer be stepped around with Stop.** The charge was keyed on
+  there being a finished answer, so a stream abandoned two words in cost the reader's
+  budget nothing at all — while the prompt had been sent and paid for. An abandoned stream
+  is now charged for the prompt that left, and the partial exchange it stores records the
+  same figure. A request refused before the model, and a provider that fails outright, are
+  still charged nothing: one expired credential must not spend everybody's allowance.
+- **The audit line reports `billed_tokens`** beside the provider's own counts, so the one
+  record of who spent what agrees with the ledger that refuses them.
+
 ## [0.8.0] - 2026-08-12
 
 ### Added

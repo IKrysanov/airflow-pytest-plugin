@@ -403,19 +403,26 @@ _DEFAULT_LANGUAGE = "English"
 
 
 def language_line(locale: str, question: str = "") -> str:
-    """Return the language instruction, or nothing when the question speaks for itself."""
+    """Return the language instruction, or nothing when the question speaks for itself.
+
+    The dashboard always sends its locale, so this only has to decide anything for an API
+    client. There it turns on the one case where nothing at all indicates a language: a
+    question with no words in it. A bare ``/summary`` is what the user typed, but it says
+    no more about language than an empty message does.
+    """
     tag = (locale or "").strip()
     if tag and _LOCALE_TAG.match(tag):
         return (
             f"DASHBOARD LANGUAGE\n{tag}\nAnswer in this language unless the question is "
             "clearly written in another one.\n\n"
         )
-    if not (question or "").strip():
-        return (
-            f"DASHBOARD LANGUAGE\n{_DEFAULT_LANGUAGE}\nNothing in this request indicates "
-            "a language, so answer in this one.\n\n"
-        )
-    return ""
+    _, worded = parse_command((question or "").strip())
+    if worded.strip():
+        return ""
+    return (
+        f"DASHBOARD LANGUAGE\n{_DEFAULT_LANGUAGE}\nNothing in this request indicates "
+        "a language, so answer in this one.\n\n"
+    )
 
 
 def build_provider_prompt(

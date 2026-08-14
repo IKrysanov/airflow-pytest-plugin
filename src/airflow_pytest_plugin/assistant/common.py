@@ -277,9 +277,29 @@ class AssistantReply:
     report_context: AssistantReportContext | None
     output_limited: bool
 
+    @property
+    def billed_tokens(self) -> int:
+        """What this exchange costs its asker's daily budget.
+
+        The provider's own count wherever it gave one, and an approximation from the bytes
+        that crossed the wire where it did not -- a gateway that drops ``usage``, a
+        self-hosted OpenAI-compatible endpoint. It lives on the reply rather than at the
+        charging site because the panel shows this number back to the reader: a screen that
+        counts ``token_usage`` while the server charges an estimate says "0 of 50 000" right
+        up until the 429.
+        """
+        from .limits import estimated_tokens
+
+        if self.token_usage is not None and self.token_usage.total_tokens > 0:
+            return self.token_usage.total_tokens
+        return estimated_tokens(
+            self.prompt_bytes.total, len(self.answer.encode("utf-8", "replace"))
+        )
+
     def to_dict(self) -> dict[str, Any]:
         """Return the JSON response body."""
         return {
+            "billed_tokens": self.billed_tokens,
             "answer": self.answer,
             "evidence": [item.to_dict() for item in self.evidence],
             "provider": self.provider,

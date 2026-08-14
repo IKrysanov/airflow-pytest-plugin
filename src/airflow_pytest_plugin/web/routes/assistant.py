@@ -187,6 +187,10 @@ _EX_REPLY = {
         "total_tokens": 8_552,
         "cached_input_tokens": 0,
     },
+    # What this exchange took off the asker's daily quota. Equal to `total_tokens` above
+    # whenever the provider reported usage, and an approximation from the bytes on the
+    # wire when it did not -- which is the number the quota is actually enforced on.
+    "billed_tokens": 8_552,
     "report_context": {
         "content": (
             "Scope: dag~etl_daily\n\n"

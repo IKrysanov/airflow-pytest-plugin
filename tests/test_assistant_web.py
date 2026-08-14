@@ -341,7 +341,10 @@ def test_viewer_contains_a_lazy_accessible_assistant_dialog(reports_root):
     )
     assert 'sessionTokens: "Session total: {total} tokens"' in html
     assert 'sessionTokens: "За сессию: {total} токенов"' in html
-    assert "astAddSessionTokens(pendingItem.tokenUsage)" in html
+    # Fed by what the server charged, not by what the provider reported: the two differ
+    # on any endpoint that answers without a `usage` block.
+    assert "astAddSessionTokens(pendingItem.billedTokens)" in html
+    assert "astBilledTokens(body)" in html
     assert "sessionTotalTokens: astSessionTotalTokens" in html
     assert "astCleanPromptParts(body.prompt_bytes)" in html
     assert "astCleanTokenUsage(body.token_usage)" in html
@@ -1505,3 +1508,103 @@ def test_a_viewer_with_no_identity_is_told_no_spend(reports_root):
     )
 
     assert body["daily_tokens_spent"] is None
+
+
+def test_an_answer_says_what_it_cost_even_when_the_provider_does_not(reports_root):
+    """The meter must move on providers that report no usage of their own.
+
+    The server already handles that case -- it bills an estimate, so a configured budget
+    keeps draining -- but the panel adds up `token_usage`, which is exactly what such a
+    provider leaves empty. The reader is then shown "0 of 50 000" while their ledger runs
+    down, and the 429 they were promised warning of arrives without it.
+    """
+    runtime = _quota_runtime(50_000)
+    alice = SimpleNamespace(username="alice")
+    client = _client(reports_root, runtime=runtime, user=alice)
+
+    body = client.post("/api/assistant/query", json={"question": "что упало?"}).json()
+
+    assert body["token_usage"] is None, "this provider is the case under test"
+    assert body["billed_tokens"] > 0
+    # And it is the number the server actually took off their budget, not a second guess.
+    spent = client.get("/api/assistant/status").json()["daily_tokens_spent"]
+    assert body["billed_tokens"] == spent
+
+
+def test_a_streamed_answer_reports_the_same_cost(reports_root):
+    """Both endpoints feed the same counter, so both have to carry the number."""
+    runtime = _quota_runtime(50_000)
+    client = _client(reports_root, runtime=runtime, user=SimpleNamespace(username="a"))
+
+    with client.stream(
+        "POST", "/api/assistant/stream", json={"question": "что упало?"}
+    ) as response:
+        streamed = "".join(response.iter_text())
+
+    done = json.loads(streamed.rsplit("event: done\ndata: ", 1)[1].split("\n\n")[0])
+    assert done["billed_tokens"] > 0
+    spent = client.get("/api/assistant/status").json()["daily_tokens_spent"]
+    assert done["billed_tokens"] == spent
+
+
+def test_the_reported_cost_is_the_provider_s_own_count_when_there_is_one(reports_root):
+    """Where a provider does report usage, that is what is billed and what is shown."""
+    from airflow_pytest_plugin.assistant.common import (
+        AssistantProviderResponse,
+        AssistantTokenUsage,
+    )
+
+    class Counting(FakeAnswerProvider):
+        def answer(self, *, system, prompt, max_tokens):
+            return AssistantProviderResponse(
+                text="считано",
+                token_usage=AssistantTokenUsage(
+                    input_tokens=700, output_tokens=44, total_tokens=744
+                ),
+            )
+
+    runtime = AssistantRuntime(
+        provider_factory=Counting,
+        reducer_factory=PassthroughReducer,
+        provider_name="fake",
+        model_name="offline-fake",
+        context_model_name=None,
+        max_context_bytes=16_384,
+        max_output_tokens=256,
+        max_concurrent=2,
+        daily_token_quota=50_000,
+    )
+    client = _client(reports_root, runtime=runtime, user=SimpleNamespace(username="c"))
+
+    body = client.post("/api/assistant/query", json={"question": "что упало?"}).json()
+
+    assert body["token_usage"]["total_tokens"] == 744
+    assert body["billed_tokens"] == 744
+
+
+def test_the_documented_audit_record_has_every_field_the_server_writes(
+    reports_root, caplog
+):
+    """The audit example is a contract: people build log queries off it.
+
+    It is also the kind of block that goes stale silently -- a field added to the record
+    costs nothing until somebody's dashboard is missing the column. So the example is
+    checked against a record the runtime actually emitted, rather than against memory.
+    """
+    write_report(reports_root, ReportRef("etl", "run", "task", 1), failed=1)
+    runtime = _runtime()
+
+    with caplog.at_level("INFO"):
+        _client(reports_root, runtime=runtime, user=SimpleNamespace(username="a")).post(
+            "/api/assistant/query", json={"question": "Что упало?"}
+        )
+
+    emitted = [
+        json.loads(record.getMessage().split("assistant.audit ", 1)[1])
+        for record in caplog.records
+        if "assistant.audit" in record.getMessage()
+    ]
+    assert emitted, "no audit record was written at all -- the scan is broken"
+    documented = ASSISTANT_DOC.read_text()
+    missing = [key for key in emitted[0] if f'"{key}"' not in documented]
+    assert missing == [], f"undocumented audit fields: {missing}"

@@ -458,13 +458,14 @@ class AssistantRuntime:
         return removed
 
     def _remember_partial(
-        self, user: Any, question: str, answer: str, conversation: str
+        self, user: Any, question: str, answer: str, conversation: str, billed: int = 0
     ) -> None:
         """Store an exchange whose answer was cut short by Stop or a lost connection.
 
-        No evidence and no token usage: the request never reached the point where either
-        was known. What it does have is the text the reader can see, and storing that is
-        the difference between a chat they can reopen and one that disappears on refresh.
+        No evidence: the request never reached the point where it was known. What it does
+        have is the text the reader can see, and storing that is the difference between a
+        chat they can reopen and one that disappears on refresh. ``billed`` is what the
+        budget was charged for it, so a reopened chat agrees with the ledger.
 
         Shaped exactly like a completed answer -- encodable, clipped, and *not* scrubbed.
         The scrubber is prose-hostile on purpose, so running it here turned "send a
@@ -484,7 +485,7 @@ class AssistantRuntime:
             stored_question,
             clip_utf8(encodable(answer).strip(), MAX_ANSWER_BYTES),
             [],
-            0,
+            max(0, billed),
             conversation=db.clean_conversation(conversation),
         )
 
@@ -509,7 +510,10 @@ class AssistantRuntime:
             stored_question,
             reply.answer,
             [item.to_dict() for item in reply.evidence],
-            reply.token_usage.total_tokens if reply.token_usage else 0,
+            # What the budget was charged, not what the provider volunteered: a chat
+            # reopened tomorrow must not read as free because the endpoint sends no
+            # ``usage``.
+            reply.billed_tokens,
             conversation=db.clean_conversation(conversation),
         )
 
@@ -728,6 +732,7 @@ class AssistantRuntime:
         #: what the reader is looking at.
         written: list[str] = []
         outcome = "stopped"
+        provider_called = False
         try:
             # Progress is yielded from inside the local phase, which also makes that
             # phase cancellable: abandoning this generator raises GeneratorExit at the
@@ -741,6 +746,9 @@ class AssistantRuntime:
             assert prepared.provider is not None
             yield "meta", self._stream_meta(prepared)
             provider_started = time.monotonic()
+            # From here the prompt has left for the provider and is paid for, whether or
+            # not anybody stays to read the answer.
+            provider_called = True
             try:
                 text, usage, stop_reason, cut = yield from self._stream_answer(
                     prepared, written
@@ -780,6 +788,26 @@ class AssistantRuntime:
             # `audit_reply` is set only where the request already recorded itself. An
             # answer over an empty scope is a completed request whose outcome is not
             # "answered", so keying this on the outcome counted it twice.
+            # Stop, or a dropped connection, after the prompt was sent. Those tokens are
+            # spent; keying the charge on a finished reply turned the daily ceiling into
+            # something anybody could step around by pressing Stop, and left only the
+            # request rate limit -- a limit on how often, not on how much. Computed here
+            # so the charge, the audit line and the stored exchange are one number.
+            # ``outcome`` is still its initial "stopped" only where the generator was
+            # abandoned: every failure names itself first. Without that test an expired
+            # key -- which fails every request identically -- would spend every reader's
+            # daily budget on answers nobody received.
+            abandoned = 0
+            if (
+                outcome == "stopped"
+                and provider_called
+                and audit_reply is None
+                and prepared is not None
+            ):
+                abandoned = estimated_tokens(
+                    prepared.prompt_bytes.total,
+                    len("".join(written).encode("utf-8", "replace")),
+                )
             if audit_reply is None:
                 self._record(
                     prepared, outcome, provider_seconds=time.monotonic() - started
@@ -791,7 +819,7 @@ class AssistantRuntime:
                 partial = "".join(written).strip()
                 if partial and not remembered:
                     self._remember_partial(
-                        user, raw_question, partial, query.conversation
+                        user, raw_question, partial, query.conversation, abandoned
                     )
                     remembered = True
             self._audit(
@@ -804,6 +832,7 @@ class AssistantRuntime:
                 reply=audit_reply,
                 conversation=query.conversation,
                 remember=not remembered,
+                abandoned_tokens=abandoned,
             )
             self._slots.release()
 
@@ -970,18 +999,13 @@ class AssistantRuntime:
     def _billable(prepared: _PreparedRequest | None, reply: AssistantReply) -> int:
         """Return the tokens to charge this request against its principal's budget.
 
-        The provider's own count wins whenever it gave one. It is only when a provider
-        stays silent -- a gateway that drops ``usage``, a self-hosted OpenAI-compatible
-        endpoint -- that the size of the exchange is used instead, so a configured budget
-        keeps draining rather than quietly ceasing to apply.
+        Deferred to the reply, which carries the same prompt size this would have read off
+        ``prepared``. One definition, because the same number is also reported to the panel
+        that draws the budget: two would drift, and the drift is invisible until somebody
+        is refused.
         """
-        usage = reply.token_usage
-        if usage is not None and usage.total_tokens > 0:
-            return usage.total_tokens
-        return estimated_tokens(
-            prepared.prompt_bytes.total if prepared is not None else 0,
-            len(reply.answer.encode("utf-8", "replace")),
-        )
+        del prepared
+        return reply.billed_tokens
 
     def _audit(
         self,
@@ -995,15 +1019,24 @@ class AssistantRuntime:
         reply: AssistantReply | None,
         conversation: str = "",
         remember: bool = True,
+        abandoned_tokens: int = 0,
     ) -> None:
         """Emit exactly one audit record for this request, whatever its outcome.
 
         ``remember`` is false where the streaming path has already stored the exchange,
         which it does before announcing completion rather than after.
+
+        ``abandoned_tokens`` is what a stream owes when its reader left before the answer
+        finished: there is no reply to read a cost off, and the prompt was still sent.
         """
         usage = reply.token_usage if reply is not None else None
-        if reply is not None:
-            self.limits.charge(audit.principal(user), self._billable(prepared, reply))
+        charged = (
+            self._billable(prepared, reply)
+            if reply is not None
+            else max(0, abandoned_tokens)
+        )
+        if charged:
+            self.limits.charge(audit.principal(user), charged)
         # A refused request (429, forbidden, provider failure) has no reply and is not a
         # chat; anything that produced one is.
         if reply is not None and remember:
@@ -1027,6 +1060,10 @@ class AssistantRuntime:
             input_tokens=usage.input_tokens if usage else 0,
             output_tokens=usage.output_tokens if usage else 0,
             total_tokens=usage.total_tokens if usage else 0,
+            # Beside the provider's own counts rather than instead of them: those three are
+            # honestly zero where nothing was reported, and this is the figure the quota
+            # moved by, which is what an operator reconciling spend per principal needs.
+            billed_tokens=charged,
             context_limited=bool(reply is not None and reply.context_limited),
             output_limited=bool(reply is not None and reply.output_limited),
             latency_ms=max(0, int((time.monotonic() - started) * 1000)),
@@ -1146,8 +1183,14 @@ class AssistantRuntime:
                 )
             # A leading /command names the skill outright. It is an instruction to us,
             # so it comes off before the question reaches the model.
-            commands, asked = parse_command(query.question.strip())
-            question = clip_utf8(redact_text(asked), MAX_QUESTION_CHARS)
+            typed = query.question.strip()
+            commands, asked = parse_command(typed)
+            # `/summary` on its own strips to nothing, and an empty USER QUESTION reads
+            # to the model as "the user sent no message". On the first turn of a chat it
+            # falls back on the skill and answers anyway; with anything in the history it
+            # asks what they wanted instead -- and suggests the command they just sent.
+            # What they typed is the truthful content, so it goes in.
+            question = clip_utf8(redact_text(asked or typed), MAX_QUESTION_CHARS)
 
         # Nothing to reduce when no report matched, so the local model is not loaded at
         # all: pulling gigabytes of GGUF into memory to answer "no report matched" -- or a

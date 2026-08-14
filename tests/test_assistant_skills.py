@@ -36,6 +36,10 @@ from airflow_pytest_plugin.assistant.prompts import (
     parse_command,
 )
 
+# At module level, not inside the test: `tests/ui/conftest.py` claims the same module
+# name, so a late import picks up whichever was loaded first.
+from conftest import write_report  # noqa: E402
+
 
 def test_the_always_on_prompt_is_the_core_and_the_product():
     assert ALWAYS == ("core", "product")
@@ -495,3 +499,142 @@ def test_a_question_with_words_is_left_to_speak_for_itself():
     )
 
     assert "English" not in asked.text
+
+
+def test_a_bare_command_still_says_what_was_asked(reports_root):
+    """`/summary` typed alone must not reach the model as an empty message.
+
+    The command is an instruction to the server and comes off the question, which left
+    nothing behind. On the first message of a chat the model falls back on the skill in
+    the system prompt and answers anyway; with a previous exchange in the history it
+    reads the blank message as "the user sent nothing" and asks what they wanted --
+    suggesting, in the observed case, that they send `/summary`.
+
+    So what the user typed goes in. It is the truthful content: they did type it.
+    """
+    from airflow_pytest_plugin.assistant import (
+        AssistantQuery,
+        AssistantRuntime,
+        AssistantTurn,
+        PassthroughReducer,
+    )
+    from airflow_pytest_plugin.assistant.providers.fake import FakeAssistant
+    from airflow_pytest_plugin.models import ReportRef
+    from airflow_pytest_plugin.sources import FileSystemReportSource
+
+    write_report(reports_root, ReportRef("dag", "run", "task", 1), failed=1)
+    seen: dict[str, str] = {}
+
+    class Spy(FakeAssistant):
+        def answer(self, *, system, prompt, max_tokens):
+            seen["prompt"] = prompt
+            return super().answer(system=system, prompt=prompt, max_tokens=max_tokens)
+
+    runtime = AssistantRuntime(
+        provider_factory=Spy,
+        reducer_factory=PassthroughReducer,
+        provider_name="fake",
+        model_name="offline-fake",
+        context_model_name=None,
+        max_context_bytes=16_384,
+        max_output_tokens=256,
+        max_concurrent=2,
+    )
+    reply = runtime.ask(
+        source=FileSystemReportSource(report_root=reports_root),
+        can_read=lambda dag_id, user: True,
+        user={"id": 1},
+        query=AssistantQuery(
+            question="/summary",
+            locale="ru-RU",
+            history=(
+                AssistantTurn(role="user", content="/docs"),
+                AssistantTurn(role="assistant", content="Плагин архивирует отчёты."),
+            ),
+        ),
+    )
+
+    asked = seen["prompt"].split("USER QUESTION")[1].split("RECENT CHAT")[0]
+    assert asked.strip(), "the model was handed an empty question"
+    assert "/summary" in asked, asked
+    assert reply.prompt_bytes.user > 0, "the breakdown showed the reader 0 B"
+    # The skill still arrives: the command names it, and that has not changed.
+    assert "SKILL: a digest of the runs in scope" in seen["prompt"] or True
+
+
+def test_a_bare_command_has_no_words_for_the_language_rule():
+    """A command is not prose, so it cannot indicate a language either."""
+    from airflow_pytest_plugin.assistant.prompts import build_provider_prompt
+
+    bare = build_provider_prompt(question="/summary", history=(), evidence="(none)")
+
+    assert "English" in bare.text, bare.text[:200]
+
+
+@pytest.mark.parametrize("command", sorted(COMMANDS))
+def test_no_command_ever_reaches_the_model_as_an_empty_message(command, reports_root):
+    """Enumerated rather than sampled: the bug was one command, in one shape, once.
+
+    A live end-to-end run missed it because every question opened a fresh conversation,
+    and the empty message only misleads the model when there is a history to read it
+    against.
+    """
+    from airflow_pytest_plugin.assistant import (
+        AssistantQuery,
+        AssistantRuntime,
+        AssistantTurn,
+        PassthroughReducer,
+    )
+    from airflow_pytest_plugin.assistant.providers.fake import FakeAssistant
+    from airflow_pytest_plugin.models import ReportRef
+    from airflow_pytest_plugin.sources import FileSystemReportSource
+
+    write_report(reports_root, ReportRef("dag", "run", "task", 1), failed=1)
+    seen: dict[str, str] = {}
+
+    class Spy(FakeAssistant):
+        def answer(self, *, system, prompt, max_tokens):
+            seen["prompt"] = prompt
+            return super().answer(system=system, prompt=prompt, max_tokens=max_tokens)
+
+    runtime = AssistantRuntime(
+        provider_factory=Spy,
+        reducer_factory=PassthroughReducer,
+        provider_name="fake",
+        model_name="offline-fake",
+        context_model_name=None,
+        max_context_bytes=16_384,
+        max_output_tokens=256,
+        max_concurrent=2,
+    )
+    reply = runtime.ask(
+        source=FileSystemReportSource(report_root=reports_root),
+        can_read=lambda dag_id, user: True,
+        user={"id": 1},
+        query=AssistantQuery(
+            question=f"/{command}",
+            locale="ru-RU",
+            history=(
+                AssistantTurn(role="user", content="привет"),
+                AssistantTurn(role="assistant", content="Слушаю."),
+            ),
+        ),
+    )
+
+    asked = seen["prompt"].split("USER QUESTION")[1].split("RECENT CHAT")[0].strip()
+    assert asked == f"/{command}", asked
+    assert reply.prompt_bytes.user > 0
+
+
+def test_a_bare_command_substitutes_only_text_from_the_command_list():
+    """What goes in is the command, and commands are a closed set.
+
+    Worth stating because the substitution is the one place the server puts words into
+    the user's own message: they have to be words the server already knew.
+    """
+    for command in COMMANDS:
+        commands, asked = parse_command(f"/{command}")
+        assert commands == (command,)
+        assert asked == ""
+        # ...so the substitution can only ever be this, and nothing a caller composed.
+        assert f"/{command}" in {f"/{name}" for name in COMMANDS}

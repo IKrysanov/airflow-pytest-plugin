@@ -1603,14 +1603,23 @@ _JS = r"""
     astDailyBudget.hidden = false;
   }
 
-  function astAddSessionTokens(usage) {
-    if (!usage) return;
-    astSessionTotalTokens = astBoundSessionTokens(
-      astSessionTotalTokens + usage.total_tokens
-    );
+  function astBilledTokens(body) {
+    // What the server charged, which is not always what the provider reported: providers
+    // that answer without a `usage` block are billed an approximation instead of nothing.
+    // Counting `token_usage` here left both meters frozen at zero on exactly those
+    // deployments, while the budget behind them ran down to a 429.
+    var billed = body && body.billed_tokens;
+    if (Number.isFinite(billed) && billed >= 0) return billed;
+    var usage = astCleanTokenUsage(body && body.token_usage);
+    return usage ? usage.total_tokens : 0;
+  }
+
+  function astAddSessionTokens(billed) {
+    if (!Number.isFinite(billed) || billed <= 0) return;
+    astSessionTotalTokens = astBoundSessionTokens(astSessionTotalTokens + billed);
     astRenderSessionTokens();
-    if (astDailyQuota > 0 && Number.isFinite(usage.total_tokens)) {
-      astDailySpent = Math.max(0, astDailySpent + usage.total_tokens);
+    if (astDailyQuota > 0) {
+      astDailySpent = Math.max(0, astDailySpent + billed);
       astRenderDailyBudget();
     }
   }
@@ -1651,6 +1660,8 @@ _JS = r"""
           promptParts: promptParts,
           reportContext: reportContext,
           tokenUsage: astCleanTokenUsage(item.tokenUsage),
+          billedTokens: Number.isFinite(item.billedTokens) && item.billedTokens >= 0
+            ? Math.min(Math.floor(item.billedTokens), AST_MAX_SESSION_TOKENS) : 0,
           promptBytes: Number.isFinite(item.promptBytes) && item.promptBytes >= 0
             ? Math.min(Math.floor(item.promptBytes), 100 * 1024 * 1024) : null,
           contextLimited: item.contextLimited === true,
@@ -1667,6 +1678,7 @@ _JS = r"""
         return item.text || item.role === "user";
       });
       var visibleTotal = messages.reduce(function (total, item) {
+        if (item.billedTokens) return total + item.billedTokens;
         return total + (item.tokenUsage ? item.tokenUsage.total_tokens : 0);
       }, 0);
       var storedTotal = astBoundSessionTokens(saved.sessionTotalTokens);
@@ -2356,6 +2368,7 @@ _JS = r"""
     item.evidence = body.evidence || [];
     item.reports = body.reports_considered || 0;
     item.tokenUsage = astCleanTokenUsage(body.token_usage);
+    item.billedTokens = astBilledTokens(body);
     item.contextLimited = body.context_limited === true
       || (body.context_limited == null && body.truncated === true);
     item.outputLimited = body.output_limited === true;
@@ -2423,7 +2436,7 @@ _JS = r"""
         sawDone = true;
         astApplyMeta(userItem, payload);
         astApplyDone(pendingItem, payload);
-        astAddSessionTokens(pendingItem.tokenUsage);
+        astAddSessionTokens(pendingItem.billedTokens);
         astRenderTranscript(); astPersistTranscript();
       } else if (name === "error") {
         settled = true;

@@ -52,6 +52,7 @@ from airflow_pytest_plugin.assistant import (
     AssistantQuery,
     AssistantQuotaError,
     AssistantReportContext,
+    AssistantRequestError,
     AssistantRuntime,
     AssistantScope,
     AssistantSettings,
@@ -4998,3 +4999,139 @@ def test_a_damaged_archive_still_answers_about_the_runs_that_are_intact(reports_
     chunks = "".join(context.chunks)
 
     assert "good" in chunks
+
+
+def test_the_audit_line_says_what_was_charged_not_only_what_was_reported(
+    reports_root, caplog
+):
+    """The audit log is how an operator reconciles spend against a principal.
+
+    On a provider that answers without a `usage` block the quota is charged an estimate,
+    so the log claiming zero tokens leaves the one record of who spent what disagreeing
+    with the ledger that refused them. The provider's own counts stay where they are --
+    they are honestly zero -- and the billed figure is reported beside them.
+    """
+    write_report(reports_root, ReportRef("etl", "run", "task", 1), failed=1)
+
+    with caplog.at_level("INFO"):
+        reply = _runtime(_CapturingProvider(), PassthroughReducer()).ask(
+            source=FileSystemReportSource(report_root=reports_root),
+            can_read=lambda dag, user: True,
+            user=SimpleNamespace(username="alice"),
+            query=AssistantQuery(question="Что упало?"),
+        )
+
+    record = _audit_records(caplog)[0]
+    assert reply.token_usage is None, "this provider is the case under test"
+    assert record["total_tokens"] == 0
+    assert record["billed_tokens"] == reply.billed_tokens > 0
+
+
+def _quota_runtime_for_stops(provider, quota: int) -> AssistantRuntime:
+    return AssistantRuntime(
+        provider_factory=lambda: provider,
+        reducer_factory=PassthroughReducer,
+        provider_name="fake",
+        model_name="offline-fake",
+        context_model_name=None,
+        max_context_bytes=16_384,
+        max_output_tokens=256,
+        max_concurrent=2,
+        daily_token_quota=quota,
+    )
+
+
+def test_stopping_an_answer_still_spends_the_budget_it_used(reports_root):
+    """Otherwise the quota is a cap anybody can step around by pressing Stop.
+
+    The prompt is sent, and paid for, the moment the request leaves; whether a reader
+    keeps reading the reply changes nothing about that. The charge was keyed on there
+    being a finished reply, so a stream abandoned two deltas in cost nothing at all and
+    the daily ceiling never moved -- bounded only by the request rate limit, which is a
+    limit on how often, not on how much.
+    """
+    write_report(reports_root, ReportRef("dag", "run", "task", 1), failed=1)
+    source = FileSystemReportSource(report_root=reports_root)
+
+    class Endless:
+        name = "endless"
+        model = "endless-1"
+
+        def answer(self, *, system: str, prompt: str, max_tokens: int) -> str:
+            return "unused"
+
+        def stream(self, *, system: str, prompt: str, max_tokens: int):
+            while True:
+                yield "chunk "
+
+    runtime = _quota_runtime_for_stops(Endless(), 500_000)
+    for _ in range(5):
+        events = runtime.stream(
+            source=source,
+            can_read=lambda dag, user: True,
+            user=SimpleNamespace(username="alice"),
+            query=AssistantQuery(question="Что упало?"),
+        )
+        assert next(events)[0] == "meta"
+        assert next(events)[0] == "delta"
+        events.close()
+
+    spent = runtime.limits.spent_today("username:alice")
+    assert spent > 0, "five abandoned answers cost the budget nothing"
+    # Each one is charged about what its prompt was worth, not a token or two for the
+    # fragment that arrived: the prompt is the part that was certainly paid for.
+    assert spent >= 5 * 100
+
+
+def test_a_request_refused_before_the_model_is_never_charged(reports_root):
+    """The other side of the same rule: nothing left, so nothing is owed."""
+    write_report(reports_root, ReportRef("dag", "run", "task", 1), failed=1)
+    runtime = _quota_runtime_for_stops(_CapturingProvider(), 500_000)
+    alice = SimpleNamespace(username="alice")
+
+    with pytest.raises(AssistantRequestError):
+        events = runtime.stream(
+            source=FileSystemReportSource(report_root=reports_root),
+            can_read=lambda dag, user: True,
+            user=alice,
+            query=AssistantQuery(question="   "),
+        )
+        next(events)
+
+    assert runtime.limits.spent_today("username:alice") == 0
+
+
+def test_a_provider_that_fails_mid_stream_does_not_charge_the_reader(reports_root):
+    """Charging an abandoned stream must not turn a broken provider into a quota drain.
+
+    An expired key or a provider that is simply down fails every request the same way. If
+    that counted against the daily ceiling, one bad credential would spend every reader's
+    budget without a single answer being produced -- automatically, and to nobody's gain.
+    """
+    write_report(reports_root, ReportRef("dag", "run", "task", 1), failed=1)
+
+    class Broken:
+        name = "broken"
+        model = "broken-1"
+
+        def answer(self, *, system: str, prompt: str, max_tokens: int) -> str:
+            raise RuntimeError("401 authentication_error")
+
+        def stream(self, *, system: str, prompt: str, max_tokens: int):
+            raise RuntimeError("401 authentication_error")
+            yield ""  # pragma: no cover - unreachable, keeps this a generator
+
+    runtime = _quota_runtime_for_stops(Broken(), 500_000)
+    for _ in range(3):
+        events = runtime.stream(
+            source=FileSystemReportSource(report_root=reports_root),
+            can_read=lambda dag, user: True,
+            user=SimpleNamespace(username="alice"),
+            query=AssistantQuery(question="Что упало?"),
+        )
+        assert next(events)[0] == "meta"
+        with pytest.raises(AssistantProviderError):
+            next(events)
+        events.close()
+
+    assert runtime.limits.spent_today("username:alice") == 0

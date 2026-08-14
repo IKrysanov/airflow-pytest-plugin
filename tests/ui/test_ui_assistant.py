@@ -3336,3 +3336,77 @@ def test_without_a_quota_the_panel_claims_no_budget(page, assistant_base_url):
     expect(page.locator("#assistant-dialog")).to_be_visible()
 
     expect(page.locator("#ast-daily-budget")).to_be_hidden()
+
+
+def test_the_budget_moves_on_a_provider_that_reports_no_usage(page, assistant_base_url):
+    """Some providers answer without a `usage` block, and the server bills an estimate.
+
+    Counting `token_usage` in the browser meant both meters stayed at zero on exactly
+    those deployments while the ledger behind them ran down -- the reader watched "1,000
+    of 10,000" all day and then met a 429. The server now says what it charged.
+    """
+    from conftest import _load_dash  # type: ignore[import-not-found]
+
+    page.route(
+        "**/api/assistant/status",
+        lambda route: _status_with_quota(route, quota=10_000, spent=1_000),
+    )
+    _load_dash(page, assistant_base_url)
+    page.click("#assistant-btn")
+    expect(page.locator("#ast-daily-budget")).to_contain_text("1,000")
+
+    page.route(
+        "**/api/assistant/stream",
+        lambda route: _fulfil_stream(
+            route,
+            {
+                "answer": "done",
+                "provider": "fake",
+                "model": "offline-fake",
+                "evidence": [],
+                "token_usage": None,
+                "billed_tokens": 900,
+            },
+        ),
+    )
+    page.locator("#ast-question").fill("What failed?")
+    page.locator("#ast-send").click()
+    expect(page.locator(".ast-msg.assistant .ast-answer").last).to_contain_text("done")
+
+    expect(page.locator("#ast-daily-budget")).to_contain_text("1,900")
+    # The session counter is fed from the same number, so the two cannot disagree.
+    expect(page.locator("#ast-session-tokens")).to_contain_text("900")
+
+
+def test_a_reload_keeps_the_cost_of_answers_it_restores(page, assistant_base_url):
+    """The running total is persisted, so it must survive in the same units it was kept."""
+    from conftest import _load_dash  # type: ignore[import-not-found]
+
+    _load_dash(page, assistant_base_url)
+    page.click("#assistant-btn")
+    page.route(
+        "**/api/assistant/stream",
+        lambda route: _fulfil_stream(
+            route,
+            {
+                "answer": "restored",
+                "provider": "fake",
+                "model": "offline-fake",
+                "evidence": [],
+                "token_usage": None,
+                "billed_tokens": 700,
+            },
+        ),
+    )
+    page.locator("#ast-question").fill("What failed?")
+    page.locator("#ast-send").click()
+    expect(page.locator("#ast-session-tokens")).to_contain_text("700")
+
+    page.reload()
+    page.wait_for_selector("#assistant-btn:not([hidden])", timeout=20_000)
+    expect(page.locator("#assistant-dialog")).to_be_visible()
+
+    expect(page.locator(".ast-msg.assistant .ast-answer").last).to_contain_text(
+        "restored"
+    )
+    expect(page.locator("#ast-session-tokens")).to_contain_text("700")
