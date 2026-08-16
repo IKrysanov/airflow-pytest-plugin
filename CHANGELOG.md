@@ -21,7 +21,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not the first they hear of it. `GET /api/assistant/status` reports it as
   `daily_tokens_spent` — `null` where no quota is configured, and where the caller has no
   identity of their own, because unidentifiable viewers share one counter.
-
 - **Every code block in an answer has its own Copy.** A traceback or a snippet is the part
   of an answer people take away, and selecting it by hand out of a scrolling panel — without
   catching the prose around it — was the only way to get it. The fence's language is shown
