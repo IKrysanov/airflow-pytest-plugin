@@ -516,7 +516,7 @@ export ANTHROPIC_API_KEY=sk-ant-...
 | built-in default | `/opt/airflow/pytest-reports` | fallback |
 | `AIRFLOW_PYTEST_PLUGIN_ENABLE` (env) | `True` | reader on/off — see below |
 | `AIRFLOW_PYTEST_SCAN_CACHE_TTL` (env) | `2.0` | seconds a directory scan is reused (`0` disables) |
-| `AIRFLOW_PYTEST_RETENTION_MAX_AGE_DAYS` (env/cfg) | — | delete runs older than N days |
+| `AIRFLOW_PYTEST_RETENTION_MAX_AGE_DAYS` (env/cfg) | — | delete runs older than N days (clamped to 36,500 — a hundred years keeps everything, and a bigger number used to stop the prune outright) |
 | `AIRFLOW_PYTEST_RETENTION_MAX_RUNS` (env/cfg) | — | keep at most N newest runs per dag·task |
 | `AIRFLOW_PYTEST_RETENTION_MAX_TOTAL_MB` (env/cfg) | — | total report-tree budget in MB |
 | `AIRFLOW_PYTEST_FLAKY_WINDOW` (env/cfg) | `30` | default recent runs the flaky detector scans |

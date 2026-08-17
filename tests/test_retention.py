@@ -576,3 +576,57 @@ def test_a_run_with_an_unparsable_meta_still_counts_and_is_reclaimed(
     assert fat.token in set(result.deleted)
     assert result.freed_bytes >= fat_bytes
     assert not os.path.exists(meta_path)
+
+
+# -- A number nobody meant ---------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "days",
+    [
+        10**21,  # a pasted account number, a typo, a value in seconds
+        999_999_999_999,
+        10**10,
+    ],
+)
+def test_an_absurd_age_limit_does_not_stop_the_prune(days):
+    """`timedelta` refuses a number of days this large, and the prune runs unattended.
+
+    The failure is quiet in the worst way: retention stops running, nothing is deleted,
+    and the first anyone hears of it is a full disk. Every other setting in this plugin
+    clamps a too-large value to its documented maximum rather than taking it literally
+    or failing on it, and this one is no different -- a limit further away than any
+    stored run simply keeps everything.
+    """
+    entries = [_entry("r1", 1), _entry("r2", 2), _entry("r3", 3)]
+
+    picked = select_expired(entries, RetentionPolicy(max_age_days=days), now=NOW)
+
+    assert picked == []
+
+
+def test_an_absurd_age_limit_from_the_environment_is_clamped(monkeypatch):
+    monkeypatch.setenv(config.RETENTION_MAX_AGE_DAYS_ENV, str(10**21))
+
+    policy = RetentionPolicy.from_config()
+
+    assert policy.max_age_days is not None
+    assert policy.max_age_days <= config.MAX_RETENTION_DAYS
+    # And it still prunes by that dimension rather than switching the limit off.
+    assert policy.is_active
+
+
+def test_an_absurd_age_limit_still_deletes_what_is_older_than_it(monkeypatch):
+    """Clamping must not turn "keep for ages" into "delete everything"."""
+    monkeypatch.setenv(config.RETENTION_MAX_AGE_DAYS_ENV, str(10**21))
+    policy = RetentionPolicy.from_config()
+
+    # Older than the clamp itself (100 years), so the dimension is provably still live.
+    ancient = RunEntry(
+        ReportRef("d", "ancient", "t", 1), "1900-01-01T00:00:00+00:00", 0
+    )
+    entries = [_entry("r1", 1), ancient]
+
+    picked = select_expired(entries, policy, now=NOW)
+
+    assert [ref.run_id for ref in picked] == ["ancient"]

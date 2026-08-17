@@ -47,6 +47,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   still charged nothing: one expired credential must not spend everybody's allowance.
 - **The audit line reports `billed_tokens`** beside the provider's own counts, so the one
   record of who spent what agrees with the ledger that refuses them.
+- **An absurd `AIRFLOW_PYTEST_RETENTION_MAX_AGE_DAYS` no longer stops retention.** A value
+  past what `timedelta` accepts — a typo, or a number meant as seconds — raised
+  `OverflowError` from the prune, which runs unattended: nothing was deleted and the first
+  sign of it was a full disk. The limit is now clamped to 36,500 days (a hundred years, so
+  it keeps everything) in the config and again where the cutoff is built, since a policy
+  can also be constructed in code.
 
 ## [0.8.0] - 2026-08-12
 

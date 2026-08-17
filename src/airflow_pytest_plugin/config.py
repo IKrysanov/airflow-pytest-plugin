@@ -147,7 +147,17 @@ RETENTION_MAX_RUNS_ENV = "AIRFLOW_PYTEST_RETENTION_MAX_RUNS"
 RETENTION_MAX_TOTAL_MB_ENV = "AIRFLOW_PYTEST_RETENTION_MAX_TOTAL_MB"
 
 
-def _positive_int_setting(env_var: str, conf_key: str) -> int | None:
+#: The largest age limit worth honouring: a hundred years, comfortably past any archive
+#: and comfortably inside what ``timedelta`` accepts. A bigger number is a typo, a value
+#: pasted in the wrong unit, or a way of saying "keep everything" -- and taken literally
+#: it used to raise ``OverflowError`` from ``timedelta``, which stops the nightly prune
+#: without deleting anything. Retention that silently stops running is how a disk fills.
+MAX_RETENTION_DAYS = 36_500
+
+
+def _positive_int_setting(
+    env_var: str, conf_key: str, *, maximum: int | None = None
+) -> int | None:
     raw = os.environ.get(env_var)
     if raw is None or not raw.strip():
         raw = get_conf_value(CONF_SECTION, conf_key)
@@ -157,12 +167,21 @@ def _positive_int_setting(env_var: str, conf_key: str) -> int | None:
         value = int(str(raw).strip())
     except ValueError:
         return None
-    return value if value > 0 else None
+    if value <= 0:
+        return None
+    # Clamped rather than rejected, which is what every bounded setting in this plugin
+    # does: a limit further away than any stored run keeps everything, while dropping it
+    # would switch the dimension off and start deleting on the *other* rules alone.
+    return min(value, maximum) if maximum is not None else value
 
 
 def get_retention_max_age_days() -> int | None:
     """Delete runs older than this many days (``None`` = no age limit)."""
-    return _positive_int_setting(RETENTION_MAX_AGE_DAYS_ENV, "retention_max_age_days")
+    return _positive_int_setting(
+        RETENTION_MAX_AGE_DAYS_ENV,
+        "retention_max_age_days",
+        maximum=MAX_RETENTION_DAYS,
+    )
 
 
 def get_retention_max_runs() -> int | None:

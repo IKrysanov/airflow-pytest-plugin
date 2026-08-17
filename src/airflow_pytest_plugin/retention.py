@@ -32,6 +32,7 @@ from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
 from .config import (
+    MAX_RETENTION_DAYS,
     get_retention_max_age_days,
     get_retention_max_runs,
     get_retention_max_total_mb,
@@ -184,7 +185,11 @@ def select_expired(
 
     # Age: drop runs past the cutoff, but never a group's newest (hence group[1:]).
     if policy.max_age_days is not None:
-        cutoff = now - timedelta(days=policy.max_age_days)
+        # Bounded here as well as in the config: a policy can be built in code, and a
+        # `timedelta` of more days than it accepts raises `OverflowError` -- which would
+        # take down an unattended prune and leave the tree growing. A cutoff older than
+        # any run keeps everything, which is what such a number was asking for anyway.
+        cutoff = now - timedelta(days=min(policy.max_age_days, MAX_RETENTION_DAYS))
         for group in groups.values():
             for entry in group[1:]:
                 dt = _parse_dt(entry.created_at)
